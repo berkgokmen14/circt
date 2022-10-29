@@ -29,5 +29,6 @@
 // DIALECT-NEXT: scf
 // DIALECT-NEXT: seq
 // DIALECT-NEXT: ssp
+// DIALECT-NEXT: stg
 // DIALECT-NEXT: sv
 // DIALECT-NEXT: systemc

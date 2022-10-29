@@ -17,7 +17,7 @@
 #include <memory>
 
 namespace circt {
-namespace pipeline {
+namespace stg {
 
 // std::unique_ptr<mlir::Pass> createExplicitRegsPass();
 
@@ -25,7 +25,7 @@ namespace pipeline {
 #define GEN_PASS_REGISTRATION
 #include "circt/Dialect/STG/STGPasses.h.inc"
 
-} // namespace pipeline
+} // namespace stg
 } // namespace circt
 
 #endif // CIRCT_DIALECT_STG_STGPASSES_H

@@ -10,10 +10,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifdef STG_OPS
-#else
+#ifndef STG_OPS
 #define STG_OPS
-
 
 include "mlir/IR/OpBase.td"
 include "mlir/IR/SymbolInterfaces.td"
@@ -23,7 +21,7 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/IR/EnumAttr.td"
 
-def STG_Dialect : Dialect {
+def STGDialect : Dialect {
   let name = "stg";
   let cppNamespace = "::circt::stg";
 }

@@ -29,6 +29,7 @@
 #include "circt/Dialect/Moore/MooreDialect.h"
 #include "circt/Dialect/Pipeline/Pipeline.h"
 #include "circt/Dialect/SSP/SSPDialect.h"
+#include "circt/Dialect/STG/STG.h"
 #include "circt/Dialect/SV/SVDialect.h"
 #include "circt/Dialect/Seq/SeqDialect.h"
 #include "circt/Dialect/SystemC/SystemCDialect.h"
@@ -55,6 +56,7 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
     seq::SeqDialect,
     ssp::SSPDialect,
     pipeline::PipelineDialect,
+    stg::STGDialect,
     sv::SVDialect,
     hwarith::HWArithDialect,
     systemc::SystemCDialect

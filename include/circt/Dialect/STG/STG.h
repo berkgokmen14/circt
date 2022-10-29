@@ -10,8 +10,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef CIRCT_PIPELINE_OPS_H_
-#define CIRCT_PIPELINE_OPS_H_
+#ifndef CIRCT_STG_OPS_H_
+#define CIRCT_STG_OPS_H_
 
 #include "circt/Support/LLVM.h"
 #include "mlir/IR/Attributes.h"
@@ -34,4 +34,4 @@
 #define GET_OP_CLASSES
 #include "circt/Dialect/STG/STG.h.inc"
 
-#endif // CIRCT_PIPELINE_OPS_H_
+#endif // CIRCT_STG_OPS_H_

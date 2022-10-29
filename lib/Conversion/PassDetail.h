@@ -113,6 +113,10 @@ namespace systemc {
 class SystemCDialect;
 } // namespace systemc
 
+namespace stg {
+class STGDialect;
+} // namespace stg
+
 // Generate the classes which represent the passes
 #define GEN_PASS_CLASSES
 #include "circt/Conversion/Passes.h.inc"

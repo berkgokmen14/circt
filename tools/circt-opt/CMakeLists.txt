@@ -44,6 +44,7 @@ target_link_libraries(circt-opt
   CIRCTHWToSystemC
   CIRCTHWTransforms
   CIRCTSCFToCalyx
+  CIRCTSCFToSTG
   CIRCTScheduling
   CIRCTSchedulingTestPasses
   CIRCTSeq
@@ -51,6 +52,7 @@ target_link_libraries(circt-opt
   CIRCTSSP
   CIRCTStandardToHandshake
   CIRCTPipelineOps
+  CIRCTSTGOps
   CIRCTPipelineToHW
   CIRCTPipelineTransforms
   CIRCTPipelineToCalyx

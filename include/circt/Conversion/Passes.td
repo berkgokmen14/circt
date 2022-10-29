@@ -464,4 +464,24 @@ def InsertMergeBlocks : Pass<"insert-merge-blocks", "::mlir::ModuleOp"> {
   let dependentDialects = ["mlir::cf::ControlFlowDialect", "mlir::func::FuncDialect"];
 }
 
+//===----------------------------------------------------------------------===//
+// SCFToSTG
+//===----------------------------------------------------------------------===//
+
+def SCFToSTG : Pass<"convert-scf-to-stg", "mlir::func::FuncOp"> {
+  let summary = "Convert SCF dialect to scheduled STG";
+  let description = [{
+  }];
+  let constructor = "circt::createSCFToSTGPass()";
+  let dependentDialects = [
+    "circt::pipeline::PipelineDialect",
+    "circt::stg::STGDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::cf::ControlFlowDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
 #endif // CIRCT_CONVERSION_PASSES_TD

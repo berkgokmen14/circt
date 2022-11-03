@@ -80,6 +80,9 @@ LogicalResult scheduleLP(CyclicProblem &prob, Operation *lastOp);
 /// prob does not include \p lastOp.
 LogicalResult scheduleCPSAT(SharedOperatorsProblem &prob, Operation *lastOp);
 
+/// Solve the acyclic problem with shared operators using list scheduling.
+LogicalResult scheduleList(SharedOperatorsProblem &prob, Operation *lastOp);
+
 } // namespace scheduling
 } // namespace circt
 

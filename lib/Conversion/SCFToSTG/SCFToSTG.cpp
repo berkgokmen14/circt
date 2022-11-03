@@ -56,11 +56,11 @@ struct SCFToSTG : public SCFToSTGBase<SCFToSTG> {
 private:
   LogicalResult
   lowerAffineStructures(MemoryDependenceAnalysis &dependenceAnalysis);
-  LogicalResult populateOperatorTypes(SmallVectorImpl<AffineForOp> &loopNest);
-  LogicalResult solveSchedulingProblem(SmallVectorImpl<AffineForOp> &loopNest);
-  LogicalResult createPipelinePipeline(SmallVectorImpl<AffineForOp> &loopNest);
+  LogicalResult populateOperatorTypes(FuncOp &funcOp);
+  LogicalResult solveSchedulingProblem(FuncOp &funcOp);
+  LogicalResult createSTGSTG(FuncOp &funcOp);
 
-  CyclicSchedulingAnalysis *schedulingAnalysis;
+  // CyclicSchedulingAnalysis *schedulingAnalysis;
 };
 
 } // namespace
@@ -70,34 +70,31 @@ void SCFToSTG::runOnOperation() {
   auto dependenceAnalysis = getAnalysis<MemoryDependenceAnalysis>();
 
   // After dependence analysis, materialize affine structures.
-  if (failed(lowerAffineStructures(dependenceAnalysis)))
-    return signalPassFailure();
+  // if (failed(lowerAffineStructures(dependenceAnalysis)))
+  //   return signalPassFailure();
 
   // Get scheduling analysis for the whole function.
-  schedulingAnalysis = &getAnalysis<CyclicSchedulingAnalysis>();
+  // schedulingAnalysis = &getAnalysis<CyclicSchedulingAnalysis>();
 
   // Collect perfectly nested loops and work on them.
-  auto outerLoops = getOperation().getOps<AffineForOp>();
-  for (auto root : llvm::make_early_inc_range(outerLoops)) {
-    SmallVector<AffineForOp> nestedLoops;
-    getPerfectlyNestedLoops(nestedLoops, root);
+  func::FuncOp func = getOperation();
+  // getPerfectlyNestedLoops(nestedLoops, root);
 
-    // Restrict to single loops to simplify things for now.
-    if (nestedLoops.size() != 1)
-      continue;
+  // Restrict to single loops to simplify things for now.
+  // if (nestedLoops.size() != 1)
+  //   continue;
 
-    // Populate the target operator types.
-    if (failed(populateOperatorTypes(nestedLoops)))
-      return signalPassFailure();
+  // Populate the target operator types.
+  if (failed(populateOperatorTypes(func)))
+    return signalPassFailure();
 
-    // Solve the scheduling problem computed by the analysis.
-    if (failed(solveSchedulingProblem(nestedLoops)))
-      return signalPassFailure();
+  // Solve the scheduling problem computed by the analysis.
+  if (failed(solveSchedulingProblem(func)))
+    return signalPassFailure();
 
-    // Convert the IR.
-    if (failed(createPipelinePipeline(nestedLoops)))
-      return signalPassFailure();
-  }
+  // Convert the IR.
+  if (failed(createSTGSTG(func)))
+    return signalPassFailure();
 }
 
 /// Apply the affine map from an 'affine.load' operation to its operands, and
@@ -240,12 +237,12 @@ LogicalResult SCFToSTG::lowerAffineStructures(
 /// well-defined operator latencies. Ultimately, we should move this to a
 /// dialect interface in the Scheduling dialect.
 LogicalResult SCFToSTG::populateOperatorTypes(
-    SmallVectorImpl<AffineForOp> &loopNest) {
+    FuncOp &func) {
   // Scheduling analyis only considers the innermost loop nest for now.
-  auto forOp = loopNest.back();
+  // auto forOp = loopNest.back();
 
   // Retrieve the cyclic scheduling problem for this loop.
-  CyclicProblem &problem = schedulingAnalysis->getProblem(forOp);
+  SharedOperatorsProblem problem = SharedOperatorsProblem::get(func);
 
   // Load the Calyx operator library into the problem. This is a very minimal
   // set of arithmetic and memory operators for now. This should ultimately be
@@ -258,7 +255,7 @@ LogicalResult SCFToSTG::populateOperatorTypes(
   problem.setLatency(mcOpr, 3);
 
   Operation *unsupported;
-  WalkResult result = forOp.getBody()->walk([&](Operation *op) {
+  WalkResult result = func.getBody().walk([&](Operation *op) {
     return TypeSwitch<Operation *, WalkResult>(op)
         .Case<AddIOp, IfOp, AffineYieldOp, arith::ConstantOp, CmpIOp,
               IndexCastOp, memref::AllocaOp, YieldOp>([&](Operation *combOp) {
@@ -286,234 +283,234 @@ LogicalResult SCFToSTG::populateOperatorTypes(
   });
 
   if (result.wasInterrupted())
-    return forOp.emitError("unsupported operation ") << *unsupported;
+    return func.emitError("unsupported operation ") << *unsupported;
 
   return success();
 }
 
 /// Solve the pre-computed scheduling problem.
 LogicalResult SCFToSTG::solveSchedulingProblem(
-    SmallVectorImpl<AffineForOp> &loopNest) {
+    FuncOp &func) {
   // Scheduling analyis only considers the innermost loop nest for now.
-  auto forOp = loopNest.back();
+  // auto forOp = loopNest.back();
 
   // Retrieve the cyclic scheduling problem for this loop.
-  CyclicProblem &problem = schedulingAnalysis->getProblem(forOp);
+  // CyclicProblem &problem = schedulingAnalysis->getProblem(forOp);
 
   // Optionally debug problem inputs.
-  LLVM_DEBUG(forOp.getBody()->walk<WalkOrder::PreOrder>([&](Operation *op) {
-    llvm::dbgs() << "Scheduling inputs for " << *op;
-    auto opr = problem.getLinkedOperatorType(op);
-    llvm::dbgs() << "\n  opr = " << opr;
-    llvm::dbgs() << "\n  latency = " << problem.getLatency(*opr);
-    for (auto dep : problem.getDependences(op))
-      if (dep.isAuxiliary())
-        llvm::dbgs() << "\n  dep = { distance = " << problem.getDistance(dep)
-                     << ", source = " << *dep.getSource() << " }";
-    llvm::dbgs() << "\n\n";
-  }));
+  // LLVM_DEBUG(forOp.getBody()->walk<WalkOrder::PreOrder>([&](Operation *op) {
+  //   llvm::dbgs() << "Scheduling inputs for " << *op;
+  //   auto opr = problem.getLinkedOperatorType(op);
+  //   llvm::dbgs() << "\n  opr = " << opr;
+  //   llvm::dbgs() << "\n  latency = " << problem.getLatency(*opr);
+  //   for (auto dep : problem.getDependences(op))
+  //     if (dep.isAuxiliary())
+  //       llvm::dbgs() << "\n  dep = { distance = " << problem.getDistance(dep)
+  //                    << ", source = " << *dep.getSource() << " }";
+  //   llvm::dbgs() << "\n\n";
+  // }));
 
   // Verify and solve the problem.
-  if (failed(problem.check()))
-    return failure();
+  // if (failed(problem.check()))
+  //   return failure();
 
-  auto *anchor = forOp.getBody()->getTerminator();
-  if (failed(scheduleSimplex(problem, anchor)))
-    return failure();
+  // auto *anchor = forOp.getBody()->getTerminator();
+  // if (failed(scheduleSimplex(problem, anchor)))
+  //   return failure();
 
   // Verify the solution.
-  if (failed(problem.verify()))
-    return failure();
+  // if (failed(problem.verify()))
+  //   return failure();
 
   // Optionally debug problem outputs.
-  LLVM_DEBUG({
-    llvm::dbgs() << "Scheduled initiation interval = "
-                 << problem.getInitiationInterval() << "\n\n";
-    forOp.getBody()->walk<WalkOrder::PreOrder>([&](Operation *op) {
-      llvm::dbgs() << "Scheduling outputs for " << *op;
-      llvm::dbgs() << "\n  start = " << problem.getStartTime(op);
-      llvm::dbgs() << "\n\n";
-    });
-  });
+  // LLVM_DEBUG({
+  //   llvm::dbgs() << "Scheduled initiation interval = "
+  //                << problem.getInitiationInterval() << "\n\n";
+  //   forOp.getBody()->walk<WalkOrder::PreOrder>([&](Operation *op) {
+  //     llvm::dbgs() << "Scheduling outputs for " << *op;
+  //     llvm::dbgs() << "\n  start = " << problem.getStartTime(op);
+  //     llvm::dbgs() << "\n\n";
+  //   });
+  // });
 
   return success();
 }
 
 /// Create the pipeline op for a loop nest.
-LogicalResult SCFToSTG::createPipelinePipeline(
-    SmallVectorImpl<AffineForOp> &loopNest) {
-  // Scheduling analyis only considers the innermost loop nest for now.
-  auto forOp = loopNest.back();
+LogicalResult SCFToSTG::createSTGSTG(
+    FuncOp &func) {
+  // // Scheduling analyis only considers the innermost loop nest for now.
+  // auto forOp = loopNest.back();
 
-  // Retrieve the cyclic scheduling problem for this loop.
-  CyclicProblem &problem = schedulingAnalysis->getProblem(forOp);
+  // // Retrieve the cyclic scheduling problem for this loop.
+  // CyclicProblem &problem = schedulingAnalysis->getProblem(forOp);
 
-  auto outerLoop = loopNest.front();
-  auto innerLoop = loopNest.back();
-  ImplicitLocOpBuilder builder(outerLoop.getLoc(), outerLoop);
+  // auto outerLoop = loopNest.front();
+  // auto innerLoop = loopNest.back();
+  // ImplicitLocOpBuilder builder(outerLoop.getLoc(), outerLoop);
 
-  // Create Values for the loop's lower and upper bounds.
-  Value lowerBound = lowerAffineLowerBound(innerLoop, builder);
-  Value upperBound = lowerAffineUpperBound(innerLoop, builder);
-  int64_t stepValue = innerLoop.getStep();
-  auto step = builder.create<arith::ConstantOp>(
-      IntegerAttr::get(builder.getIndexType(), stepValue));
+  // // Create Values for the loop's lower and upper bounds.
+  // Value lowerBound = lowerAffineLowerBound(innerLoop, builder);
+  // Value upperBound = lowerAffineUpperBound(innerLoop, builder);
+  // int64_t stepValue = innerLoop.getStep();
+  // auto step = builder.create<arith::ConstantOp>(
+  //     IntegerAttr::get(builder.getIndexType(), stepValue));
 
-  // Create the pipeline op, with the same result types as the inner loop. An
-  // iter arg is created for the induction variable.
-  TypeRange resultTypes = innerLoop.getResultTypes();
+  // // Create the pipeline op, with the same result types as the inner loop. An
+  // // iter arg is created for the induction variable.
+  // TypeRange resultTypes = innerLoop.getResultTypes();
 
-  auto ii = builder.getI64IntegerAttr(problem.getInitiationInterval().value());
+  // auto ii = builder.getI64IntegerAttr(problem.getInitiationInterval().value());
 
-  SmallVector<Value> iterArgs;
-  iterArgs.push_back(lowerBound);
-  iterArgs.append(innerLoop.getIterOperands().begin(),
-                  innerLoop.getIterOperands().end());
+  // SmallVector<Value> iterArgs;
+  // iterArgs.push_back(lowerBound);
+  // iterArgs.append(innerLoop.getIterOperands().begin(),
+  //                 innerLoop.getIterOperands().end());
 
-  // If possible, attach a constant trip count attribute. This could be
-  // generalized to support non-constant trip counts by supporting an AffineMap.
-  Optional<IntegerAttr> tripCountAttr;
-  if (auto tripCount = getConstantTripCount(forOp))
-    tripCountAttr = builder.getI64IntegerAttr(*tripCount);
+  // // If possible, attach a constant trip count attribute. This could be
+  // // generalized to support non-constant trip counts by supporting an AffineMap.
+  // Optional<IntegerAttr> tripCountAttr;
+  // if (auto tripCount = getConstantTripCount(forOp))
+  //   tripCountAttr = builder.getI64IntegerAttr(*tripCount);
 
-  auto pipeline =
-      builder.create<PipelineWhileOp>(resultTypes, ii, tripCountAttr, iterArgs);
+  // auto pipeline =
+  //     builder.create<PipelineWhileOp>(resultTypes, ii, tripCountAttr, iterArgs);
 
-  // Create the condition, which currently just compares the induction variable
-  // to the upper bound.
-  Block &condBlock = pipeline.getCondBlock();
-  builder.setInsertionPointToStart(&condBlock);
-  auto cmpResult = builder.create<arith::CmpIOp>(
-      builder.getI1Type(), arith::CmpIPredicate::ult, condBlock.getArgument(0),
-      upperBound);
-  condBlock.getTerminator()->insertOperands(0, {cmpResult});
+  // // Create the condition, which currently just compares the induction variable
+  // // to the upper bound.
+  // Block &condBlock = pipeline.getCondBlock();
+  // builder.setInsertionPointToStart(&condBlock);
+  // auto cmpResult = builder.create<arith::CmpIOp>(
+  //     builder.getI1Type(), arith::CmpIPredicate::ult, condBlock.getArgument(0),
+  //     upperBound);
+  // condBlock.getTerminator()->insertOperands(0, {cmpResult});
 
-  // Add the non-yield operations to their start time groups.
-  DenseMap<unsigned, SmallVector<Operation *>> startGroups;
-  for (auto *op : problem.getOperations()) {
-    if (isa<AffineYieldOp, YieldOp>(op))
-      continue;
-    auto startTime = problem.getStartTime(op);
-    startGroups[*startTime].push_back(op);
-  }
+  // // Add the non-yield operations to their start time groups.
+  // DenseMap<unsigned, SmallVector<Operation *>> startGroups;
+  // for (auto *op : problem.getOperations()) {
+  //   if (isa<AffineYieldOp, YieldOp>(op))
+  //     continue;
+  //   auto startTime = problem.getStartTime(op);
+  //   startGroups[*startTime].push_back(op);
+  // }
 
-  // Maintain mappings of values in the loop body and results of stages,
-  // initially populated with the iter args.
-  BlockAndValueMapping valueMap;
-  for (size_t i = 0; i < iterArgs.size(); ++i)
-    valueMap.map(forOp.getBody()->getArgument(i),
-                 pipeline.getStagesBlock().getArgument(i));
+  // // Maintain mappings of values in the loop body and results of stages,
+  // // initially populated with the iter args.
+  // BlockAndValueMapping valueMap;
+  // for (size_t i = 0; i < iterArgs.size(); ++i)
+  //   valueMap.map(forOp.getBody()->getArgument(i),
+  //                pipeline.getStagesBlock().getArgument(i));
 
-  // Create the stages.
-  Block &stagesBlock = pipeline.getStagesBlock();
-  builder.setInsertionPointToStart(&stagesBlock);
+  // // Create the stages.
+  // Block &stagesBlock = pipeline.getStagesBlock();
+  // builder.setInsertionPointToStart(&stagesBlock);
 
-  // Iterate in order of the start times.
-  SmallVector<unsigned> startTimes;
-  for (auto group : startGroups)
-    startTimes.push_back(group.first);
-  llvm::sort(startTimes);
+  // // Iterate in order of the start times.
+  // SmallVector<unsigned> startTimes;
+  // for (auto group : startGroups)
+  //   startTimes.push_back(group.first);
+  // llvm::sort(startTimes);
 
-  DominanceInfo dom(getOperation());
-  for (auto startTime : startTimes) {
-    auto group = startGroups[startTime];
-    OpBuilder::InsertionGuard g(builder);
+  // DominanceInfo dom(getOperation());
+  // for (auto startTime : startTimes) {
+  //   auto group = startGroups[startTime];
+  //   OpBuilder::InsertionGuard g(builder);
 
-    // Collect the return types for this stage. Operations whose results are not
-    // used within this stage are returned.
-    auto isLoopTerminator = [forOp](Operation *op) {
-      return isa<AffineYieldOp>(op) && op->getParentOp() == forOp;
-    };
-    SmallVector<Type> stageTypes;
-    DenseSet<Operation *> opsWithReturns;
-    for (auto *op : group) {
-      for (auto *user : op->getUsers()) {
-        if (*problem.getStartTime(user) > startTime || isLoopTerminator(user)) {
-          opsWithReturns.insert(op);
-          stageTypes.append(op->getResultTypes().begin(),
-                            op->getResultTypes().end());
-        }
-      }
-    }
+  //   // Collect the return types for this stage. Operations whose results are not
+  //   // used within this stage are returned.
+  //   auto isLoopTerminator = [forOp](Operation *op) {
+  //     return isa<AffineYieldOp>(op) && op->getParentOp() == forOp;
+  //   };
+  //   SmallVector<Type> stageTypes;
+  //   DenseSet<Operation *> opsWithReturns;
+  //   for (auto *op : group) {
+  //     for (auto *user : op->getUsers()) {
+  //       if (*problem.getStartTime(user) > startTime || isLoopTerminator(user)) {
+  //         opsWithReturns.insert(op);
+  //         stageTypes.append(op->getResultTypes().begin(),
+  //                           op->getResultTypes().end());
+  //       }
+  //     }
+  //   }
 
-    // Add the induction variable increment in the first stage.
-    if (startTime == 0)
-      stageTypes.push_back(lowerBound.getType());
+  //   // Add the induction variable increment in the first stage.
+  //   if (startTime == 0)
+  //     stageTypes.push_back(lowerBound.getType());
 
-    // Create the stage itself.
-    auto startTimeAttr = builder.getIntegerAttr(
-        builder.getIntegerType(64, /*isSigned=*/true), startTime);
-    auto stage =
-        builder.create<PipelineWhileStageOp>(stageTypes, startTimeAttr);
-    auto &stageBlock = stage.getBodyBlock();
-    auto *stageTerminator = stageBlock.getTerminator();
-    builder.setInsertionPointToStart(&stageBlock);
+  //   // Create the stage itself.
+  //   auto startTimeAttr = builder.getIntegerAttr(
+  //       builder.getIntegerType(64, /*isSigned=*/true), startTime);
+  //   auto stage =
+  //       builder.create<PipelineWhileStageOp>(stageTypes, startTimeAttr);
+  //   auto &stageBlock = stage.getBodyBlock();
+  //   auto *stageTerminator = stageBlock.getTerminator();
+  //   builder.setInsertionPointToStart(&stageBlock);
 
-    // Sort the group according to original dominance.
-    llvm::sort(group,
-               [&](Operation *a, Operation *b) { return dom.dominates(a, b); });
+  //   // Sort the group according to original dominance.
+  //   llvm::sort(group,
+  //              [&](Operation *a, Operation *b) { return dom.dominates(a, b); });
 
-    // Move over the operations and add their results to the terminator.
-    SmallVector<std::tuple<Operation *, Operation *, unsigned>> movedOps;
-    for (auto *op : group) {
-      unsigned resultIndex = stageTerminator->getNumOperands();
-      auto *newOp = builder.clone(*op, valueMap);
-      if (opsWithReturns.contains(op)) {
-        stageTerminator->insertOperands(resultIndex, newOp->getResults());
-        movedOps.emplace_back(op, newOp, resultIndex);
-      }
-    }
+  //   // Move over the operations and add their results to the terminator.
+  //   SmallVector<std::tuple<Operation *, Operation *, unsigned>> movedOps;
+  //   for (auto *op : group) {
+  //     unsigned resultIndex = stageTerminator->getNumOperands();
+  //     auto *newOp = builder.clone(*op, valueMap);
+  //     if (opsWithReturns.contains(op)) {
+  //       stageTerminator->insertOperands(resultIndex, newOp->getResults());
+  //       movedOps.emplace_back(op, newOp, resultIndex);
+  //     }
+  //   }
 
-    // Add the stage results to the value map for the original op.
-    for (auto tuple : movedOps) {
-      Operation *op = std::get<0>(tuple);
-      Operation *newOp = std::get<1>(tuple);
-      unsigned resultIndex = std::get<2>(tuple);
-      for (size_t i = 0; i < newOp->getNumResults(); ++i) {
-        auto newValue = stage->getResult(resultIndex + i);
-        auto oldValue = op->getResult(i);
-        valueMap.map(oldValue, newValue);
-      }
-    }
+  //   // Add the stage results to the value map for the original op.
+  //   for (auto tuple : movedOps) {
+  //     Operation *op = std::get<0>(tuple);
+  //     Operation *newOp = std::get<1>(tuple);
+  //     unsigned resultIndex = std::get<2>(tuple);
+  //     for (size_t i = 0; i < newOp->getNumResults(); ++i) {
+  //       auto newValue = stage->getResult(resultIndex + i);
+  //       auto oldValue = op->getResult(i);
+  //       valueMap.map(oldValue, newValue);
+  //     }
+  //   }
 
-    // Add the induction variable increment to the first stage.
-    if (startTime == 0) {
-      auto incResult =
-          builder.create<arith::AddIOp>(stagesBlock.getArgument(0), step);
-      stageTerminator->insertOperands(stageTerminator->getNumOperands(),
-                                      incResult->getResults());
-    }
-  }
+  //   // Add the induction variable increment to the first stage.
+  //   if (startTime == 0) {
+  //     auto incResult =
+  //         builder.create<arith::AddIOp>(stagesBlock.getArgument(0), step);
+  //     stageTerminator->insertOperands(stageTerminator->getNumOperands(),
+  //                                     incResult->getResults());
+  //   }
+  // }
 
-  // Add the iter args and results to the terminator.
-  auto stagesTerminator =
-      cast<PipelineTerminatorOp>(stagesBlock.getTerminator());
+  // // Add the iter args and results to the terminator.
+  // auto stagesTerminator =
+  //     cast<PipelineTerminatorOp>(stagesBlock.getTerminator());
 
-  // Collect iter args and results from the induction variable increment and any
-  // mapped values that were originally yielded.
-  SmallVector<Value> termIterArgs;
-  SmallVector<Value> termResults;
-  termIterArgs.push_back(
-      stagesBlock.front().getResult(stagesBlock.front().getNumResults() - 1));
-  for (auto value : forOp.getBody()->getTerminator()->getOperands()) {
-    termIterArgs.push_back(valueMap.lookup(value));
-    termResults.push_back(valueMap.lookup(value));
-  }
+  // // Collect iter args and results from the induction variable increment and any
+  // // mapped values that were originally yielded.
+  // SmallVector<Value> termIterArgs;
+  // SmallVector<Value> termResults;
+  // termIterArgs.push_back(
+  //     stagesBlock.front().getResult(stagesBlock.front().getNumResults() - 1));
+  // for (auto value : forOp.getBody()->getTerminator()->getOperands()) {
+  //   termIterArgs.push_back(valueMap.lookup(value));
+  //   termResults.push_back(valueMap.lookup(value));
+  // }
 
-  stagesTerminator.getIterArgsMutable().append(termIterArgs);
-  stagesTerminator.getResultsMutable().append(termResults);
+  // stagesTerminator.getIterArgsMutable().append(termIterArgs);
+  // stagesTerminator.getResultsMutable().append(termResults);
 
-  // Replace loop results with pipeline results.
-  for (size_t i = 0; i < forOp.getNumResults(); ++i)
-    forOp.getResult(i).replaceAllUsesWith(pipeline.getResult(i));
+  // // Replace loop results with pipeline results.
+  // for (size_t i = 0; i < forOp.getNumResults(); ++i)
+  //   forOp.getResult(i).replaceAllUsesWith(pipeline.getResult(i));
 
-  // Remove the loop nest from the IR.
-  loopNest.front().walk([](Operation *op) {
-    op->dropAllUses();
-    op->dropAllDefinedValueUses();
-    op->dropAllReferences();
-    op->erase();
-  });
+  // // Remove the loop nest from the IR.
+  // loopNest.front().walk([](Operation *op) {
+  //   op->dropAllUses();
+  //   op->dropAllDefinedValueUses();
+  //   op->dropAllReferences();
+  //   op->erase();
+  // });
 
   return success();
 }

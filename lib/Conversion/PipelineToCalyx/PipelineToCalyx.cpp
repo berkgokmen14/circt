@@ -857,7 +857,7 @@ class BuildWhileGroups : public calyx::FuncOpPartialLoweringPattern {
       /// - In the "before" part of the while loop, calculating the conditional,
       /// - In the "after" part of the while loop,
       /// - Outside the while loop, rewriting the while loop return values.
-      for (auto arg : enumerate(whileOp.getBodyArgs())) {
+      for (const auto& arg : enumerate(whileOp.getBodyArgs())) {
         std::string name = getState<ComponentLoweringState>()
                                .getUniqueName(whileOp.getOperation())
                                .str() +
@@ -868,6 +868,16 @@ class BuildWhileGroups : public calyx::FuncOpPartialLoweringPattern {
         getState<ComponentLoweringState>().addLoopIterReg(whileOp, reg,
                                                           arg.index());
         arg.value().replaceAllUsesWith(reg.getOut());
+
+        Block *block = op->getBlock();
+        auto groupName = getState<ComponentLoweringState>().getUniqueName(
+            loweringState().blockName(block));
+        auto group = calyx::createGroup<calyx::CombGroupOp>(
+            rewriter, getState<ComponentLoweringState>().getComponentOp(),
+            op->getLoc(), groupName);
+
+        // Register the values for the pipeline.
+        getState<ComponentLoweringState>().registerEvaluatingGroup(reg.getOut(), group);
 
         /// Also replace uses in the "before" region of the while loop
         whileOp.getConditionBlock()
@@ -1089,9 +1099,12 @@ class BuildPipelineGroups : public calyx::FuncOpPartialLoweringPattern {
         pipelineRegister, value);
 
     // Mark the new group as the evaluating group.
-    for (auto assign : group.getOps<calyx::AssignOp>())
-      getState<ComponentLoweringState>().registerEvaluatingGroup(
-          assign.getSrc(), group);
+    for (auto assign : group.getOps<calyx::AssignOp>()) {
+      auto *src = assign.getSrc().getDefiningOp();
+      if (!isa<calyx::RegisterOp>(*src))
+        getState<ComponentLoweringState>().registerEvaluatingGroup(
+            assign.getSrc(), group);
+    }
 
     return group;
   }
@@ -1118,7 +1131,7 @@ class BuildPipelineGroups : public calyx::FuncOpPartialLoweringPattern {
     doneOp.getSrcMutable().assign(pipelineRegister.getDone());
 
     // Remove the old register completely.
-    rewriter.eraseOp(tempReg);
+    // rewriter.eraseOp(tempReg);
 
     return group;
   }

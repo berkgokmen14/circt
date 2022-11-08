@@ -408,12 +408,13 @@ LogicalResult AffineToPipeline::createPipelinePipeline(
 
   // Iterate in order of the start times.
   SmallVector<unsigned> startTimes;
-  for (auto group : startGroups)
+  for (const auto& group : startGroups)
     startTimes.push_back(group.first);
   llvm::sort(startTimes);
 
   DominanceInfo dom(getOperation());
-  for (auto startTime : startTimes) {
+  for (const auto& i : enumerate(startTimes)) {
+    auto startTime = i.value();
     auto group = startGroups[startTime];
     OpBuilder::InsertionGuard g(builder);
 
@@ -433,6 +434,10 @@ LogicalResult AffineToPipeline::createPipelinePipeline(
         }
       }
     }
+
+    // Add induction variable passthrough.
+    if (i.index() < startTimes.size() - 1)
+      stageTypes.push_back(lowerBound.getType());
 
     // Add the induction variable increment in the first stage.
     if (startTime == 0)
@@ -474,12 +479,19 @@ LogicalResult AffineToPipeline::createPipelinePipeline(
       }
     }
 
+    if (i.index() < startTimes.size() - 1)
+      stageTerminator->insertOperands(stageTerminator->getNumOperands(),
+                                      stagesBlock.getArgument(0));
+
     // Add the induction variable increment to the first stage.
     if (startTime == 0) {
       auto incResult =
           builder.create<arith::AddIOp>(stagesBlock.getArgument(0), step);
       stageTerminator->insertOperands(stageTerminator->getNumOperands(),
                                       incResult->getResults());
+      auto operandNum = stageTerminator->getNumOperands() - 2;
+      auto iterArg = stage->getResult(operandNum);
+      valueMap.map(innerLoop.getLoopBody().getArgument(0), iterArg);
     }
   }
 

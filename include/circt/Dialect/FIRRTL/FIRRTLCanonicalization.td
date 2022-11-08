@@ -15,16 +15,16 @@
 
 include "circt/Dialect/FIRRTL/FIRRTL.td"
 
-/// Constraint that matches a ConstantOp, SpecialConstantOp, or InvalidValueOp.
+/// Constraint that matches a ConstantOp, SpecialConstantOp, AggregateConstantOp, or InvalidValueOp.
 def AnyConstantOp : Constraint<CPred<[{
-  isa_and_nonnull<ConstantOp, SpecialConstantOp, InvalidValueOp>
+  isa_and_nonnull<ConstantOp, SpecialConstantOp, InvalidValueOp, AggregateConstantOp>
     ($0.getDefiningOp())
   }]>>;
 
 /// Constraint that matches non-constant operations. Used to ensure that the
 /// const-on-LHS rewriting patterns converge in case both operands are constant.
 def NonConstantOp : Constraint<CPred<[{
-  !isa_and_nonnull<ConstantOp, SpecialConstantOp, InvalidValueOp>
+  !isa_and_nonnull<ConstantOp, SpecialConstantOp, InvalidValueOp, AggregateConstantOp>
     ($0.getDefiningOp())
   }]>>;
 
@@ -52,6 +52,14 @@ def ZeroConstantOp : Constraint<Or<[
         "$0.getDefiningOp<ConstantOp>().getValue().isZero()">,
   CPred<"$0.getDefiningOp<SpecialConstantOp>() &&"
         "$0.getDefiningOp<SpecialConstantOp>().getValue() == false">
+]>>;
+
+/// Constraint that matches a one ConstantOp or SpecialConstantOp.
+def OneConstantOp : Constraint<Or<[
+  CPred<"$0.getDefiningOp<ConstantOp>() &&"
+        "$0.getDefiningOp<ConstantOp>().getValue().isOne()">,
+  CPred<"$0.getDefiningOp<SpecialConstantOp>() &&"
+        "$0.getDefiningOp<SpecialConstantOp>().getValue() == true">
 ]>>;
 
 def GetEmptyString : NativeCodeCall<
@@ -95,23 +103,15 @@ def MuxSameCondHigh : Pat<
     (EqualTypes $x, $y), (EqualTypes $x, $z), (KnownWidth $x)
   ]>;
 
-// regreset(clock, invalidvalue, resetValue) -> reg(clock)
-def RegResetWithInvalidReset : Pat<
-  (RegResetOp $clock, (InvalidValueOp), $_, $name, $nameKind , $annotations, $inner_sym),
-  (RegOp $clock, $name, $nameKind, $annotations, $inner_sym),
-  []>;
-
-// regreset(clock, reset, invalidvalue) -> reg(clock)
-// This is handled by the `RemoveReset` pass in the original Scala code.
-def RegResetWithInvalidResetValue : Pat<
-  (RegResetOp $clock, $_, (InvalidValueOp), $name, $nameKind, $annotations, $inner_sym),
-  (RegOp $clock, $name, $nameKind, $annotations, $inner_sym),
-  []>;
-
 // regreset(clock, constant_zero, resetValue) -> reg(clock)
 def RegResetWithZeroReset : Pat<
   (RegResetOp $clock, $reset, $_, $name, $nameKind, $annotations, $inner_sym),
   (RegOp $clock, $name, $nameKind, $annotations, $inner_sym), [(ZeroConstantOp $reset)]>;
+
+// regreset(clock, constant_one, resetValue) -> reg(clock)
+def RegResetWithOneReset : Pat<
+  (RegResetOp $clock, $reset, $resetVal, $name, $nameKind, $annotations, $inner_sym),
+  (NodeOp $resetVal, $name, $nameKind, $annotations, $inner_sym), [(OneConstantOp $reset)]>;
 
 // Return the width of an operation result as an integer attribute.  This is
 // useful to pad another operation up to the width of the original operation.

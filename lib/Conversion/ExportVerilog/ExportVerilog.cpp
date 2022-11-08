@@ -1356,14 +1356,17 @@ static bool printPackedTypeImpl(Type type, raw_ostream &os, Location loc,
         return true;
       })
       .Case<StructType>([&](StructType structType) {
-        if (structType.getElements().empty()) {
-          if (!implicitIntType)
-            os << "logic ";
+        if (structType.getElements().empty() || isZeroBitType(structType)) {
           os << "/*Zero Width*/";
           return true;
         }
         os << "struct packed {";
         for (auto &element : structType.getElements()) {
+          if (isZeroBitType(element.type)) {
+            os << "/*" << emitter.getVerilogStructFieldName(element.name)
+               << ": Zero Width;*/ ";
+            continue;
+          }
           SmallVector<Attribute, 8> structDims;
           printPackedTypeImpl(stripUnpackedTypes(element.type), os, loc,
                               structDims,
@@ -2487,11 +2490,21 @@ SubExprInfo ExprEmitter::visitTypeOp(StructCreateOp op) {
 
   StructType stype = op.getType();
   os << "'{";
-  size_t i = 0;
+  // Only emit elements with non-zero bit width.
+  // TODO: Ideally we should emit zero bit values as comments, e.g. `{/*a:
+  // ZeroBit,*/ b: foo, /* c: ZeroBit*/ d: bar}`. However it's tedious to nicely
+  // emit all edge cases hence currently we just elide zero bit values.
   llvm::interleaveComma(
-      stype.getElements(), os, [&](const StructType::FieldInfo &field) {
+      llvm::make_filter_range(llvm::zip(stype.getElements(), op.getOperands()),
+                              [](const auto &fieldAndOperand) {
+                                // Elide zero bit elements.
+                                const auto &[field, _] = fieldAndOperand;
+                                return !isZeroBitType(field.type);
+                              }),
+      os, [&](const auto &fieldAndOperand) {
+        const auto &[field, operand] = fieldAndOperand;
         os << emitter.getVerilogStructFieldName(field.name) << ": ";
-        emitSubExpr(op.getOperand(i++), Selection);
+        emitSubExpr(operand, Selection);
       });
   os << '}';
   return {Unary, IsUnsigned};
@@ -2512,8 +2525,12 @@ SubExprInfo ExprEmitter::visitTypeOp(StructInjectOp op) {
 
   StructType stype = op.getType().cast<StructType>();
   os << "'{";
+  // Only emit elements with non-zero bit width.
   llvm::interleaveComma(
-      stype.getElements(), os, [&](const StructType::FieldInfo &field) {
+      llvm::make_filter_range(
+          stype.getElements(),
+          [](const auto &field) { return !isZeroBitType(field.type); }),
+      os, [&](const StructType::FieldInfo &field) {
         os << emitter.getVerilogStructFieldName(field.name) << ": ";
         if (field.name == op.getField()) {
           emitSubExpr(op.getNewValue(), Selection);
@@ -2737,6 +2754,8 @@ private:
   LogicalResult visitSV(ErrorOp op);
   LogicalResult visitSV(WarningOp op);
   LogicalResult visitSV(InfoOp op);
+
+  LogicalResult visitSV(ReadMemOp op);
 
   LogicalResult visitSV(GenerateOp op);
   LogicalResult visitSV(GenerateCaseOp op);
@@ -3156,6 +3175,34 @@ LogicalResult StmtEmitter::visitSV(InfoOp op) {
                                  op.getSubstitutions());
 }
 
+LogicalResult StmtEmitter::visitSV(ReadMemOp op) {
+  SmallPtrSet<Operation *, 8> ops({op});
+
+  indent() << "$readmem";
+  switch (op.getBaseAttr().getValue()) {
+  case MemBaseTypeAttr::MemBaseBin:
+    os << "b";
+    break;
+  case MemBaseTypeAttr::MemBaseHex:
+    os << "h";
+    break;
+  }
+  os << "(";
+  os << "\"" << op.getFilename() << "\""
+     << ", ";
+
+  auto *reg =
+      state.symbolCache
+          .getInnerDefinition(op->getParentOfType<HWModuleOp>().getNameAttr(),
+                              op.getInnerSymAttr())
+          .getOp();
+  os << names.getName(reg);
+
+  os << ");";
+  emitLocationInfoAndNewLine(ops);
+  return success();
+}
+
 LogicalResult StmtEmitter::visitSV(GenerateOp op) {
   if (hasSVAttributes(op))
     emitError(op, "SV attributes emission is unimplemented for the op");
@@ -3191,8 +3238,7 @@ LogicalResult StmtEmitter::visitSV(GenerateCaseOp op) {
   // TODO: We'll probably need to store the legalized names somewhere for
   // `verbose` formatting. Set up the infra for storing names recursively. Just
   // store this locally for now.
-  llvm::StringSet<> usedNames;
-  size_t nextGenID = 0;
+  llvm::StringMap<size_t> nextGenIds;
 
   // Emit each case.
   for (size_t i = 0, e = patterns.size(); i < e; ++i) {
@@ -3208,8 +3254,8 @@ LogicalResult StmtEmitter::visitSV(GenerateCaseOp op) {
           patternAttr, os, VerilogPrecedence::LowestPrecedence,
           [&]() { return op->emitOpError("invalid case value"); });
 
-    StringRef legalName = legalizeName(
-        caseNames[i].cast<StringAttr>().getValue(), usedNames, nextGenID);
+    StringRef legalName =
+        legalizeName(caseNames[i].cast<StringAttr>().getValue(), nextGenIds);
     os << ": begin: " << legalName << "\n";
     emitStatementBlock(region.getBlocks().front());
     indent() << "end: " << legalName << "\n";
@@ -3681,7 +3727,8 @@ LogicalResult StmtEmitter::visitStmt(InstanceOp op) {
   // Get the max port name length so we can align the '('.
   size_t maxNameLength = 0;
   for (auto &elt : portInfo) {
-    maxNameLength = std::max(maxNameLength, elt.getName().size());
+    maxNameLength =
+        std::max(maxNameLength, getPortVerilogName(moduleOp, elt).size());
   }
 
   auto getWireForValue = [&](Value result) {
@@ -3738,8 +3785,9 @@ LogicalResult StmtEmitter::visitStmt(InstanceOp op) {
       os << "//";
     }
 
-    os << '.' << getPortVerilogName(moduleOp, elt);
-    os.indent(maxNameLength - elt.getName().size()) << " (";
+    auto portName = getPortVerilogName(moduleOp, elt);
+    os << '.' << portName;
+    os.indent(maxNameLength - portName.size()) << " (";
 
     // Emit the value as an expression.
     ops.clear();
@@ -3748,7 +3796,10 @@ LogicalResult StmtEmitter::visitStmt(InstanceOp op) {
     // lowered to wire.
     OutputOp output;
     if (!elt.isOutput()) {
-      emitExpression(portVal, ops, LowestPrecedence);
+      if (isZeroWidth && isa_and_nonnull<ConstantOp>(portVal.getDefiningOp()))
+        os << "/* Zero width */";
+      else
+        emitExpression(portVal, ops, LowestPrecedence);
     } else if (portVal.hasOneUse() &&
                (output = dyn_cast_or_null<OutputOp>(
                     portVal.getUses().begin()->getOwner()))) {

@@ -165,7 +165,7 @@ def SCFToCalyx : Pass<"lower-scf-to-calyx", "mlir::ModuleOp"> {
 // PipelineToCalyx
 //===----------------------------------------------------------------------===//
 
-def PipelineToCalyx : Pass<"lower-static-logic-to-calyx", "mlir::ModuleOp"> {
+def PipelineToCalyx : Pass<"lower-pipeline-to-calyx", "mlir::ModuleOp"> {
   let summary = "Lower Pipeline to Calyx";
   let description = [{
     This pass lowers Pipeline to Calyx.

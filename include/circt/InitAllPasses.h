@@ -20,6 +20,7 @@
 #include "circt/Dialect/ESI/ESIDialect.h"
 #include "circt/Dialect/FIRRTL/Passes.h"
 #include "circt/Dialect/FSM/FSMPasses.h"
+#include "circt/Dialect/HLS/HLSPasses.h"
 #include "circt/Dialect/HW/HWPasses.h"
 #include "circt/Dialect/Handshake/HandshakePasses.h"
 #include "circt/Dialect/LLHD/Transforms/Passes.h"
@@ -49,6 +50,7 @@ inline void registerAllPasses() {
   seq::registerPasses();
   sv::registerPasses();
   handshake::registerPasses();
+  hls::registerPasses();
   hw::registerPasses();
   pipeline::registerPasses();
   systemc::registerPasses();

@@ -16,6 +16,7 @@ target_link_libraries(circt-reduce
   CIRCTFIRRTLTransforms
   CIRCTFSM
   CIRCTHandshake
+  CIRCTHLS
   CIRCTInteropDialect
   CIRCTLLHD
   CIRCTMoore

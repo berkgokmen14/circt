@@ -20,10 +20,185 @@ include "mlir/Interfaces/CallInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/IR/EnumAttr.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/LoopLikeInterface.td"
+include "mlir/IR/RegionKindInterface.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
 
 def STGDialect : Dialect {
   let name = "stg";
   let cppNamespace = "::circt::stg";
+}
+
+/// Base class for the operation in this dialect.
+class STGOp<string mnemonic, list<Trait> traits = []> :
+  Op<STGDialect, mnemonic, traits>;
+
+/// Base class for STG containers.
+class STGContainer<string mnemonic, list<Trait> traits = []> :
+  STGOp<mnemonic, !listconcat(traits, [
+    NoRegionArguments,
+    NoTerminator,
+    SingleBlock
+  ])> {
+  let results = (outs
+    Variadic<AnyType>:$results
+  );
+  let regions = (region SizedRegion<1>: $body);
+
+  let assemblyFormat = "$body attr-dict ( `:` type($results)^)?";
+
+  let extraClassDeclaration = [{
+    /// Returns the body of a Calyx container.
+    Block *getBodyBlock() {
+      Region* region = &getOperation()->getRegion(0);
+      assert(region->hasOneBlock() && "The body should have one Block.");
+      return &region->front();
+    }
+  }];
+}
+
+/* def ConditionOp : STGOp<"condition", [ */
+/*   HasParent<"stg::WhileCondOp">, */
+/*   DeclareOpInterfaceMethods<RegionBranchTerminatorOpInterface>, */
+/*   Pure, */
+/*   Terminator */
+/* ]> { */
+/*   let summary = "loop continuation condition"; */
+/*   let description = [{ */
+/*   }]; */
+
+/*   let arguments = (ins I1:$condition, Variadic<AnyType>:$results); */
+
+/*   let assemblyFormat = */
+/*       [{ `(` $condition `)` attr-dict ($results^ `:` type($results))? }]; */
+/* } */
+
+def STGStepOp : STGOp<"step",
+    [ParentOneOf<["STGWhileOp", "mlir::func::FuncOp"]>]> {
+  let summary = "STG dialect schedule step.";
+  let description = [{
+  }];
+
+  let arguments = (ins
+    SI64Attr:$start,
+    Optional<I1>:$when
+  );
+
+  let results = (outs
+    Variadic<AnyType>:$results
+  );
+
+  let regions = (region
+    SizedRegion<1>:$body
+  );
+
+  let assemblyFormat = [{
+    `start` `=` $start (`when` $when^)? $body (`:` qualified(type($results))^)? attr-dict
+  }];
+
+  let hasVerifier = 1;
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::TypeRange":$resultTypes, "mlir::IntegerAttr":$start)>
+  ];
+
+  let extraClassDeclaration = [{
+    Block &getBodyBlock() { return getBody().front(); }
+    unsigned getStepNumber();
+  }];
+}
+
+def STGTerminatorOp : STGOp<"terminator",
+    [HasParent<"STGWhileOp">, Terminator, AttrSizedOperandSegments]> {
+  let summary = "Pipeline dialect pipeline terminator.";
+  let description = [{
+    The `pipeline.terminator` operation represents the terminator of
+    a `pipeline.while`.
+
+    The `results` section accepts a variadic list of values which become the
+    pipeline’s return values. These must be results of a stage, and their types
+    must match the pipeline's return types. The results need not be defined in
+    the final stage, and it is up to lowering passes to preserve these values
+    until the final stage is complete.
+
+    The `iter_args` section accepts a variadic list of values which become the
+    next iteration’s `iter_args`. These may be the results of any stage, and
+    their types must match the pipeline's `iter_args` types.
+  }];
+
+  let arguments = (ins
+    Variadic<AnyType>:$iter_args,
+    Variadic<AnyType>:$results
+  );
+
+  let assemblyFormat = [{
+    `iter_args` `(` $iter_args `)` `,`
+    `results` `(` $results `)` `:`
+    functional-type($iter_args, $results) attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
+def STGRegisterOp : STGOp<"register",
+    [ParentOneOf<["STGWhileOp", "STGStepOp"]>, Terminator]> {
+  let summary = "STG dialect register.";
+  let description = [{
+    The `pipeline.register` terminates a pipeline stage and
+    "registers" the values specified as operands. These values become the
+    results of the stage.
+  }];
+
+  let arguments = (ins
+    Variadic<AnyType>:$operands
+  );
+
+  let assemblyFormat = [{
+    $operands (`:` qualified(type($operands))^)? attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
+def STGWhileOp : STGOp<"while"> {
+  let summary = "STG dialect scheduled while-loop.";
+  let description = [{
+  }];
+
+  let arguments = (ins
+    OptionalAttr<I64Attr>:$tripCount,
+    Variadic<AnyType>:$iterArgs
+  );
+
+  let results = (outs
+    Variadic<AnyType>:$results
+  );
+
+  let regions = (region
+    SizedRegion<1>:$condition,
+    SizedRegion<1>:$schedule
+  );
+
+  let hasCustomAssemblyFormat = 1;
+
+  let hasVerifier = 1;
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::TypeRange":$resultTypes,
+                   "llvm::Optional<IntegerAttr>": $tripCount,
+                   "mlir::ValueRange":$iterArgs)>
+  ];
+
+  let extraClassDeclaration = [{
+    Block &getCondBlock() { return getCondition().front(); }
+    Block &getScheduleBlock() { return getSchedule().front(); }
+    stg::STGTerminatorOp getTerminator() {
+      return llvm::cast<stg::STGTerminatorOp>(getScheduleBlock().getTerminator());    
+    }
+  }];
 }
 
 /* def PipelineOp : Op<Pipeline_Dialect, "pipeline", [ */
@@ -157,38 +332,6 @@ def STGDialect : Dialect {
 /*   }]; */
 /* } */
 
-/* def PipelineStageRegisterOp : Op<Pipeline_Dialect, "stage.register", [ */
-/*     HasParent<"PipelineOp">, */
-/*     RangedTypesMatchWith<"result type matches operand", "regIns", "regOuts", */
-/*                          "llvm::make_range($_self.begin(), $_self.end())"> */
-/*   ]> { */
-/*   let summary = "Pipeline pipeline stage."; */
-/*   let description = [{ */
-/*     The `pipeline.stage` operation represents a stage separating register */
-/*     in a pipeline with materialized register values. `pipeline.stage` and */
-/*     `pipeline.stage.register` operations are not allowed to co-exist in the */
-/*     same pipeline body. This is because, once register values are materialized, */
-/*     all delays as well as knowledge about multicycle paths have been lowered */
-/*     away. */
-/*   }]; */
-
-/*   let arguments = (ins Variadic<AnyType>:$regIns, I1:$when); */
-/*   let results = (outs Variadic<AnyType>:$regOuts, I1:$valid); */
-
-/*   let builders = [OpBuilder<(ins "mlir::Value":$when, "mlir::ValueRange":$regIns)>]; */
-
-/*   let assemblyFormat = [{ */
-/*     `when` $when (`regs` $regIns^)? attr-dict (`:` type($regIns)^)? */
-/*   }]; */
-
-/*   let extraClassDeclaration = [{ */
-/*     // Returns the index of this stage in the pipeline. */
-/*     unsigned index() { */
-/*       auto stageOps = getOperation()->getParentOfType<PipelineOp>().getOps<PipelineStageRegisterOp>(); */
-/*       return std::distance(stageOps.begin(), llvm::find(stageOps, *this)); */
-/*     } */
-/*   }]; */
-/* } */
 
 /* def ReturnOp : Op<Pipeline_Dialect, "return", [Terminator]> { */
 /*   let summary = "Pipeline dialect return."; */

@@ -18,6 +18,7 @@
 #include "circt/Scheduling/Problems.h"
 #include "circt/Support/LLVM.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 
 namespace mlir {
 class AnalysisManager;
@@ -27,6 +28,7 @@ class FuncOp;
 } // namespace mlir
 
 using namespace mlir;
+using namespace scf;
 using namespace circt::scheduling;
 
 namespace circt {
@@ -45,6 +47,21 @@ private:
   void analyzeForOp(AffineForOp forOp, MemoryDependenceAnalysis memoryAnalysis);
 
   DenseMap<Operation *, CyclicProblem> problems;
+};
+
+/// SharedOperatorsSchedulingAnalysis constructs a SharedOperatorsProblem for each AffineForOp by
+/// performing a memory dependence analysis and inserting dependences into the
+/// problem. The client should retrieve the partially complete problem to add
+/// and associate operator types.
+struct SharedOperatorsSchedulingAnalysis {
+  SharedOperatorsSchedulingAnalysis(Operation *funcOp, AnalysisManager &am);
+
+  SharedOperatorsProblem &getProblem(WhileOp whileOp);
+
+private:
+  void analyzeWhileOp(WhileOp whileOp, MemoryDependenceAnalysis memoryAnalysis);
+
+  DenseMap<Operation *, SharedOperatorsProblem> problems;
 };
 
 } // namespace analysis

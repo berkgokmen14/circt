@@ -185,6 +185,29 @@ def PipelineToCalyx : Pass<"lower-pipeline-to-calyx", "mlir::ModuleOp"> {
 }
 
 //===----------------------------------------------------------------------===//
+// STGToCalyx
+//===----------------------------------------------------------------------===//
+
+def STGToCalyx : Pass<"lower-stg-to-calyx", "mlir::ModuleOp"> {
+  let summary = "Lower STG to Calyx";
+  let description = [{
+    This pass lowers STG to Calyx.
+  }];
+  let constructor = "circt::createSTGToCalyxPass()";
+  let dependentDialects = [
+    "calyx::CalyxDialect", "::mlir::scf::SCFDialect", "hw::HWDialect",
+    "comb::CombDialect"
+  ];
+  let options = [
+    Option<"topLevelFunctionOpt", "top-level-function", "std::string", "",
+            "Identifier of top-level function to be the entry-point component"
+            " of the Calyx program.">,
+    Option<"ciderSourceLocationMetadata", "cider-source-location-metadata", "bool", "",
+            "Whether to track source location for the Cider debugger.">
+  ];
+}
+
+//===----------------------------------------------------------------------===//
 // PipelineTHW
 //===----------------------------------------------------------------------===//
 
@@ -472,11 +495,11 @@ def InsertMergeBlocks : Pass<"insert-merge-blocks", "::mlir::ModuleOp"> {
 // SCFToSTG
 //===----------------------------------------------------------------------===//
 
-def SCFToSTG : Pass<"convert-scf-to-stg", "mlir::func::FuncOp"> {
+def AffineToSTG : Pass<"convert-affine-to-stg", "mlir::func::FuncOp"> {
   let summary = "Convert SCF dialect to scheduled STG";
   let description = [{
   }];
-  let constructor = "circt::createSCFToSTGPass()";
+  let constructor = "circt::createAffineToSTGPass()";
   let dependentDialects = [
     "circt::pipeline::PipelineDialect",
     "circt::stg::STGDialect",

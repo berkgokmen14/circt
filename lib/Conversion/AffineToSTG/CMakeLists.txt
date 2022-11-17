@@ -1,5 +1,5 @@
-add_circt_library(CIRCTSCFToSTG
-  SCFToSTG.cpp
+add_circt_library(CIRCTAffineToSTG
+  AffineToSTG.cpp
 
   DEPENDS
   CIRCTConversionPassIncGen

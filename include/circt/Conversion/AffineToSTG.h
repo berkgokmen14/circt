@@ -10,6 +10,7 @@
 #define CIRCT_CONVERSION_SCFTOSTG_H_
 
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include <memory>
 
 namespace mlir {
@@ -17,7 +18,7 @@ class Pass;
 } // namespace mlir
 
 namespace circt {
-std::unique_ptr<mlir::Pass> createSCFToSTGPass();
+std::unique_ptr<mlir::Pass> createAffineToSTGPass();
 } // namespace circt
 
 #endif // CIRCT_CONVERSION_SCFTOSTG_H_

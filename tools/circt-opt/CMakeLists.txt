@@ -46,7 +46,8 @@ target_link_libraries(circt-opt
   CIRCTHWToSystemC
   CIRCTHWTransforms
   CIRCTSCFToCalyx
-  CIRCTSCFToSTG
+  CIRCTSTGToCalyx
+  CIRCTAffineToSTG
   CIRCTScheduling
   CIRCTSchedulingTestPasses
   CIRCTSeq

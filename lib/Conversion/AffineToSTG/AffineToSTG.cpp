@@ -290,6 +290,8 @@ LogicalResult AffineToSTG::populateOperatorTypes(
   Problem::OperatorType mcOpr = problem.getOrInsertOperatorType("multicycle");
   problem.setLatency(mcOpr, 3);
 
+  DenseMap<Value, int64_t> memrefs;
+
   Operation *unsupported;
   WalkResult result = whileOp.getAfter().walk([&](Operation *op) {
     return TypeSwitch<Operation *, WalkResult>(op)
@@ -299,14 +301,39 @@ LogicalResult AffineToSTG::populateOperatorTypes(
           problem.setLinkedOperatorType(combOp, combOpr);
           return WalkResult::advance();
         })
-        .Case<memref::LoadOp, memref::StoreOp, IfOp, AddIOp, CmpIOp>(
-            [&](Operation *seqOp) {
-              // Some known sequential ops. In certain cases, reads may be
-              // combinational in Calyx, but taking advantage of that is left as
-              // a future enhancement.
-              problem.setLinkedOperatorType(seqOp, seqOpr);
-              return WalkResult::advance();
-            })
+        .Case<IfOp, AddIOp, CmpIOp>(
+        [&](Operation *seqOp) {
+          // Some known sequential ops. In certain cases, reads may be
+          // combinational in Calyx, but taking advantage of that is left as
+          // a future enhancement.
+          problem.setLinkedOperatorType(seqOp, seqOpr);
+          return WalkResult::advance();
+        })
+        .Case<memref::LoadOp, memref::StoreOp>([&](Operation *memOp) {
+          // Handle resource constraints for memory ops
+          Value memref;
+          if (isa<memref::LoadOp>(*memOp)) {
+            memref = cast<memref::LoadOp>(*memOp).getMemRef();
+          } else {
+            memref = cast<memref::StoreOp>(*memOp).getMemRef();
+          }
+
+          Problem::OperatorType memOpr;
+          if (memrefs.count(memref) > 0) {
+            auto name = "memory_" + std::to_string(memrefs.lookup(memref));
+            memOpr = problem.getOrInsertOperatorType(name);
+          } else {
+            auto curr = memrefs.size();
+            memrefs.insert(std::pair(memref, curr));
+            auto name = "memory_" + std::to_string(curr);
+            memOpr = problem.getOrInsertOperatorType(name);
+            problem.setLatency(memOpr, 1);
+            problem.setLimit(memOpr, 1);
+          }
+
+          problem.setLinkedOperatorType(memOp, memOpr);
+          return WalkResult::advance();
+        })
         .Case<MulIOp>([&](Operation *mcOp) {
           // Some known multi-cycle ops.
           problem.setLinkedOperatorType(mcOp, mcOpr);
@@ -333,8 +360,11 @@ LogicalResult AffineToSTG::solveSchedulingProblem(
   // Retrieve the cyclic scheduling problem for this loop.
   SharedOperatorsProblem &problem = schedulingAnalysis->getProblem(whileOp);
 
+  for (auto oprType : problem.getOperatorTypes()) {
+    oprType.dump();
+  }
   // Optionally debug problem inputs.
-  LLVM_DEBUG(
+  // LLVM_DEBUG(
   whileOp.getAfter().walk<WalkOrder::PreOrder>([&](Operation *op) {
     llvm::dbgs() << "Scheduling inputs for " << *op;
     auto opr = problem.getLinkedOperatorType(op);
@@ -345,14 +375,14 @@ LogicalResult AffineToSTG::solveSchedulingProblem(
         llvm::dbgs() << "\n  dep = { "
                      << "source = " << *dep.getSource() << " }";
     llvm::dbgs() << "\n\n";
-  }));
+  });
 
   // Verify and solve the problem.
   if (failed(problem.check()))
     return failure();
 
   auto *anchor = whileOp.getAfter().getBlocks().back().getTerminator();
-  if (failed(scheduleSimplex(problem, anchor)))
+  if (failed(scheduleList(problem, anchor)))
     return failure();
 
   // Verify the solution.
@@ -360,12 +390,13 @@ LogicalResult AffineToSTG::solveSchedulingProblem(
     return failure();
 
   // Optionally debug problem outputs.
-  LLVM_DEBUG(
+  // LLVM_DEBUG(
   whileOp.getAfter().walk<WalkOrder::PreOrder>([&](Operation *op) {
     llvm::dbgs() << "Scheduling outputs for " << *op;
     llvm::dbgs() << "\n  start = " << problem.getStartTime(op);
     llvm::dbgs() << "\n\n";
-  }));
+  });
+    // );
   
   return success();
 }

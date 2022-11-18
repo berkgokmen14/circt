@@ -98,6 +98,8 @@ void AffineToSTG::runOnOperation() {
     return WalkResult::advance();
   });
 
+  getOperation()->dump();
+
   for (auto loop : loops) {
     // Populate the target operator types.
     if (failed(populateOperatorTypes(loop)))
@@ -110,9 +112,10 @@ void AffineToSTG::runOnOperation() {
     // Convert the IR.
     if (failed(createSTGSTG(loop)))
       return signalPassFailure();
+
+    getOperation()->dump();
   }
 
-  // getOperation().dump();
 }
 
 struct ForLoopLoweringPattern : public OpRewritePattern<ForOp> {
@@ -290,10 +293,16 @@ LogicalResult AffineToSTG::populateOperatorTypes(
   Problem::OperatorType mcOpr = problem.getOrInsertOperatorType("multicycle");
   problem.setLatency(mcOpr, 3);
 
+  whileOp->dump();
+
   DenseMap<Value, int64_t> memrefs;
 
   Operation *unsupported;
   WalkResult result = whileOp.getAfter().walk([&](Operation *op) {
+    if (op->getParentOfType<STGWhileOp>() != nullptr) {
+      return WalkResult::advance();
+    }
+
     return TypeSwitch<Operation *, WalkResult>(op)
         .Case<AffineYieldOp, arith::ConstantOp, IndexCastOp, 
               memref::AllocaOp, YieldOp>([&](Operation *combOp) {
@@ -365,17 +374,17 @@ LogicalResult AffineToSTG::solveSchedulingProblem(
   }
   // Optionally debug problem inputs.
   // LLVM_DEBUG(
-  whileOp.getAfter().walk<WalkOrder::PreOrder>([&](Operation *op) {
-    llvm::dbgs() << "Scheduling inputs for " << *op;
-    auto opr = problem.getLinkedOperatorType(op);
-    llvm::dbgs() << "\n  opr = " << opr;
-    llvm::dbgs() << "\n  latency = " << problem.getLatency(*opr);
-    for (auto dep : problem.getDependences(op))
-      if (dep.isAuxiliary())
-        llvm::dbgs() << "\n  dep = { "
-                     << "source = " << *dep.getSource() << " }";
-    llvm::dbgs() << "\n\n";
-  });
+  // whileOp.getAfter().walk<WalkOrder::PreOrder>([&](Operation *op) {
+  //   llvm::dbgs() << "Scheduling inputs for " << *op;
+  //   auto opr = problem.getLinkedOperatorType(op);
+  //   llvm::dbgs() << "\n  opr = " << opr;
+  //   llvm::dbgs() << "\n  latency = " << problem.getLatency(*opr);
+  //   for (auto dep : problem.getDependences(op))
+  //     if (dep.isAuxiliary())
+  //       llvm::dbgs() << "\n  dep = { "
+  //                    << "source = " << *dep.getSource() << " }";
+  //   llvm::dbgs() << "\n\n";
+  // }));
 
   // Verify and solve the problem.
   if (failed(problem.check()))
@@ -391,12 +400,11 @@ LogicalResult AffineToSTG::solveSchedulingProblem(
 
   // Optionally debug problem outputs.
   // LLVM_DEBUG(
-  whileOp.getAfter().walk<WalkOrder::PreOrder>([&](Operation *op) {
-    llvm::dbgs() << "Scheduling outputs for " << *op;
-    llvm::dbgs() << "\n  start = " << problem.getStartTime(op);
-    llvm::dbgs() << "\n\n";
-  });
-    // );
+  // whileOp.getAfter().walk<WalkOrder::PreOrder>([&](Operation *op) {
+  //   llvm::dbgs() << "Scheduling outputs for " << *op;
+  //   llvm::dbgs() << "\n  start = " << problem.getStartTime(op);
+  //   llvm::dbgs() << "\n\n";
+  // }));
   
   return success();
 }

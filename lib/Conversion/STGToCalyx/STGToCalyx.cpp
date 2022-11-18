@@ -93,7 +93,7 @@ public:
     operationToGroup[op] = group;
   }
 
-  /// Returns the group registered for this non-stgd value, and None
+  /// Returns the group registered for this sink value, and None
   /// otherwise.
   template <typename TGroupOp = calyx::GroupInterface>
   Optional<TGroupOp> getSinkGroupFrom(Operation *op) {
@@ -988,13 +988,13 @@ class BuildSTGGroups : public calyx::FuncOpPartialLoweringPattern {
     for (auto stg : funcOp.getOps<stg::STGWhileOp>())
       for (auto step :
            stg.getScheduleBlock().getOps<stg::STGStepOp>())
-        if (failed(buildStageGroups(stg, step, rewriter)))
+        if (failed(buildStepGroups(stg, step, rewriter)))
           return failure();
 
     return success();
   }
 
-  LogicalResult buildStageGroups(stg::STGWhileOp whileOp,
+  LogicalResult buildStepGroups(stg::STGWhileOp whileOp,
                                  stg::STGStepOp step,
                                  PatternRewriter &rewriter) const {
     // Collect stg registers for step.
@@ -1009,24 +1009,15 @@ class BuildSTGGroups : public calyx::FuncOpPartialLoweringPattern {
     getState<ComponentLoweringState>().addBlockScheduleable(step->getBlock(),
                                                             step);
 
+    step.dump();
     auto makeScheduleable = [&](calyx::GroupOp group) {
+      llvm::errs() << group.getSymName() << "\n";
       getState<ComponentLoweringState>().addBlockScheduleable(&step.getBodyBlock(), 
                                                               group);
     };
 
     MutableArrayRef<OpOperand> operands =
         step.getBodyBlock().getTerminator()->getOpOperands();
-    bool isStageWithNoReturnedValues = 
-        operands.empty() && !step.getBodyBlock().empty();
-    if (isStageWithNoReturnedValues) {
-      // Covers the case where there are ops that do not produce values that 
-      // need to be passed through to the next step, e.g., some intermediary store.
-      for (auto &op : step.getBodyBlock())
-        if (auto group = getState<ComponentLoweringState>()
-                             .getSinkGroupFrom<calyx::GroupOp>(&op))
-          makeScheduleable(*group);
-    }
- 
 
     for (auto &operand : operands) {
       unsigned i = operand.getOperandNumber();
@@ -1045,17 +1036,17 @@ class BuildSTGGroups : public calyx::FuncOpPartialLoweringPattern {
       // Stitch the register in, depending on whether the group was
       // combinational or sequential.
       if (auto combGroup =
-              dyn_cast<calyx::CombGroupOp>(evaluatingGroup.getOperation()))
+              dyn_cast<calyx::CombGroupOp>(evaluatingGroup.getOperation())) {
         group =
             convertCombToSeqGroup(combGroup, stgRegister, value, rewriter);
-      else
+        makeScheduleable(group);
+      } else
         group =
             replaceGroupRegister(evaluatingGroup, stgRegister, rewriter);
 
       // Replace the step result uses with the register out.
       step.getResult(i).replaceAllUsesWith(stgRegister.getOut());
 
-      makeScheduleable(group);
     }
     return success();
   }
@@ -1201,7 +1192,6 @@ private:
                 &stepOp.getBodyBlock());
         for (auto &group : bodyBlockScheduleables)
           if (auto *groupPtr = std::get_if<calyx::GroupOp>(&group); groupPtr) {
-            groupPtr->dump();
             rewriter.create<calyx::EnableOp>(groupPtr->getLoc(),
                                              groupPtr->getSymName());
           } else

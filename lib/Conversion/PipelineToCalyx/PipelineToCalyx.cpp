@@ -397,7 +397,7 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   Value memref = loadOp.getMemref();
   auto memoryInterface =
       getState<ComponentLoweringState>().getMemoryInterface(memref);
-  if (calyx::noStoresToMemory(memref) && calyx::singleLoadFromMemory(memref)) {
+  // if (calyx::noStoresToMemory(memref) && calyx::singleLoadFromMemory(memref)) {
     // Single load from memory; we do not need to write the
     // output to a register. This is essentially a "combinational read" under
     // current Calyx semantics with memory, and thus can be done in a
@@ -419,30 +419,30 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
     // memory assignment groups belong to which accesses.
     getState<ComponentLoweringState>().registerEvaluatingGroup(
         loadOp.getResult(), combGroup);
-  } else {
-    auto group = createGroupForOp<calyx::GroupOp>(rewriter, loadOp);
-    assignAddressPorts(rewriter, loadOp.getLoc(), group, memoryInterface,
-                       loadOp.getIndices());
+  // } else {
+  //   auto group = createGroupForOp<calyx::GroupOp>(rewriter, loadOp);
+  //   assignAddressPorts(rewriter, loadOp.getLoc(), group, memoryInterface,
+  //                      loadOp.getIndices());
 
-    // Multiple loads from the same memory; In this case, we _may_ have a
-    // structural hazard in the design we generate. To get around this, we
-    // conservatively place a register in front of each load operation, and
-    // replace all uses of the loaded value with the register output. Proper
-    // handling of this requires the combinational group inliner/scheduler to
-    // be aware of when a combinational expression references multiple loaded
-    // values from the same memory, and then schedule assignments to temporary
-    // registers to get around the structural hazard.
-    auto reg = createRegister(
-        loadOp.getLoc(), rewriter, getComponent(),
-        loadOp.getMemRefType().getElementTypeBitWidth(),
-        getState<ComponentLoweringState>().getUniqueName("load"));
-    calyx::buildAssignmentsForRegisterWrite(
-        rewriter, group, getState<ComponentLoweringState>().getComponentOp(),
-        reg, memoryInterface.readData());
-    loadOp.getResult().replaceAllUsesWith(reg.getOut());
-    getState<ComponentLoweringState>().addBlockScheduleable(loadOp->getBlock(),
-                                                            group);
-  }
+  //   // Multiple loads from the same memory; In this case, we _may_ have a
+  //   // structural hazard in the design we generate. To get around this, we
+  //   // conservatively place a register in front of each load operation, and
+  //   // replace all uses of the loaded value with the register output. Proper
+  //   // handling of this requires the combinational group inliner/scheduler to
+  //   // be aware of when a combinational expression references multiple loaded
+  //   // values from the same memory, and then schedule assignments to temporary
+  //   // registers to get around the structural hazard.
+  //   auto reg = createRegister(
+  //       loadOp.getLoc(), rewriter, getComponent(),
+  //       loadOp.getMemRefType().getElementTypeBitWidth(),
+  //       getState<ComponentLoweringState>().getUniqueName("load"));
+  //   calyx::buildAssignmentsForRegisterWrite(
+  //       rewriter, group, getState<ComponentLoweringState>().getComponentOp(),
+  //       reg, memoryInterface.readData());
+  //   loadOp.getResult().replaceAllUsesWith(reg.getOut());
+  //   getState<ComponentLoweringState>().addBlockScheduleable(loadOp->getBlock(),
+  //                                                           group);
+  // }
   return success();
 }
 
@@ -964,6 +964,17 @@ class BuildPipelineRegs : public calyx::FuncOpPartialLoweringPattern {
                                   width, name);
         getState<ComponentLoweringState>().addPipelineReg(stage, reg, i);
 
+        auto *defOp = value.getDefiningOp();
+        Block *block = defOp->getBlock();
+        auto groupName = getState<ComponentLoweringState>().getUniqueName(
+            loweringState().blockName(block));
+        auto group = calyx::createGroup<calyx::CombGroupOp>(
+            rewriter, getState<ComponentLoweringState>().getComponentOp(),
+            defOp->getLoc(), groupName);
+
+        // Register the values for the pipeline.
+        getState<ComponentLoweringState>().registerEvaluatingGroup(reg.getOut(), group);
+
         // Note that we do not use replace all uses with here as in
         // BuildBasicBlockRegs. Instead, we wait until after BuildOpGroups, and
         // replace all uses inside BuildPipelineGroups, once the pipeline
@@ -1101,7 +1112,7 @@ class BuildPipelineGroups : public calyx::FuncOpPartialLoweringPattern {
     // Mark the new group as the evaluating group.
     for (auto assign : group.getOps<calyx::AssignOp>()) {
       auto *src = assign.getSrc().getDefiningOp();
-      if (!isa<calyx::RegisterOp>(*src))
+      if (!isa<calyx::CellInterface>(*src) || dyn_cast<calyx::CellInterface>(*src).isCombinational())
         getState<ComponentLoweringState>().registerEvaluatingGroup(
             assign.getSrc(), group);
     }

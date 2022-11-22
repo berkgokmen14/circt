@@ -30,6 +30,7 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
@@ -230,6 +231,10 @@ LogicalResult AffineToPipeline::lowerAffineStructures(
   if (failed(applyPartialConversion(op, target, std::move(patterns))))
     return failure();
 
+  // Loop invariant code motion to hoist produced constants out of loop
+  op->walk(
+     [&](LoopLikeOpInterface loopLike) { moveLoopInvariantCode(loopLike); });
+
   return success();
 }
 
@@ -258,20 +263,27 @@ LogicalResult AffineToPipeline::populateOperatorTypes(
   Operation *unsupported;
   WalkResult result = forOp.getBody()->walk([&](Operation *op) {
     return TypeSwitch<Operation *, WalkResult>(op)
-        .Case<AddIOp, IfOp, AffineYieldOp, arith::ConstantOp, CmpIOp,
+        .Case<IfOp, AffineYieldOp, arith::ConstantOp, CmpIOp,
               IndexCastOp, memref::AllocaOp, YieldOp>([&](Operation *combOp) {
           // Some known combinational ops.
           problem.setLinkedOperatorType(combOp, combOpr);
           return WalkResult::advance();
         })
+        .Case<AddIOp>(
+          [&](Operation *seqOp) {
+            // These ops need to be sequential for now because we do not
+            // have enough information to chain them together yet.
+            problem.setLinkedOperatorType(seqOp, seqOpr);
+            return WalkResult::advance();
+          })
         .Case<AffineLoadOp, AffineStoreOp, memref::LoadOp, memref::StoreOp>(
-            [&](Operation *seqOp) {
-              // Some known sequential ops. In certain cases, reads may be
-              // combinational in Calyx, but taking advantage of that is left as
-              // a future enhancement.
-              problem.setLinkedOperatorType(seqOp, seqOpr);
-              return WalkResult::advance();
-            })
+          [&](Operation *memOp) {
+            // Some known sequential ops. In certain cases, reads may be
+            // combinational in Calyx, but taking advantage of that is left as
+            // a future enhancement.
+            problem.setLinkedOperatorType(memOp, seqOpr);
+            return WalkResult::advance();
+          })
         .Case<MulIOp>([&](Operation *mcOp) {
           // Some known multi-cycle ops.
           problem.setLinkedOperatorType(mcOp, mcOpr);
@@ -435,12 +447,12 @@ LogicalResult AffineToPipeline::createPipelinePipeline(
       }
     }
 
-    // Add induction variable passthrough.
-    if (i.index() < startTimes.size() - 1)
-      stageTypes.push_back(lowerBound.getType());
-
     // Add the induction variable increment in the first stage.
     if (startTime == 0)
+      stageTypes.push_back(lowerBound.getType());
+
+    // Add induction variable passthrough.
+    if (i.index() < startTimes.size() - 1)
       stageTypes.push_back(lowerBound.getType());
 
     // Create the stage itself.
@@ -479,19 +491,27 @@ LogicalResult AffineToPipeline::createPipelinePipeline(
       }
     }
 
-    if (i.index() < startTimes.size() - 1)
-      stageTerminator->insertOperands(stageTerminator->getNumOperands(),
-                                      stagesBlock.getArgument(0));
+
 
     // Add the induction variable increment to the first stage.
-    if (startTime == 0) {
+    if (i.index() == 0) {
       auto incResult =
           builder.create<arith::AddIOp>(stagesBlock.getArgument(0), step);
       stageTerminator->insertOperands(stageTerminator->getNumOperands(),
                                       incResult->getResults());
-      auto operandNum = stageTerminator->getNumOperands() - 2;
-      auto iterArg = stage->getResult(operandNum);
-      valueMap.map(innerLoop.getLoopBody().getArgument(0), iterArg);
+    }
+
+    if (i.index() < startTimes.size() - 1) {
+      for (int i = 0, s = iterArgs.size(); i < s; ++i) {
+        // Add induction variable forwarding
+        stageTerminator->insertOperands(stageTerminator->getNumOperands(),
+                                        valueMap.lookup(innerLoop.getLoopBody().getArgument(0)));
+        auto operandNum = stageTerminator->getNumOperands() - 1 - i;
+
+        // Update mapping for induction variable to forwarded result
+        auto iterArg = stage->getResult(operandNum);
+        valueMap.map(innerLoop.getLoopBody().getArgument(0), iterArg);
+      }
     }
   }
 

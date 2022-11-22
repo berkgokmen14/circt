@@ -17,6 +17,7 @@
 // DIALECT-NEXT: fsm
 // DIALECT-NEXT: func
 // DIALECT-NEXT: handshake
+// DIALECT-NEXT: hls
 // DIALECT-NEXT: hw
 // DIALECT-NEXT: hwarith
 // DIALECT-NEXT: interop

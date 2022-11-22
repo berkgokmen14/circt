@@ -1278,8 +1278,17 @@ void InterfaceModportOp::build(OpBuilder &builder, OperationState &state,
   build(builder, state, name, ArrayAttr::get(ctxt, directions));
 }
 
+/// Suggest a name for each result value based on the saved result names
+/// attribute.
+void InterfaceInstanceOp::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
+  setNameFn(getResult(), getName());
+}
+
 /// Ensure that the symbol being instantiated exists and is an InterfaceOp.
 LogicalResult InterfaceInstanceOp::verify() {
+  if (getName().empty())
+    return emitOpError("requires non-empty name");
+
   auto *symtable = SymbolTable::getNearestSymbolTable(*this);
   if (!symtable)
     return emitError("sv.interface.instance must exist within a region "
@@ -1482,6 +1491,13 @@ LogicalResult WireOp::canonicalize(WireOp wire, PatternRewriter &rewriter) {
     // If the write is happening at the module level then we don't have any
     // use-before-def checking to do, so we only handle that for now.
     return failure();
+
+  // If the wire has a name attribute, propagate the name to the expression.
+  if (auto *connectedOp = connected.getDefiningOp())
+    if (!wire.getName().empty())
+      rewriter.updateRootInPlace(connectedOp, [&] {
+        connectedOp->setAttr("sv.namehint", wire.getNameAttr());
+      });
 
   // Ok, we can do this.  Replace all the reads with the connected value.
   for (auto read : reads)

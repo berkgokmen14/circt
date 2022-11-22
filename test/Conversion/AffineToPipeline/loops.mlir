@@ -34,11 +34,11 @@ func.func @dot(%arg0: memref<64xi32>, %arg1: memref<64xi32>) -> i32 {
   // Pipeline boilerplate checked above, just check the stages computations.
 
   // First stage.
-  // CHECK: %[[STAGE0:.+]]:3 = pipeline.while.stage
+  // CHECK: %[[STAGE0:.+]]:4 = pipeline.while.stage
   // CHECK-DAG: %[[STAGE0_0:.+]] = memref.load %arg0[%arg2]
   // CHECK-DAG: %[[STAGE0_1:.+]] = memref.load %arg1[%arg2]
   // CHECK-DAG: %[[STAGE0_2:.+]] = arith.addi %arg2, %c1
-  // CHECK: pipeline.register %[[STAGE0_0]], %[[STAGE0_1]], %[[STAGE0_2]]
+  // CHECK: pipeline.register %[[STAGE0_0]], %[[STAGE0_1]], %arg2, %[[STAGE0_2]]
 
   // Second stage.
   // CHECK: %[[STAGE1:.+]] = pipeline.while.stage
@@ -51,7 +51,7 @@ func.func @dot(%arg0: memref<64xi32>, %arg1: memref<64xi32>) -> i32 {
   // CHECK: pipeline.register %[[STAGE2_0]]
 
   // Pipeline terminator.
-  // CHECK: pipeline.terminator iter_args(%[[STAGE0]]#2, %[[STAGE2]]), results(%[[STAGE2]])
+  // CHECK: pipeline.terminator iter_args(%[[STAGE0]]#3, %[[STAGE2]]), results(%[[STAGE2]])
 
   %c0_i32 = arith.constant 0 : i32
   %0 = affine.for %arg2 = 0 to 64 iter_args(%arg3 = %c0_i32) -> (i32) {

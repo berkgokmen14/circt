@@ -1,4 +1,4 @@
-// RUN: circt-opt %s -lower-static-logic-to-calyx -split-input-file | FileCheck %s
+// RUN: circt-opt %s -lower-pipeline-to-calyx -split-input-file | FileCheck %s
 
 // CHECK:     module attributes {calyx.entrypoint = "minimal"} {
 // CHECK:       calyx.component @minimal

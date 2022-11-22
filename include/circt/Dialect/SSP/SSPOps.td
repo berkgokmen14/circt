@@ -19,7 +19,7 @@ class SSPOp<string mnemonic, list<Trait> traits = []> :
 
 def InstanceOp : SSPOp<"instance",
     [NoRegionArguments, SingleBlock, NoTerminator,
-     IsolatedFromAbove, OpAsmOpInterface]> {
+     IsolatedFromAbove, OpAsmOpInterface, SymbolTable, Symbol]> {
   let summary = "Instance of a static scheduling problem.";
   let description = [{
     This operation represents an instance of a static scheduling problem,
@@ -33,7 +33,7 @@ def InstanceOp : SSPOp<"instance",
     
     **Example**
     ```mlir
-    ssp.instance "canis14_fig2" of "ModuloProblem" [II<3>] {
+    ssp.instance @canis14_fig2 of "ModuloProblem" [II<3>] {
       library {
         operator_type @MemPort [latency<1>, limit<1>]
         operator_type @Add [latency<1>]
@@ -48,11 +48,11 @@ def InstanceOp : SSPOp<"instance",
     ```
   }];
 
-  let arguments = (ins StrAttr:$instanceName, StrAttr:$problemName,
+  let arguments = (ins OptionalAttr<SymbolNameAttr>:$sym_name, StrAttr:$problemName,
                        OptionalAttr<ArrayAttr>:$properties);
   let regions = (region SizedRegion<1>:$body);
   let assemblyFormat = [{
-    $instanceName `of` $problemName custom<Properties>($properties) $body attr-dict
+    ($sym_name^)? `of` $problemName custom<Properties>($properties) $body attr-dict
   }];
   
   let hasVerifier = true;
@@ -60,6 +60,9 @@ def InstanceOp : SSPOp<"instance",
   let extraClassDeclaration = [{
     // OpAsmOpInterface
     static ::llvm::StringRef getDefaultDialect() { return "ssp"; }
+
+    // SymbolOpInterface
+    static bool isOptionalSymbol() { return true; }
 
     // Convenience
     ::mlir::Block *getBodyBlock() {
@@ -73,10 +76,8 @@ def InstanceOp : SSPOp<"instance",
 
   let skipDefaultBuilders = true;
   let builders = [
-    OpBuilder<(ins "::mlir::StringAttr":$instanceName,
-                   "::mlir::StringAttr":$problemName,
+    OpBuilder<(ins "::mlir::StringAttr":$problemName,
                    CArg<"::mlir::ArrayAttr", "::mlir::ArrayAttr()">:$properties), [{
-      $_state.addAttribute($_builder.getStringAttr("instanceName"), instanceName);
       $_state.addAttribute($_builder.getStringAttr("problemName"), problemName);
       if (properties)
         $_state.addAttribute($_builder.getStringAttr("properties"), properties);
@@ -93,18 +94,13 @@ def OperatorLibraryOp : SSPOp<"library",
   let description = [{
     The operator library abstracts the characteristics of the target
     architecture/IR (onto which the source graph is scheduled), represented by
-    the individual `OperatorTypeOp`s.
-    
-    This operation may be used outside of an `InstanceOp`. Then, a name symbol
-    must be set to allow references to the contained `OperatorTypeOp`s. Operator
-    libraries inside an `InstanceOp` must not be named.
+    the individual `OperatorTypeOp`s. This operation may be used outside of an
+    `InstanceOp`.
   }];
   
   let arguments = (ins OptionalAttr<SymbolNameAttr>:$sym_name);
   let assemblyFormat = "($sym_name^)? $body attr-dict";
   let regions = (region SizedRegion<1>:$body);
-
-  let hasVerifier = true;
 
   let extraClassDeclaration = [{
     // OpAsmOpInterface
@@ -198,8 +194,7 @@ def OperationOp : SSPOp<"operation",
     target IR. Therefore, the referenced operator type symbol is parsed/printed
     right after the operation keyword in the custom assembly syntax. Flat symbol
     references are resolved by name in the surrounding instance's operator
-    library. Nested references can point to arbitrary operator libraries outside
-    of the current instance.
+    library. Nested references can point to arbitrary operator libraries.
 
     **Examples**
     ```mlir
@@ -215,7 +210,7 @@ def OperationOp : SSPOp<"operation",
     // dependence properties
     operation<@Barrier>(%2 [dist<1>], %5#1, @store_A [dist<3>])
 
-    // operator type in standalone library
+    // operator type in stand-alone library
     %7 = operation<@MathLib::@Sqrt>(%6)
     ```
   }];
@@ -230,7 +225,7 @@ def OperationOp : SSPOp<"operation",
   let hasVerifier = true;
 
   let extraClassDeclaration = [{
-    // SymbolUserOpInterface
+    // SymbolOpInterface
     static bool isOptionalSymbol() { return true; }
 
     // Find the attribute modeling the `linkedOperatorType` property

@@ -1,4 +1,4 @@
-// RUN: circt-opt --pass-pipeline='firrtl.circuit(firrtl-dedup)' %s -mlir-print-debuginfo | FileCheck %s
+// RUN: circt-opt --pass-pipeline='builtin.module(firrtl.circuit(firrtl-dedup))' %s -mlir-print-debuginfo | FileCheck %s
 
 // CHECK-LABEL: firrtl.circuit "Empty"
 firrtl.circuit "Empty" {
@@ -286,6 +286,105 @@ firrtl.circuit "Context" {
 }
 
 
+// When an annotation is already non-local, and is copied over to another
+// module, and in further dedups force us to add more context to the
+// hierarchical path, the target of the annotation should be updated to use the
+// new NLA.
+// CHECK-LABEL: firrtl.circuit "Context"
+firrtl.circuit "Context" {
+
+  // CHECK-NOT: firrtl.hierpath private @nla0
+  firrtl.hierpath private @nla0 [@Context0::@leaf0, @ContextLeaf0::@w0]
+  // CHECK-NOT: firrtl.hierpath private @nla1
+  firrtl.hierpath private @nla1 [@Context1::@leaf1, @ContextLeaf1::@w1]
+
+  // CHECK: firrtl.hierpath private [[NLA0:@.+]] [@Context::@context1, @Context0::@leaf0, @ContextLeaf0::@w0]
+  // CHECK: firrtl.hierpath private [[NLA1:@.+]] [@Context::@context0, @Context0::@leaf0, @ContextLeaf0::@w0]
+
+  // CHECK: firrtl.module @ContextLeaf0()
+  firrtl.module @ContextLeaf0() {
+    // CHECK: %w0 = firrtl.wire sym @w0  {annotations = [
+    // CHECK-SAME: {circt.nonlocal = [[NLA1]], class = "fake0"}
+    // CHECK-SAME: {circt.nonlocal = [[NLA0]], class = "fake1"}]}
+    %w0 = firrtl.wire sym @w0 {annotations = [
+      {circt.nonlocal = @nla0, class = "fake0"}]}: !firrtl.uint<3>
+  }
+
+  firrtl.module @ContextLeaf1() {
+    %w1 = firrtl.wire sym @w1 {annotations = [
+      {circt.nonlocal = @nla1, class = "fake1"}]}: !firrtl.uint<3>
+  }
+
+  firrtl.module @Context0() {
+    firrtl.instance leaf0 sym @leaf0 @ContextLeaf0()
+  }
+
+  firrtl.module @Context1() {
+    firrtl.instance leaf1 sym @leaf1 @ContextLeaf1()
+  }
+
+  firrtl.module @Context() {
+    firrtl.instance context0 @Context0()
+    firrtl.instance context1 @Context1()
+  }
+}
+
+
+// This is a larger version of the above test using 3 modules.
+// CHECK-LABEL: firrtl.circuit "DuplicateNLAs"
+firrtl.circuit "DuplicateNLAs" {
+  // CHECK-NOT: firrtl.hierpath private @annos_nla_1 [@Mid_1::@core, @Core_1]
+  // CHECK-NOT: firrtl.hierpath private @annos_nla_2 [@Mid_2::@core, @Core_2]
+  // CHECK-NOT: firrtl.hierpath private @annos_nla_3 [@Mid_3::@core, @Core_3]
+  firrtl.hierpath private @annos_nla_1 [@Mid_1::@core, @Core_1]
+  firrtl.hierpath private @annos_nla_2 [@Mid_2::@core, @Core_2]
+  firrtl.hierpath private @annos_nla_3 [@Mid_3::@core, @Core_3]
+
+  // CHECK: firrtl.hierpath private [[NLA0:@.+]] [@DuplicateNLAs::@core_3, @Mid_1::@core, @Core_1]
+  // CHECK: firrtl.hierpath private [[NLA1:@.+]] [@DuplicateNLAs::@core_2, @Mid_1::@core, @Core_1]
+  // CHECK: firrtl.hierpath private [[NLA2:@.+]] [@DuplicateNLAs::@core_1, @Mid_1::@core, @Core_1]
+
+  firrtl.module @DuplicateNLAs() {
+    firrtl.instance core_1 sym @core_1 @Mid_1()
+    firrtl.instance core_2 sym @core_2 @Mid_2()
+    firrtl.instance core_3 sym @core_3 @Mid_3()
+  }
+
+  firrtl.module private @Mid_1() {
+    firrtl.instance core sym @core @Core_1()
+  }
+
+  firrtl.module private @Mid_2() {
+    firrtl.instance core sym @core @Core_2()
+  }
+
+  firrtl.module private @Mid_3() {
+    firrtl.instance core sym @core @Core_3()
+  }
+
+  // CHECK: firrtl.module private @Core_1() attributes {annotations = [
+  // CHECK-SAME: {circt.nonlocal = [[NLA2]], class = "SomeAnno1"}
+  // CHECK-SAME: {circt.nonlocal = [[NLA1]], class = "SomeAnno2"}
+  // CHECK-SAME: {circt.nonlocal = [[NLA0]], class = "SomeAnno3"}
+  firrtl.module private @Core_1() attributes {
+    annotations = [
+      {circt.nonlocal = @annos_nla_1, class = "SomeAnno1"}
+    ]
+  } { }
+
+  firrtl.module private @Core_2() attributes {
+    annotations = [
+      {circt.nonlocal = @annos_nla_2, class = "SomeAnno2"}
+    ]
+  } { }
+
+  firrtl.module private @Core_3() attributes {
+    annotations = [
+      {circt.nonlocal = @annos_nla_3, class = "SomeAnno3"}
+    ]
+  } { }
+}
+
 // External modules should dedup and fixup any NLAs.
 // CHECK: firrtl.circuit "ExtModuleTest"
 firrtl.circuit "ExtModuleTest" {
@@ -524,25 +623,25 @@ firrtl.circuit "Foo"  {
 firrtl.circuit "LimitLoc" {
   // CHECK: @Simple0
   // CHECK-NEXT: loc(#loc[[num:.+]])
-  firrtl.module @Simple0() { } loc(#loc0) 
+  firrtl.module @Simple0() { } loc(#loc0)
   // CHECK-NOT: @Simple1
-  firrtl.module @Simple1() { } loc(#loc1) 
+  firrtl.module @Simple1() { } loc(#loc1)
   // CHECK-NOT: @Simple2
-  firrtl.module @Simple2() { } loc(#loc2) 
+  firrtl.module @Simple2() { } loc(#loc2)
   // CHECK-NOT: @Simple3
-  firrtl.module @Simple3() { } loc(#loc3) 
+  firrtl.module @Simple3() { } loc(#loc3)
   // CHECK-NOT: @Simple4
-  firrtl.module @Simple4() { } loc(#loc4) 
+  firrtl.module @Simple4() { } loc(#loc4)
   // CHECK-NOT: @Simple5
-  firrtl.module @Simple5() { } loc(#loc5) 
+  firrtl.module @Simple5() { } loc(#loc5)
   // CHECK-NOT: @Simple6
-  firrtl.module @Simple6() { } loc(#loc6) 
+  firrtl.module @Simple6() { } loc(#loc6)
   // CHECK-NOT: @Simple7
-  firrtl.module @Simple7() { } loc(#loc7) 
+  firrtl.module @Simple7() { } loc(#loc7)
   // CHECK-NOT: @Simple8
-  firrtl.module @Simple8() { } loc(#loc8) 
+  firrtl.module @Simple8() { } loc(#loc8)
   // CHECK-NOT: @Simple9
-  firrtl.module @Simple9() { } loc(#loc9) 
+  firrtl.module @Simple9() { } loc(#loc9)
   firrtl.module @LimitLoc() {
     firrtl.instance simple0 @Simple0()
     firrtl.instance simple1 @Simple1()

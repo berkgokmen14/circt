@@ -1,4 +1,4 @@
-// RUN: circt-opt --pass-pipeline='firrtl.circuit(firrtl-emit-metadata{repl-seq-mem=true repl-seq-mem-file="dut.conf"})' %s | FileCheck %s
+// RUN: circt-opt --pass-pipeline='builtin.module(firrtl.circuit(firrtl-emit-metadata{repl-seq-mem=true repl-seq-mem-file="dut.conf"}))' %s | FileCheck %s
 
 firrtl.circuit "empty" {
   firrtl.module @empty() {
@@ -90,6 +90,10 @@ firrtl.circuit "BasicBlackboxes" attributes { annotations = [{
   firrtl.extmodule @ignored4() attributes {annotations = [{class = "sifive.enterprise.grandcentral.MemTapAnnotation.blackbox", id = 4 : i64}], defname = "ignored4"}
   firrtl.extmodule @ignored5() attributes {annotations = [{class = "sifive.enterprise.grandcentral.transforms.SignalMappingAnnotation"}], defname = "ignored5"}
   firrtl.extmodule @ignored6() attributes {annotations = [{class = "firrtl.transforms.BlackBox"}], defname = "ignored6"}
+
+  // ScalaClassAnnotation should be discarded after this pass.
+  // CHECK: firrtl.extmodule @ignored2()
+  // CHECK-NOT: sifive.enterprise.firrtl.ScalaClassAnnotation
 
   // Gracefully handle missing defnames.
   firrtl.extmodule @NoDefName()

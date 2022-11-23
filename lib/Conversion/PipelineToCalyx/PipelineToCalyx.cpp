@@ -926,6 +926,9 @@ class BuildPipelineRegs : public calyx::FuncOpPartialLoweringPattern {
       auto stage = dyn_cast<pipeline::PipelineWhileStageOp>(parent);
       if (!stage)
         return;
+      auto whileOp = dyn_cast<pipeline::PipelineWhileOp>(stage->getParentOp());
+      if (!whileOp)
+        return;
 
       // Create a register for each stage.
       for (auto &operand : op->getOpOperands()) {
@@ -1112,9 +1115,10 @@ class BuildPipelineGroups : public calyx::FuncOpPartialLoweringPattern {
     // Mark the new group as the evaluating group.
     for (auto assign : group.getOps<calyx::AssignOp>()) {
       auto *src = assign.getSrc().getDefiningOp();
-      if (!isa<calyx::CellInterface>(*src) || dyn_cast<calyx::CellInterface>(*src).isCombinational())
+      if (!isa<calyx::CellInterface>(*src) || dyn_cast<calyx::CellInterface>(*src).isCombinational()) {
         getState<ComponentLoweringState>().registerEvaluatingGroup(
             assign.getSrc(), group);
+      }
     }
 
     return group;

@@ -263,13 +263,13 @@ LogicalResult AffineToPipeline::populateOperatorTypes(
   Operation *unsupported;
   WalkResult result = forOp.getBody()->walk([&](Operation *op) {
     return TypeSwitch<Operation *, WalkResult>(op)
-        .Case<IfOp, AffineYieldOp, arith::ConstantOp, CmpIOp,
+        .Case<IfOp, AffineYieldOp, arith::ConstantOp,
               IndexCastOp, memref::AllocaOp, YieldOp>([&](Operation *combOp) {
           // Some known combinational ops.
           problem.setLinkedOperatorType(combOp, combOpr);
           return WalkResult::advance();
         })
-        .Case<AddIOp>(
+        .Case<AddIOp, CmpIOp>(
           [&](Operation *seqOp) {
             // These ops need to be sequential for now because we do not
             // have enough information to chain them together yet.
@@ -447,12 +447,12 @@ LogicalResult AffineToPipeline::createPipelinePipeline(
       }
     }
 
-    // Add the induction variable increment in the first stage.
-    if (startTime == 0)
-      stageTypes.push_back(lowerBound.getType());
-
     // Add induction variable passthrough.
     if (i.index() < startTimes.size() - 1)
+      stageTypes.push_back(lowerBound.getType());
+
+    // Add the induction variable increment in the first stage.
+    if (startTime == 0)
       stageTypes.push_back(lowerBound.getType());
 
     // Create the stage itself.
@@ -491,16 +491,6 @@ LogicalResult AffineToPipeline::createPipelinePipeline(
       }
     }
 
-
-
-    // Add the induction variable increment to the first stage.
-    if (i.index() == 0) {
-      auto incResult =
-          builder.create<arith::AddIOp>(stagesBlock.getArgument(0), step);
-      stageTerminator->insertOperands(stageTerminator->getNumOperands(),
-                                      incResult->getResults());
-    }
-
     if (i.index() < startTimes.size() - 1) {
       for (int i = 0, s = iterArgs.size(); i < s; ++i) {
         // Add induction variable forwarding
@@ -512,6 +502,14 @@ LogicalResult AffineToPipeline::createPipelinePipeline(
         auto iterArg = stage->getResult(operandNum);
         valueMap.map(innerLoop.getLoopBody().getArgument(0), iterArg);
       }
+    }
+
+    // Add the induction variable increment to the first stage.
+    if (i.index() == 0) {
+      auto incResult =
+          builder.create<arith::AddIOp>(stagesBlock.getArgument(0), step);
+      stageTerminator->insertOperands(stageTerminator->getNumOperands(),
+                                      incResult->getResults());
     }
   }
 

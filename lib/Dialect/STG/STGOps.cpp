@@ -146,7 +146,6 @@ LogicalResult STGWhileOp::verify() {
   if (scheduleBlock.getOperations().size() < 2)
     return emitOpError("stages must contain at least one stage");
 
-  int64_t lastStartTime = -1;
   for (Operation &inner : scheduleBlock) {
     // Verify the stages block contains only `stg.step` and
     // `stg.terminator` ops.
@@ -154,20 +153,6 @@ LogicalResult STGWhileOp::verify() {
       return emitOpError("stages may only contain 'stg.step' or "
                          "'stg.terminator' ops, found ")
              << inner;
-
-    // Verify the stage start times are monotonically increasing.
-    if (auto stage = dyn_cast<STGStepOp>(inner)) {
-      if (lastStartTime == -1) {
-        lastStartTime = stage.getStart();
-        continue;
-      }
-
-      if (lastStartTime >= stage.getStart())
-        return stage.emitOpError("'start' must be after previous 'start' (")
-               << lastStartTime << ')';
-
-      lastStartTime = stage.getStart();
-    }
   }
 
   return success();
@@ -207,18 +192,14 @@ void STGWhileOp::build(OpBuilder &builder, OperationState &state,
 //===----------------------------------------------------------------------===//
 
 LogicalResult STGStepOp::verify() {
-  if (getStart() < 0)
-    return emitOpError("'start' must be non-negative");
-
   return success();
 }
 
 void STGStepOp::build(OpBuilder &builder, OperationState &state,
-                                 TypeRange resultTypes, IntegerAttr start) {
+                                 TypeRange resultTypes) {
   OpBuilder::InsertionGuard g(builder);
 
   state.addTypes(resultTypes);
-  state.addAttribute("start", start);
 
   Region *region = state.addRegion();
   Block &block = region->emplaceBlock();
@@ -243,7 +224,8 @@ unsigned STGStepOp::getStepNumber() {
 //===----------------------------------------------------------------------===//
 
 LogicalResult STGRegisterOp::verify() {
-  STGStepOp stepOp = (*this)->getParentOfType<STGStepOp>();
+  Operation *parent = (*this)->getParentOp();
+  STGStepOp stepOp = dyn_cast_or_null<STGStepOp>(parent);
 
   // If this doesn't terminate a stage, it is terminating the condition.
   if (stepOp == nullptr)

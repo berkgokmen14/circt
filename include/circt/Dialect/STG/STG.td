@@ -81,7 +81,7 @@ def STGStepOp : STGOp<"step",
   }];
 
   let arguments = (ins
-    SI64Attr:$start,
+    /* SI64Attr:$start, */
     Optional<I1>:$when
   );
 
@@ -94,14 +94,14 @@ def STGStepOp : STGOp<"step",
   );
 
   let assemblyFormat = [{
-    `start` `=` $start (`when` $when^)? $body (`:` qualified(type($results))^)? attr-dict
+    (`when` $when^)? $body (`:` qualified(type($results))^)? attr-dict
   }];
 
   let hasVerifier = 1;
 
   let skipDefaultBuilders = 1;
   let builders = [
-    OpBuilder<(ins "mlir::TypeRange":$resultTypes, "mlir::IntegerAttr":$start)>
+    OpBuilder<(ins "mlir::TypeRange":$resultTypes)>
   ];
 
   let extraClassDeclaration = [{

@@ -1,4 +1,4 @@
-//===- AffineToStaticlogic.cpp --------------------------------------------===//
+//===- AffineToSTG.cpp ----------------------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -31,6 +31,7 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/IR/Value.h"
+#include "mlir/IR/Visitors.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
 #include "llvm/ADT/STLExtras.h"
@@ -92,15 +93,18 @@ void AffineToSTG::runOnOperation() {
   schedulingAnalysis = &getAnalysis<SharedOperatorsSchedulingAnalysis>();
 
   SmallVector<WhileOp> loops;
+  // auto loopOps = getOperation().getOps<WhileOp>();
+  // loops.append(loopOps.begin(), loopOps.end());
 
   getOperation().walk([&](WhileOp loop) {
     loops.push_back(loop);
     return WalkResult::advance();
   });
 
-  getOperation()->dump();
+  // getOperation()->dump();
 
   for (auto loop : loops) {
+    // loop.dump();
     // Populate the target operator types.
     if (failed(populateOperatorTypes(loop)))
       return signalPassFailure();
@@ -113,7 +117,7 @@ void AffineToSTG::runOnOperation() {
     if (failed(createSTGSTG(loop)))
       return signalPassFailure();
 
-    getOperation()->dump();
+    // getOperation()->dump();
   }
 
 }
@@ -293,24 +297,24 @@ LogicalResult AffineToSTG::populateOperatorTypes(
   Problem::OperatorType mcOpr = problem.getOrInsertOperatorType("multicycle");
   problem.setLatency(mcOpr, 3);
 
-  whileOp->dump();
+  // whileOp->dump();
 
   DenseMap<Value, int64_t> memrefs;
 
   Operation *unsupported;
-  WalkResult result = whileOp.getAfter().walk([&](Operation *op) {
+    WalkResult result = whileOp.getAfter().walk<WalkOrder::PreOrder>([&](Operation *op) {
     if (op->getParentOfType<STGWhileOp>() != nullptr) {
       return WalkResult::advance();
     }
 
     return TypeSwitch<Operation *, WalkResult>(op)
         .Case<AffineYieldOp, arith::ConstantOp, IndexCastOp, 
-              memref::AllocaOp, YieldOp>([&](Operation *combOp) {
+              memref::AllocaOp, YieldOp, ConditionOp>([&](Operation *combOp) {
           // Some known combinational ops.
           problem.setLinkedOperatorType(combOp, combOpr);
           return WalkResult::advance();
         })
-        .Case<IfOp, AddIOp, CmpIOp>(
+        .Case<IfOp, AddIOp, CmpIOp, STGWhileOp>(
         [&](Operation *seqOp) {
           // Some known sequential ops. In certain cases, reads may be
           // combinational in Calyx, but taking advantage of that is left as
@@ -348,6 +352,12 @@ LogicalResult AffineToSTG::populateOperatorTypes(
           problem.setLinkedOperatorType(mcOp, mcOpr);
           return WalkResult::advance();
         })
+        // .Case<STGWhileOp>([&](Operation *whileOp) {
+        //   Problem::OperatorType whileOpr = problem.getOrInsertOperatorType("while");
+        //   problem.setLatency(whileOpr, 3);
+        //   problem.setLinkedOperatorType(whileOp, whileOpr);
+        //   return WalkResult::advance();
+        // })
         .Default([&](Operation *badOp) {
           unsupported = op;
           return WalkResult::interrupt();
@@ -369,29 +379,40 @@ LogicalResult AffineToSTG::solveSchedulingProblem(
   // Retrieve the cyclic scheduling problem for this loop.
   SharedOperatorsProblem &problem = schedulingAnalysis->getProblem(whileOp);
 
-  for (auto oprType : problem.getOperatorTypes()) {
-    oprType.dump();
-  }
+  // whileOp.dump();
+
+  // for (auto oprType : problem.getOperatorTypes()) {
+  //   oprType.dump();
+  // }
   // Optionally debug problem inputs.
   // LLVM_DEBUG(
   // whileOp.getAfter().walk<WalkOrder::PreOrder>([&](Operation *op) {
+  //   if (op->getParentOfType<STGWhileOp>() != nullptr) {
+  //     return WalkResult::advance();
+  //   }
+
   //   llvm::dbgs() << "Scheduling inputs for " << *op;
   //   auto opr = problem.getLinkedOperatorType(op);
   //   llvm::dbgs() << "\n  opr = " << opr;
   //   llvm::dbgs() << "\n  latency = " << problem.getLatency(*opr);
   //   for (auto dep : problem.getDependences(op))
-  //     if (dep.isAuxiliary())
-  //       llvm::dbgs() << "\n  dep = { "
-  //                    << "source = " << *dep.getSource() << " }";
+  //     if (dep.isAuxiliary()) {
+  //       // llvm::dbgs() << "\n  dep = { "
+  //       //              << "source = " << *dep.getSource() << " }";
+  //     }
   //   llvm::dbgs() << "\n\n";
+  //   return WalkResult::advance();
+  //   });
   // }));
+
+  // whileOp.dump();
 
   // Verify and solve the problem.
   if (failed(problem.check()))
     return failure();
 
   auto *anchor = whileOp.getAfter().getBlocks().back().getTerminator();
-  if (failed(scheduleList(problem, anchor)))
+  if (failed(scheduleSimplex(problem, anchor)))
     return failure();
 
   // Verify the solution.
@@ -404,7 +425,7 @@ LogicalResult AffineToSTG::solveSchedulingProblem(
   //   llvm::dbgs() << "Scheduling outputs for " << *op;
   //   llvm::dbgs() << "\n  start = " << problem.getStartTime(op);
   //   llvm::dbgs() << "\n\n";
-  // }));
+  // });
   
   return success();
 }
@@ -437,6 +458,20 @@ int64_t longestOperationStartingAtTime(Problem &problem, const DenseMap<int64_t,
   }
 
   return longestOp;
+}
+
+/// Returns true if the value is used outside of the given loop.
+bool isUsedOutsideOfRegion(Value val, Block *block) {
+  return llvm::any_of(val.getUsers(), [&](Operation *user) {
+    Operation *u = user;
+    while (!isa<ModuleOp>(u->getParentRegion()->getParentOp())) {
+      if (u->getBlock() == block) {
+        return false;
+      }
+      u = u->getParentRegion()->getParentOp();
+    }
+    return true;
+  });
 }
 
 /// Create the pipeline op for a loop nest.
@@ -475,7 +510,7 @@ LogicalResult AffineToSTG::createSTGSTG(
   SmallVector<Type> resultTypes;
 
   for (auto value : whileOp.getAfterArguments()) {
-    if (value.isUsedOutsideOfBlock(&whileOp.getAfter().front()))
+    if (isUsedOutsideOfRegion(value, &whileOp.getAfter().front()))
         resultTypes.push_back(value.getType());
   }
 
@@ -486,8 +521,8 @@ LogicalResult AffineToSTG::createSTGSTG(
   //   tripCountAttr = whileOp->getAttr("stg.tripCount").cast<IntegerAttr>();
   // }
 
-  auto condValue = builder.getIntegerAttr(builder.getIndexType(), 1);
-  auto cond = builder.create<arith::ConstantOp>(whileOp.getLoc(), condValue);
+  // auto condValue = builder.getIntegerAttr(builder.getIndexType(), 1);
+  // auto cond = builder.create<arith::ConstantOp>(whileOp.getLoc(), condValue);
 
   auto stgWhile = builder.create<stg::STGWhileOp>(whileOp.getLoc(), resultTypes, llvm::None, iterArgs);
 
@@ -580,10 +615,8 @@ LogicalResult AffineToSTG::createSTGSTG(
     }
 
     // Create the stage itself.
-    auto startTimeAttr = builder.getIntegerAttr(
-        builder.getIntegerType(64, /*isSigned=*/true), startTime);
     auto stage =
-        builder.create<STGStepOp>(stepTypes, startTimeAttr);
+        builder.create<STGStepOp>(stepTypes);
     auto &stageBlock = stage.getBodyBlock();
     auto *stageTerminator = stageBlock.getTerminator();
     builder.setInsertionPointToStart(&stageBlock);

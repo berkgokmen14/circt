@@ -1,4 +1,4 @@
-//=== STGToCalyx.cpp - STG to Calyx pass entry point ------*-----===//
+//=== STGToCalyx.cpp - STG to Calyx pass entry point ----------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -985,11 +985,16 @@ class BuildSTGGroups : public calyx::FuncOpPartialLoweringPattern {
   LogicalResult
   partiallyLowerFuncToComp(FuncOp funcOp,
                            PatternRewriter &rewriter) const override {
-    for (auto stg : funcOp.getOps<stg::STGWhileOp>())
+    auto res = funcOp.walk([&](stg::STGWhileOp stg) {
       for (auto step :
            stg.getScheduleBlock().getOps<stg::STGStepOp>())
         if (failed(buildStepGroups(stg, step, rewriter)))
-          return failure();
+          return WalkResult::interrupt();
+        return WalkResult::advance();
+    });
+
+    if (res.wasInterrupted())
+      return failure();
 
     return success();
   }
@@ -1009,9 +1014,8 @@ class BuildSTGGroups : public calyx::FuncOpPartialLoweringPattern {
     getState<ComponentLoweringState>().addBlockScheduleable(step->getBlock(),
                                                             step);
 
-    step.dump();
     auto makeScheduleable = [&](calyx::GroupOp group) {
-      llvm::errs() << group.getSymName() << "\n";
+      // llvm::errs() << group.getSymName() << "\n";
       getState<ComponentLoweringState>().addBlockScheduleable(&step.getBodyBlock(), 
                                                               group);
     };
@@ -1144,7 +1148,7 @@ private:
       auto seqOp = rewriter.create<calyx::SeqOp>(loc);
       parentCtrlBlock = seqOp.getBodyBlock();
     }
-    llvm::errs() << "\n";
+    // llvm::errs() << "\n";
     for (auto &group : compBlockScheduleables) {
       rewriter.setInsertionPointToEnd(parentCtrlBlock);
       if (auto *groupPtr = std::get_if<calyx::GroupOp>(&group); groupPtr) {
@@ -1167,18 +1171,8 @@ private:
         LogicalResult res = buildCFGControl(path, rewriter, whileBodyOpBlock,
                                             block, whileOp.getBodyBlock());
 
-        // /// Schedule stg steps in the parallel group directly.
-        // auto bodyBlockScheduleables =
-        //     getState<ComponentLoweringState>().getBlockScheduleables(
-        //         whileOp.getBodyBlock());
-        // for (auto &group : bodyBlockScheduleables)
-        //   if (auto *groupPtr = std::get_if<calyx::GroupOp>(&group); groupPtr) {
-        //     groupPtr->dump();
-        //     rewriter.create<calyx::EnableOp>(groupPtr->getLoc(),
-        //                                      groupPtr->getSymName());
-        //   } else
-        //     return whileOp.getOperation()->emitError(
-        //         "Unsupported block schedulable");
+        if (res.failed())
+          return whileOp.getOperation()->emitError("Cannot schedule STGWhileOp body");
       } else if (auto *schedPtr = std::get_if<stg::STGStepOp>(&group);
                  schedPtr) {
         auto &stepOp = *schedPtr;
@@ -1190,13 +1184,35 @@ private:
         auto bodyBlockScheduleables =
             getState<ComponentLoweringState>().getBlockScheduleables(
                 &stepOp.getBodyBlock());
-        for (auto &group : bodyBlockScheduleables)
-          if (auto *groupPtr = std::get_if<calyx::GroupOp>(&group); groupPtr) {
+        for (auto &schedulable : bodyBlockScheduleables) {
+          rewriter.setInsertionPointToEnd(stepBodyOp.getBodyBlock());
+          if (auto *groupPtr = std::get_if<calyx::GroupOp>(&schedulable); groupPtr) {
             rewriter.create<calyx::EnableOp>(groupPtr->getLoc(),
                                              groupPtr->getSymName());
+          } else if (auto *whilePtr = std::get_if<STGScheduleable>(&schedulable); whilePtr){
+            auto seqOp = rewriter.create<calyx::SeqOp>(loc);
+            rewriter.setInsertionPointToEnd(seqOp.getBodyBlock());
+            auto whileOp = whilePtr->whileOp;
+            
+            auto whileCtrlOp =
+                buildWhileCtrlOp(whileOp, whilePtr->initGroups, rewriter);
+            rewriter.setInsertionPointToEnd(whileCtrlOp.getBodyBlock());
+            auto whileBodyOp =
+                rewriter.create<calyx::SeqOp>(whileOp.getOperation()->getLoc());
+
+            auto *whileBodyOpBlock = whileBodyOp.getBodyBlock();
+
+            /// Only schedule the 'after' block. The 'before' block is
+            /// implicitly scheduled when evaluating the while condition.
+            LogicalResult res = buildCFGControl(path, rewriter, whileBodyOpBlock,
+                                                block, whileOp.getBodyBlock());
+
+            if (res.failed())
+              return whileOp.getOperation()->emitError("Cannot schedule STGWhileOp body");
           } else
             return stepOp.getOperation()->emitError(
                 "Unsupported block schedulable");
+        }
       } else
         llvm_unreachable("Unknown scheduleable");
     }
@@ -1599,8 +1615,6 @@ void STGToCalyxPass::runOnOperation() {
     signalPassFailure();
     return;
   }
-
-  getOperation()->dump();
 
   //===----------------------------------------------------------------------===//
   // Cleanup patterns

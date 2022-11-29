@@ -12,6 +12,7 @@
 
 #include "circt/Analysis/SchedulingAnalysis.h"
 #include "circt/Analysis/DependenceAnalysis.h"
+#include "circt/Dialect/STG/STG.h"
 #include "circt/Scheduling/Problems.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
@@ -23,6 +24,7 @@
 #include <limits>
 
 using namespace mlir;
+using namespace circt::stg;
 
 /// CyclicSchedulingAnalysis constructs a CyclicProblem for each AffineForOp by
 /// performing a memory dependence analysis and inserting dependences into the
@@ -164,16 +166,9 @@ circt::analysis::CyclicSchedulingAnalysis::getProblem(AffineForOp forOp) {
 /// problem. The client should retrieve the partially complete problem to add
 /// and associate operator types.
 circt::analysis::SharedOperatorsSchedulingAnalysis::SharedOperatorsSchedulingAnalysis(
-    Operation *op, AnalysisManager &am) {
-  auto funcOp = cast<func::FuncOp>(op);
-
-  MemoryDependenceAnalysis &memoryAnalysis =
-      am.getAnalysis<MemoryDependenceAnalysis>();
-
-  // Only consider innermost loops of perfectly nested AffineForOps.
-  funcOp.walk([&](WhileOp loop) {
-    analyzeWhileOp(loop, memoryAnalysis);
-  });
+    Operation *op, AnalysisManager &am) : memoryAnalysis(am.getAnalysis<MemoryDependenceAnalysis>()){
+  // this->memoryAnalysis =
+  //     am.getAnalysis<MemoryDependenceAnalysis>();
 }
 
 void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
@@ -183,6 +178,10 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
 
   // Insert memory dependences into the problem.
   whileOp.getAfter().walk([&](Operation *op) {
+    if (op->getParentOfType<STGWhileOp>() != nullptr)
+      return;
+    // op->dump();
+    // llvm::errs() << "\n";
     // Insert every operation into the problem.
     problem.insertOperation(op);
 
@@ -224,6 +223,21 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
   //   }
   // });
 
+  whileOp.getAfter().walk([&](Operation *op) {
+    if (!isa<scf::WhileOp>(op))
+      return WalkResult::advance();
+
+    auto innerWhileOp = dyn_cast<scf::WhileOp>(op);
+    auto term = innerWhileOp.getConditionOp();
+    innerWhileOp.getAfter().walk([&](Operation *op) {
+      Problem::Dependence depCond(term, op);
+      auto depInserted = problem.insertDependence(depCond);
+      assert(succeeded(depInserted));
+    });
+
+    return WalkResult::advance();
+  });
+
   // Insert conditional dependences into the problem.
   whileOp.getAfter().walk([&](Operation *op) {
     Block *thenBlock = nullptr;
@@ -263,6 +277,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
   // terminator to ensure the problem schedules them before the terminator.
   auto *anchor = whileOp.getAfter().back().getTerminator();
   whileOp.getAfter().walk([&](Operation *op) {
+    if (op->getParentOfType<STGWhileOp>() != nullptr)
+      return;
     if (!isa<mlir::AffineStoreOp, memref::StoreOp>(op))
       return;
     Problem::Dependence dep(op, anchor);
@@ -293,6 +309,11 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
 SharedOperatorsProblem &
 circt::analysis::SharedOperatorsSchedulingAnalysis::getProblem(WhileOp whileOp) {
   auto problem = problems.find(whileOp);
+  if (problem != problems.end()) {
+    return problem->second;
+  }
+  analyzeWhileOp(whileOp, this->memoryAnalysis);
+  problem = problems.find(whileOp);
   assert(problem != problems.end() && "expected problem to exist");
   return problem->second;
 }

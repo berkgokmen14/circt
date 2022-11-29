@@ -61,6 +61,7 @@ struct SharedOperatorsSchedulingAnalysis {
 private:
   void analyzeWhileOp(WhileOp whileOp, MemoryDependenceAnalysis memoryAnalysis);
 
+  MemoryDependenceAnalysis &memoryAnalysis;
   DenseMap<Operation *, SharedOperatorsProblem> problems;
 };
 

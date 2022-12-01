@@ -171,8 +171,8 @@ LogicalResult scheduling::scheduleList(SharedOperatorsProblem &prob,
     auto *op = pair.first;
     // llvm::errs() << op->getName() << ": " << std::to_string(pair.second) <<
     // "\n";
-    if (op == lastOp)
-      continue;
+    // if (op == lastOp)
+    //   continue;
     if (prob.getDependences(op).empty()) {
       if (testSchedule(reservationTable, prob, op, 0)) {
         takeSchedule(reservationTable, prob, op, 0);
@@ -215,11 +215,12 @@ LogicalResult scheduling::scheduleList(SharedOperatorsProblem &prob,
           earliest++;
         takeSchedule(reservationTable, prob, op, earliest);
         totalLatency = std::max(totalLatency, earliest);
-        if (totalLatency == earliest && op != lastOp)
+        if (totalLatency == earliest)
           lastRanOp = op;
       }
     }
   }
+
   prob.setStartTime(
       lastOp, totalLatency +
                   prob.getLatency(prob.getLinkedOperatorType(lastRanOp).value())

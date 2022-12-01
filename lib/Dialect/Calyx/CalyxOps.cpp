@@ -67,8 +67,8 @@ struct CollapseUnaryControl : mlir::OpRewritePattern<CtrlOp> {
   LogicalResult matchAndRewrite(CtrlOp ctrlOp,
                                 PatternRewriter &rewriter) const override {
     auto &ops = ctrlOp.getBodyBlock()->getOperations();
-    bool isUnaryControl = (ops.size() == 1) && isa<EnableOp>(ops.front()) &&
-                          isa<SeqOp, ParOp>(ctrlOp->getParentOp());
+    bool isUnaryControl = (ops.size() == 1) &&
+                          isa<SeqOp, ParOp, WhileOp>(ctrlOp->getParentOp());
     if (!isUnaryControl)
       return failure();
 

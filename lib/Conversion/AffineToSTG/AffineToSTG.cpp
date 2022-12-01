@@ -397,8 +397,8 @@ LogicalResult AffineToSTG::solveSchedulingProblem(
   //   llvm::dbgs() << "\n  latency = " << problem.getLatency(*opr);
   //   for (auto dep : problem.getDependences(op))
   //     if (dep.isAuxiliary()) {
-  //       // llvm::dbgs() << "\n  dep = { "
-  //       //              << "source = " << *dep.getSource() << " }";
+  //       llvm::dbgs() << "\n  dep = { "
+  //                    << "source = " << *dep.getSource() << " }";
   //     }
   //   llvm::dbgs() << "\n\n";
   //   return WalkResult::advance();
@@ -412,7 +412,7 @@ LogicalResult AffineToSTG::solveSchedulingProblem(
     return failure();
 
   auto *anchor = whileOp.getAfter().getBlocks().back().getTerminator();
-  if (failed(scheduleSimplex(problem, anchor)))
+  if (failed(scheduleList(problem, anchor)))
     return failure();
 
   // Verify the solution.

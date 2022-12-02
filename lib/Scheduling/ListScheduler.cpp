@@ -19,6 +19,7 @@
 #include <map>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -91,6 +92,32 @@ void takeSchedule(
   prob.setStartTime(op, cycle);
 }
 
+// perform topo sort to check if the input is a DAG
+LogicalResult checkIfDAG(SharedOperatorsProblem &prob,
+                Operation *lastOp) {
+  
+  std::unordered_set<Operation *> visited{lastOp};
+  std::vector<Operation *> levelQueue{lastOp};  // BFS queue
+  
+  while (!levelQueue.empty()) {
+    std::unordered_set<Operation *> nextLevel;
+    
+    for (Operation *curOp : levelQueue) {
+      for (auto dep : prob.getDependences(curOp)) {
+        Operation *nextOp = dep.getSource();
+        nextLevel.insert(nextOp);
+      }
+    }
+    for (Operation *op : nextLevel)
+      if(visited.count(op))  // self- or backward- dependency
+        return failure();
+    
+    visited.insert(std::begin(nextLevel), std::end(nextLevel));
+    levelQueue.assign(std::begin(nextLevel), std::end(nextLevel));
+  }
+  return success();
+}
+
 std::map<Operation *, int> getALAPPriorities(Problem::OperationSet opSet,
                                              Problem &prob, Operation *lastOp) {
   std::map<Operation *, int> map;
@@ -157,6 +184,9 @@ bool priorityCmp(std::pair<Operation *, int> &a,
 
 LogicalResult scheduling::scheduleList(SharedOperatorsProblem &prob,
                                        Operation *lastOp) {
+  if(failed(checkIfDAG(prob, lastOp)))
+    return failure();
+  // llvm::errs() << "after check\n" ;
 
   std::map<std::pair<std::string, unsigned int>, int> reservationTable;
   SmallVector<Operation *> unscheduledOps;

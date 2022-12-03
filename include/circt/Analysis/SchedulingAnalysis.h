@@ -56,10 +56,11 @@ private:
 struct SharedOperatorsSchedulingAnalysis {
   SharedOperatorsSchedulingAnalysis(Operation *funcOp, AnalysisManager &am);
 
-  SharedOperatorsProblem &getProblem(WhileOp whileOp);
+  SharedOperatorsProblem &getProblem(Operation *op);
 
 private:
   void analyzeWhileOp(WhileOp whileOp, MemoryDependenceAnalysis memoryAnalysis);
+  void analyzeFuncOp(func::FuncOp funcOp, MemoryDependenceAnalysis memoryAnalysis);
 
   MemoryDependenceAnalysis &memoryAnalysis;
   DenseMap<Operation *, SharedOperatorsProblem> problems;

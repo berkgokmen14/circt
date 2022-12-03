@@ -221,12 +221,15 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
                              AddIOp, SubIOp, CmpIOp, ShLIOp, ShRUIOp, ShRSIOp,
                              AndIOp, XOrIOp, OrIOp, ExtUIOp, TruncIOp, MulIOp,
                              DivUIOp, RemUIOp, IndexCastOp,
+                             /// scf
+                             scf::IfOp,
                              /// static logic
                              stg::STGTerminatorOp>(
                   [&](auto op) { return buildOp(rewriter, op).succeeded(); })
               .template Case<FuncOp, stg::STGWhileOp,
                              stg::STGRegisterOp,
-                             stg::STGStepOp>([&](auto) {
+                             stg::STGStepOp,
+                             scf::YieldOp>([&](auto) {
                 /// Skip: these special cases will be handled separately.
                 return true;
               })
@@ -268,6 +271,7 @@ private:
   LogicalResult buildOp(PatternRewriter &rewriter, memref::AllocaOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, memref::LoadOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, memref::StoreOp op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter, scf::IfOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter,
                         stg::STGTerminatorOp op) const;
 
@@ -547,6 +551,41 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
 LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      memref::AllocaOp allocOp) const {
   return buildAllocOp(getState<ComponentLoweringState>(), rewriter, allocOp);
+}
+LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                                     scf::IfOp ifOp) const {
+
+  auto cond = ifOp.getCondition();
+  SmallVector<Type> types;
+  types.push_back(cond.getType());
+  types.push_back(cond.getType());
+
+  auto notOp =
+      getState<ComponentLoweringState>().getNewLibraryOpInstance<calyx::NotLibOp>(
+          rewriter, ifOp.getLoc(), types);
+  
+  auto notCond = notOp.getOut();
+  auto thenYield = ifOp.thenYield();
+  auto elseYield = ifOp.elseYield();
+  
+  for (int i = 0, num = ifOp.getNumResults(); i < num; ++i) {
+    auto group = createGroupForOp<calyx::CombGroupOp>(rewriter, ifOp);
+    rewriter.setInsertionPointToEnd(group.getBodyBlock());
+
+    auto res = ifOp.getResult(i);
+    SmallVector<Type> types;
+    types.push_back(res.getType());
+    types.push_back(res.getType());
+    auto wireOp =
+        getState<ComponentLoweringState>().getNewLibraryOpInstance<calyx::WireLibOp>(
+            rewriter, ifOp.getLoc(), types);
+    rewriter.create<calyx::AssignOp>(ifOp.getLoc(), wireOp.getIn(), thenYield.getOperand(i), cond);
+    rewriter.create<calyx::AssignOp>(ifOp.getLoc(), wireOp.getIn(), elseYield.getOperand(i), notCond);
+    getState<ComponentLoweringState>().registerEvaluatingGroup(wireOp.getOut(), group);
+    res.replaceAllUsesWith(wireOp.getOut());
+  }
+
+  return success();
 }
 
 LogicalResult
@@ -924,6 +963,7 @@ class BuildScheduleRegs : public calyx::FuncOpPartialLoweringPattern {
   LogicalResult
   partiallyLowerFuncToComp(FuncOp funcOp,
                            PatternRewriter &rewriter) const override {
+    int opCount = 0;
     funcOp.walk([&](stg::STGRegisterOp op) {
       // Condition registers are handled in BuildWhileGroups.
       auto *parent = op->getParentOp();
@@ -957,9 +997,17 @@ class BuildScheduleRegs : public calyx::FuncOpPartialLoweringPattern {
         // Create a register for passing this result to later steps.
         Value value = operand.get();
         Type resultType = value.getType();
+        
+        if (resultType.isa<MemRefType>()) {
+          step->getResult(i).replaceAllUsesWith(value);
+          continue;
+        }
+
         assert(resultType.isa<IntegerType>() &&
                "unsupported stg result type");
-        auto name = SmallString<20>("step_");
+        auto name = SmallString<20>("op_");
+        name += std::to_string(opCount);
+        name += "_step_";
         name += std::to_string(step.getStepNumber());
         name += "_register_";
         name += std::to_string(i);
@@ -973,6 +1021,7 @@ class BuildScheduleRegs : public calyx::FuncOpPartialLoweringPattern {
         // replace all uses inside BuildSTGGroups, once the stg
         // register created here has been assigned to.
       }
+      opCount++;
     });
     return success();
   }
@@ -988,7 +1037,7 @@ class BuildSTGGroups : public calyx::FuncOpPartialLoweringPattern {
     auto res = funcOp.walk([&](stg::STGWhileOp stg) {
       for (auto step :
            stg.getScheduleBlock().getOps<stg::STGStepOp>())
-        if (failed(buildStepGroups(stg, step, rewriter)))
+        if (failed(buildWhileStepGroups(stg, step, rewriter)))
           return WalkResult::interrupt();
         return WalkResult::advance();
     });
@@ -996,10 +1045,73 @@ class BuildSTGGroups : public calyx::FuncOpPartialLoweringPattern {
     if (res.wasInterrupted())
       return failure();
 
+    for (auto step : funcOp.getOps<stg::STGStepOp>())
+      if (failed(buildFuncStepGroups(funcOp, step, rewriter)))
+        return failure();
+
     return success();
   }
 
-  LogicalResult buildStepGroups(stg::STGWhileOp whileOp,
+  LogicalResult buildFuncStepGroups(func::FuncOp funcOp,
+                                 stg::STGStepOp step,
+                                 PatternRewriter &rewriter) const {
+    // Collect stg registers for step.
+    auto stgRegisters =
+        getState<ComponentLoweringState>().getSTGRegs(step);
+    // Get the number of stg steps in the steps block, excluding the
+    // terminator. The verifier guarantees there is at least one step followed
+    // by a terminator.
+    auto steps = funcOp.getBody().getOps<stg::STGStepOp>();
+    size_t numStages = std::distance(steps.begin(), steps.end());
+    assert(numStages > 0);
+
+    getState<ComponentLoweringState>().addBlockScheduleable(step->getBlock(),
+                                                            step);
+
+    auto makeScheduleable = [&](calyx::GroupOp group) {
+      getState<ComponentLoweringState>().addBlockScheduleable(&step.getBodyBlock(), 
+                                                              group);
+    };
+
+    MutableArrayRef<OpOperand> operands =
+        step.getBodyBlock().getTerminator()->getOpOperands();
+
+    for (auto &operand : operands) {
+      unsigned i = operand.getOperandNumber();
+      Value value = operand.get();
+
+      if (value.getType().isa<MemRefType>())
+        continue;
+
+      // Get the stg register for that result.
+      auto stgRegister = stgRegisters[i];
+
+      // Get the evaluating group for that value.
+      calyx::GroupInterface evaluatingGroup =
+          getState<ComponentLoweringState>().getEvaluatingGroup(value);
+
+      // Remember the final group for this step result.
+      calyx::GroupOp group;
+
+      // Stitch the register in, depending on whether the group was
+      // combinational or sequential.
+      if (auto combGroup =
+              dyn_cast<calyx::CombGroupOp>(evaluatingGroup.getOperation())) {
+        group =
+            convertCombToSeqGroup(combGroup, stgRegister, value, rewriter);
+        makeScheduleable(group);
+      } else
+        group =
+            replaceGroupRegister(evaluatingGroup, stgRegister, rewriter);
+
+      // Replace the step result uses with the register out.
+      step.getResult(i).replaceAllUsesWith(stgRegister.getOut());
+
+    }
+    return success();
+  }
+
+  LogicalResult buildWhileStepGroups(stg::STGWhileOp whileOp,
                                  stg::STGStepOp step,
                                  PatternRewriter &rewriter) const {
     // Collect stg registers for step.

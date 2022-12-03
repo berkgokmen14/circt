@@ -210,11 +210,19 @@ void STGStepOp::build(OpBuilder &builder, OperationState &state,
 unsigned STGStepOp::getStepNumber() {
   unsigned number = 0;
   auto *op = getOperation();
-  auto parent = op->getParentOfType<STGWhileOp>();
-  Operation *stage = &parent.getScheduleBlock().front();
-  while (stage != op && stage->getNextNode()) {
+  Operation *step;
+  if (auto parent = op->getParentOfType<STGWhileOp>(); parent)
+    step = &parent.getScheduleBlock().front();
+  else if (auto parent = op->getParentOfType<func::FuncOp>(); parent)
+    step = &parent.getBody().front().front();
+  else {
+    op->emitOpError("STGStepOp not inside a function or STGWhileOp");
+    return -1;
+  }
+
+  while (step != op && step->getNextNode()) {
     ++number;
-    stage = stage->getNextNode();
+    step = step->getNextNode();
   }
   return number;
 }

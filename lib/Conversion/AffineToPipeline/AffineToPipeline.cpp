@@ -55,9 +55,10 @@ struct AffineToPipeline : public AffineToPipelineBase<AffineToPipeline> {
 private:
   LogicalResult
   lowerAffineStructures(MemoryDependenceAnalysis &dependenceAnalysis);
-  LogicalResult populateOperatorTypes(SmallVectorImpl<AffineForOp> &loopNest);
-  LogicalResult solveSchedulingProblem(SmallVectorImpl<AffineForOp> &loopNest);
-  LogicalResult createPipelinePipeline(SmallVectorImpl<AffineForOp> &loopNest);
+  LogicalResult unrollSubLoops(AffineForOp &loop);
+  LogicalResult populateOperatorTypes(AffineForOp &loop);
+  LogicalResult solveSchedulingProblem(AffineForOp &loop);
+  LogicalResult createPipelinePipeline(AffineForOp &loop);
 
   CyclicSchedulingAnalysis *schedulingAnalysis;
 };
@@ -68,6 +69,37 @@ void AffineToPipeline::runOnOperation() {
   // Get dependence analysis for the whole function.
   auto dependenceAnalysis = getAnalysis<MemoryDependenceAnalysis>();
 
+  // Collect loops to pipeline and work on them.
+  SmallVector<AffineForOp> loops;
+
+  auto hasPipelinedParent = [](Operation *op) {
+    Operation *currentOp = op;
+
+    while (!isa<ModuleOp>(currentOp->getParentOp())) {
+      if (currentOp->getParentOp()->hasAttr("hls.pipeline"))
+        return true;
+      currentOp = currentOp->getParentOp();
+    }
+
+    return false;
+  };
+  
+  getOperation()->walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (!isa<AffineForOp>(op) || !op->hasAttr("hls.pipeline"))
+      return;
+
+    if (hasPipelinedParent(op))
+      return;
+
+    loops.push_back(cast<AffineForOp>(op));
+  });
+
+  // Unroll loops within this loop to make pipelining possible
+  for (auto loop : llvm::make_early_inc_range(loops)) {
+    if (failed(unrollSubLoops(loop)))
+      return signalPassFailure();
+  }
+
   // After dependence analysis, materialize affine structures.
   if (failed(lowerAffineStructures(dependenceAnalysis)))
     return signalPassFailure();
@@ -75,26 +107,17 @@ void AffineToPipeline::runOnOperation() {
   // Get scheduling analysis for the whole function.
   schedulingAnalysis = &getAnalysis<CyclicSchedulingAnalysis>();
 
-  // Collect perfectly nested loops and work on them.
-  auto outerLoops = getOperation().getOps<AffineForOp>();
-  for (auto root : llvm::make_early_inc_range(outerLoops)) {
-    SmallVector<AffineForOp> nestedLoops;
-    getPerfectlyNestedLoops(nestedLoops, root);
-
-    // Restrict to single loops to simplify things for now.
-    if (nestedLoops.size() != 1)
-      continue;
-
+  for (auto loop : llvm::make_early_inc_range(loops)) {
     // Populate the target operator types.
-    if (failed(populateOperatorTypes(nestedLoops)))
+    if (failed(populateOperatorTypes(loop)))
       return signalPassFailure();
 
     // Solve the scheduling problem computed by the analysis.
-    if (failed(solveSchedulingProblem(nestedLoops)))
+    if (failed(solveSchedulingProblem(loop)))
       return signalPassFailure();
 
     // Convert the IR.
-    if (failed(createPipelinePipeline(nestedLoops)))
+    if (failed(createPipelinePipeline(loop)))
       return signalPassFailure();
   }
 }
@@ -238,17 +261,32 @@ LogicalResult AffineToPipeline::lowerAffineStructures(
   return success();
 }
 
+LogicalResult AffineToPipeline::unrollSubLoops(
+    AffineForOp &forOp) {
+  auto result = forOp.getBody()->walk<WalkOrder::PostOrder>([](AffineForOp op) {
+    if (loopUnrollFull(op).failed())
+      return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+
+  if (result.wasInterrupted()) {
+    forOp.emitOpError("Could not unroll sub loops");
+    return failure();
+  }
+
+  return success();
+}
+
 /// Populate the schedling problem operator types for the dialect we are
 /// targetting. Right now, we assume Calyx, which has a standard library with
 /// well-defined operator latencies. Ultimately, we should move this to a
 /// dialect interface in the Scheduling dialect.
 LogicalResult AffineToPipeline::populateOperatorTypes(
-    SmallVectorImpl<AffineForOp> &loopNest) {
-  // Scheduling analyis only considers the innermost loop nest for now.
-  auto forOp = loopNest.back();
-
+    AffineForOp &forOp) {
   // Retrieve the cyclic scheduling problem for this loop.
   CyclicProblem &problem = schedulingAnalysis->getProblem(forOp);
+
+  forOp.dump();
 
   // Load the Calyx operator library into the problem. This is a very minimal
   // set of arithmetic and memory operators for now. This should ultimately be
@@ -303,10 +341,7 @@ LogicalResult AffineToPipeline::populateOperatorTypes(
 
 /// Solve the pre-computed scheduling problem.
 LogicalResult AffineToPipeline::solveSchedulingProblem(
-    SmallVectorImpl<AffineForOp> &loopNest) {
-  // Scheduling analyis only considers the innermost loop nest for now.
-  auto forOp = loopNest.back();
-
+    AffineForOp &forOp) {
   // Retrieve the cyclic scheduling problem for this loop.
   CyclicProblem &problem = schedulingAnalysis->getProblem(forOp);
 
@@ -351,34 +386,31 @@ LogicalResult AffineToPipeline::solveSchedulingProblem(
 
 /// Create the pipeline op for a loop nest.
 LogicalResult AffineToPipeline::createPipelinePipeline(
-    SmallVectorImpl<AffineForOp> &loopNest) {
-  // Scheduling analyis only considers the innermost loop nest for now.
-  auto forOp = loopNest.back();
-
+    AffineForOp &forOp) {
   // Retrieve the cyclic scheduling problem for this loop.
   CyclicProblem &problem = schedulingAnalysis->getProblem(forOp);
 
-  auto outerLoop = loopNest.front();
-  auto innerLoop = loopNest.back();
-  ImplicitLocOpBuilder builder(outerLoop.getLoc(), outerLoop);
+  // auto *parent = forOp->getParentOp();
+
+  ImplicitLocOpBuilder builder(forOp->getLoc(), forOp);
 
   // Create Values for the loop's lower and upper bounds.
-  Value lowerBound = lowerAffineLowerBound(innerLoop, builder);
-  Value upperBound = lowerAffineUpperBound(innerLoop, builder);
-  int64_t stepValue = innerLoop.getStep();
+  Value lowerBound = lowerAffineLowerBound(forOp, builder);
+  Value upperBound = lowerAffineUpperBound(forOp, builder);
+  int64_t stepValue = forOp.getStep();
   auto step = builder.create<arith::ConstantOp>(
       IntegerAttr::get(builder.getIndexType(), stepValue));
 
   // Create the pipeline op, with the same result types as the inner loop. An
   // iter arg is created for the induction variable.
-  TypeRange resultTypes = innerLoop.getResultTypes();
+  TypeRange resultTypes = forOp.getResultTypes();
 
   auto ii = builder.getI64IntegerAttr(problem.getInitiationInterval().value());
 
   SmallVector<Value> iterArgs;
   iterArgs.push_back(lowerBound);
-  iterArgs.append(innerLoop.getIterOperands().begin(),
-                  innerLoop.getIterOperands().end());
+  iterArgs.append(forOp.getIterOperands().begin(),
+                  forOp.getIterOperands().end());
 
   // If possible, attach a constant trip count attribute. This could be
   // generalized to support non-constant trip counts by supporting an AffineMap.
@@ -495,12 +527,12 @@ LogicalResult AffineToPipeline::createPipelinePipeline(
       for (int i = 0, s = iterArgs.size(); i < s; ++i) {
         // Add induction variable forwarding
         stageTerminator->insertOperands(stageTerminator->getNumOperands(),
-                                        valueMap.lookup(innerLoop.getLoopBody().getArgument(0)));
+                                        valueMap.lookup(forOp.getLoopBody().getArgument(0)));
         auto operandNum = stageTerminator->getNumOperands() - 1 - i;
 
         // Update mapping for induction variable to forwarded result
         auto iterArg = stage->getResult(operandNum);
-        valueMap.map(innerLoop.getLoopBody().getArgument(0), iterArg);
+        valueMap.map(forOp.getLoopBody().getArgument(0), iterArg);
       }
     }
 
@@ -536,7 +568,7 @@ LogicalResult AffineToPipeline::createPipelinePipeline(
     forOp.getResult(i).replaceAllUsesWith(pipeline.getResult(i));
 
   // Remove the loop nest from the IR.
-  loopNest.front().walk([](Operation *op) {
+  forOp.walk([](Operation *op) {
     op->dropAllUses();
     op->dropAllDefinedValueUses();
     op->dropAllReferences();

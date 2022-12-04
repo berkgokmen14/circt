@@ -967,6 +967,9 @@ OpFoldResult AndRPrimOp::fold(ArrayRef<Attribute> operands) {
   if (!hasKnownWidthIntTypes(*this))
     return {};
 
+  if (getInput().getType().getBitWidthOrSentinel() == 0)
+    return getIntAttr(getType(), APInt(1, 1));
+
   // x == -1
   if (auto cst = getConstant(operands[0]))
     return getIntAttr(getType(), APInt(1, cst->isAllOnes()));
@@ -982,6 +985,9 @@ OpFoldResult AndRPrimOp::fold(ArrayRef<Attribute> operands) {
 OpFoldResult OrRPrimOp::fold(ArrayRef<Attribute> operands) {
   if (!hasKnownWidthIntTypes(*this))
     return {};
+
+  if (getInput().getType().getBitWidthOrSentinel() == 0)
+    return getIntAttr(getType(), APInt(1, 0));
 
   // x != 0
   if (auto cst = getConstant(operands[0]))
@@ -999,6 +1005,9 @@ OpFoldResult XorRPrimOp::fold(ArrayRef<Attribute> operands) {
   if (!hasKnownWidthIntTypes(*this))
     return {};
 
+  if (getInput().getType().getBitWidthOrSentinel() == 0)
+    return getIntAttr(getType(), APInt(1, 0));
+
   // popcount(x) & 1
   if (auto cst = getConstant(operands[0]))
     return getIntAttr(getType(), APInt(1, cst->countPopulation() & 1));
@@ -1015,6 +1024,12 @@ OpFoldResult XorRPrimOp::fold(ArrayRef<Attribute> operands) {
 //===----------------------------------------------------------------------===//
 
 OpFoldResult CatPrimOp::fold(ArrayRef<Attribute> operands) {
+
+  if (getLhs().getType().getBitWidthOrSentinel() == 0)
+    return getRhs();
+  if (getRhs().getType().getBitWidthOrSentinel() == 0)
+    return getLhs();
+
   if (!hasKnownWidthIntTypes(*this))
     return {};
 

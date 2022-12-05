@@ -12,6 +12,7 @@
 
 #include "circt/Analysis/SchedulingAnalysis.h"
 #include "circt/Analysis/DependenceAnalysis.h"
+#include "circt/Dialect/Pipeline/Pipeline.h"
 #include "circt/Dialect/STG/STG.h"
 #include "circt/Scheduling/Problems.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -175,7 +176,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
 
   // Insert memory dependences into the problem.
   whileOp.getAfter().walk([&](Operation *op) {
-    if (op->getParentOfType<STGWhileOp>() != nullptr)
+    if (op->getParentOfType<STGWhileOp>() != nullptr 
+        || op->getParentOfType<pipeline::PipelineWhileOp>() != nullptr)
       return;
 
     // Insert every operation into the problem.
@@ -215,6 +217,9 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
 
   // Insert conditional dependences into the problem.
   whileOp.getAfter().walk([&](Operation *op) {
+    if (op->getParentOfType<STGWhileOp>() != nullptr 
+        || op->getParentOfType<pipeline::PipelineWhileOp>() != nullptr)
+      return WalkResult::advance();
     Block *thenBlock = nullptr;
     Block *elseBlock = nullptr;
     if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
@@ -252,7 +257,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
   // terminator to ensure the problem schedules them before the terminator.
   auto *anchor = whileOp.getAfter().back().getTerminator();
   whileOp.getAfter().walk([&](Operation *op) {
-    if (op->getParentOfType<STGWhileOp>() != nullptr)
+    if (op->getParentOfType<STGWhileOp>() != nullptr 
+        || op->getParentOfType<pipeline::PipelineWhileOp>() != nullptr)
       return;
     if (!isa<mlir::AffineStoreOp, memref::StoreOp>(op))
       return;
@@ -273,7 +279,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
 
   // Insert memory dependences into the problem.
   funcOp.getBody().walk([&](Operation *op) {
-    if (op->getParentOfType<STGWhileOp>() != nullptr)
+    if (op->getParentOfType<STGWhileOp>() != nullptr 
+        || op->getParentOfType<pipeline::PipelineWhileOp>() != nullptr)
       return;
 
     // Insert every operation into the problem.
@@ -313,7 +320,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
 
   // Insert conditional dependences into the problem.
   funcOp.getBody().walk([&](Operation *op) {
-    if (op->getParentOfType<STGWhileOp>() != nullptr)
+    if (op->getParentOfType<STGWhileOp>() != nullptr 
+        || op->getParentOfType<pipeline::PipelineWhileOp>() != nullptr)
       return WalkResult::advance();
 
     Block *thenBlock = nullptr;
@@ -353,7 +361,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
   // terminator to ensure the problem schedules them before the terminator.
   auto *anchor = funcOp.getBody().back().getTerminator();
   funcOp.getBody().walk([&](Operation *op) {
-    if (op->getParentOfType<STGWhileOp>() != nullptr)
+    if (op->getParentOfType<STGWhileOp>() != nullptr 
+        || op->getParentOfType<pipeline::PipelineWhileOp>() != nullptr)
       return;
     if (!isa<mlir::AffineStoreOp, memref::StoreOp>(op))
       return;

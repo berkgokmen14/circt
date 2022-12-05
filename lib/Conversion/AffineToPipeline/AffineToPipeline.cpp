@@ -34,6 +34,8 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
+#include <string>
+#include <utility>
 
 #define DEBUG_TYPE "affine-to-pipeline"
 
@@ -56,11 +58,13 @@ private:
   LogicalResult
   lowerAffineStructures(MemoryDependenceAnalysis &dependenceAnalysis);
   LogicalResult unrollSubLoops(AffineForOp &loop);
-  LogicalResult populateOperatorTypes(AffineForOp &loop);
-  LogicalResult solveSchedulingProblem(AffineForOp &loop);
-  LogicalResult createPipelinePipeline(AffineForOp &loop);
+  LogicalResult populateOperatorTypes(AffineForOp &loop, ModuloProblem &problem);
+  LogicalResult solveSchedulingProblem(AffineForOp &loop, ModuloProblem &problem);
+  LogicalResult createPipelinePipeline(AffineForOp &loop, ModuloProblem &problem);
 
   CyclicSchedulingAnalysis *schedulingAnalysis;
+  unsigned resII = 1;
+  Optional<Problem::OperatorType> limitingOpr;
 };
 
 } // namespace
@@ -109,15 +113,17 @@ void AffineToPipeline::runOnOperation() {
 
   for (auto loop : llvm::make_early_inc_range(loops)) {
     // Populate the target operator types.
-    if (failed(populateOperatorTypes(loop)))
+    ModuloProblem moduloProblem =
+        ModuloProblem::get(schedulingAnalysis->getProblem(loop));
+    if (failed(populateOperatorTypes(loop, moduloProblem)))
       return signalPassFailure();
 
     // Solve the scheduling problem computed by the analysis.
-    if (failed(solveSchedulingProblem(loop)))
+    if (failed(solveSchedulingProblem(loop, moduloProblem)))
       return signalPassFailure();
 
     // Convert the IR.
-    if (failed(createPipelinePipeline(loop)))
+    if (failed(createPipelinePipeline(loop, moduloProblem)))
       return signalPassFailure();
   }
 }
@@ -256,7 +262,7 @@ LogicalResult AffineToPipeline::lowerAffineStructures(
 
   // Loop invariant code motion to hoist produced constants out of loop
   op->walk(
-     [&](LoopLikeOpInterface loopLike) { moveLoopInvariantCode(loopLike); });
+      [&](LoopLikeOpInterface loopLike) { moveLoopInvariantCode(loopLike); });
 
   return success();
 }
@@ -281,13 +287,11 @@ LogicalResult AffineToPipeline::unrollSubLoops(
 /// targetting. Right now, we assume Calyx, which has a standard library with
 /// well-defined operator latencies. Ultimately, we should move this to a
 /// dialect interface in the Scheduling dialect.
-LogicalResult AffineToPipeline::populateOperatorTypes(
-    AffineForOp &forOp) {
-  // Retrieve the cyclic scheduling problem for this loop.
-  CyclicProblem &problem = schedulingAnalysis->getProblem(forOp);
-
-  forOp.dump();
-
+LogicalResult
+AffineToPipeline::populateOperatorTypes(AffineForOp &forOp,
+                                        ModuloProblem &problem) {
+  llvm::MapVector<TypedValue<MemRefType> *, std::pair<unsigned, unsigned>>
+      memOps;
   // Load the Calyx operator library into the problem. This is a very minimal
   // set of arithmetic and memory operators for now. This should ultimately be
   // pulled out into some sort of dialect interface.
@@ -301,27 +305,54 @@ LogicalResult AffineToPipeline::populateOperatorTypes(
   Operation *unsupported;
   WalkResult result = forOp.getBody()->walk([&](Operation *op) {
     return TypeSwitch<Operation *, WalkResult>(op)
-        .Case<IfOp, AffineYieldOp, arith::ConstantOp,
-              IndexCastOp, memref::AllocaOp, YieldOp>([&](Operation *combOp) {
+        .Case<IfOp, AffineYieldOp, arith::ConstantOp, IndexCastOp,
+              memref::AllocaOp, YieldOp>([&](Operation *combOp) {
           // Some known combinational ops.
           problem.setLinkedOperatorType(combOp, combOpr);
           return WalkResult::advance();
         })
-        .Case<AddIOp, CmpIOp>(
-          [&](Operation *seqOp) {
-            // These ops need to be sequential for now because we do not
-            // have enough information to chain them together yet.
-            problem.setLinkedOperatorType(seqOp, seqOpr);
-            return WalkResult::advance();
-          })
-        .Case<AffineLoadOp, AffineStoreOp, memref::LoadOp, memref::StoreOp>(
-          [&](Operation *memOp) {
-            // Some known sequential ops. In certain cases, reads may be
-            // combinational in Calyx, but taking advantage of that is left as
-            // a future enhancement.
-            problem.setLinkedOperatorType(memOp, seqOpr);
-            return WalkResult::advance();
-          })
+        .Case<AddIOp, CmpIOp>([&](Operation *seqOp) {
+          // These ops need to be sequential for now because we do not
+          // have enough information to chain them together yet.
+          problem.setLinkedOperatorType(seqOp, seqOpr);
+          return WalkResult::advance();
+        })
+        .Case<AffineStoreOp, memref::StoreOp>([&](Operation *memOp) {
+          // Some known sequential ops. In certain cases, reads may be
+          // combinational in Calyx, but taking advantage of that is left as
+          // a future enhancement.
+          TypedValue<MemRefType> memRef =
+              isa<AffineStoreOp>(*memOp)
+                  ? cast<AffineStoreOp>(*memOp).getMemRef()
+                  : cast<memref::StoreOp>(*memOp).getMemRef();
+          memOps[&memRef] =
+              std::pair(memOps[&memRef].first, memOps[&memRef].second + 1);
+          Problem::OperatorType memOpr = problem.getOrInsertOperatorType(
+              std::to_string(hash_value(memRef)));
+          llvm::errs() << memOpr << "\n";
+          problem.setLatency(memOpr, 1);
+          problem.setLimit(memOpr, 1);
+          problem.setLinkedOperatorType(memOp, memOpr);
+          return WalkResult::advance();
+        })
+        .Case<AffineLoadOp, memref::LoadOp>([&](Operation *memOp) {
+          // Some known sequential ops. In certain cases, reads may be
+          // combinational in Calyx, but taking advantage of that is left as
+          // a future enhancement.
+          TypedValue<MemRefType> memRef =
+              isa<AffineLoadOp>(*memOp)
+                  ? cast<AffineLoadOp>(*memOp).getMemRef()
+                  : cast<memref::LoadOp>(*memOp).getMemRef();
+          memOps[&memRef] =
+              std::pair(memOps[&memRef].first + 1, memOps[&memRef].second);
+          Problem::OperatorType memOpr = problem.getOrInsertOperatorType(
+              std::to_string(hash_value(memRef)));
+          llvm::errs() << memOpr << "\n";
+          problem.setLatency(memOpr, 1);
+          problem.setLimit(memOpr, 1);
+          problem.setLinkedOperatorType(memOp, memOpr);
+          return WalkResult::advance();
+        })
         .Case<MulIOp>([&](Operation *mcOp) {
           // Some known multi-cycle ops.
           problem.setLinkedOperatorType(mcOp, mcOpr);
@@ -333,6 +364,20 @@ LogicalResult AffineToPipeline::populateOperatorTypes(
         });
   });
 
+  // for (auto mem : memOps) {
+  //   unsigned max = std::max(mem.second.first, mem.second.second);
+  //   if (max > this->resII) {
+  //     this->resII = max;
+  //     if (mem.second.first) {
+  //       this->limitingOpr = problem.getOrInsertOperatorType(
+  //           "ld_" + std::to_string(hash_value(*mem.first)));
+  //     } else {
+  //       this->limitingOpr = problem.getOrInsertOperatorType(
+  //           "st_" + std::to_string(hash_value(*mem.first)));
+  //     }
+  //   }
+  // }
+
   if (result.wasInterrupted())
     return forOp.emitError("unsupported operation ") << *unsupported;
 
@@ -340,11 +385,9 @@ LogicalResult AffineToPipeline::populateOperatorTypes(
 }
 
 /// Solve the pre-computed scheduling problem.
-LogicalResult AffineToPipeline::solveSchedulingProblem(
-    AffineForOp &forOp) {
-  // Retrieve the cyclic scheduling problem for this loop.
-  CyclicProblem &problem = schedulingAnalysis->getProblem(forOp);
-
+LogicalResult
+AffineToPipeline::solveSchedulingProblem(AffineForOp &forOp,
+                                         ModuloProblem &problem) {
   // Optionally debug problem inputs.
   LLVM_DEBUG(forOp.getBody()->walk<WalkOrder::PreOrder>([&](Operation *op) {
     llvm::dbgs() << "Scheduling inputs for " << *op;
@@ -363,12 +406,15 @@ LogicalResult AffineToPipeline::solveSchedulingProblem(
     return failure();
 
   auto *anchor = forOp.getBody()->getTerminator();
+
   if (failed(scheduleSimplex(problem, anchor)))
     return failure();
 
   // Verify the solution.
   if (failed(problem.verify()))
     return failure();
+
+  llvm::errs() << "II = " << problem.getInitiationInterval().value() << "\n";
 
   // Optionally debug problem outputs.
   LLVM_DEBUG({
@@ -385,13 +431,9 @@ LogicalResult AffineToPipeline::solveSchedulingProblem(
 }
 
 /// Create the pipeline op for a loop nest.
-LogicalResult AffineToPipeline::createPipelinePipeline(
-    AffineForOp &forOp) {
-  // Retrieve the cyclic scheduling problem for this loop.
-  CyclicProblem &problem = schedulingAnalysis->getProblem(forOp);
-
-  // auto *parent = forOp->getParentOp();
-
+LogicalResult
+AffineToPipeline::createPipelinePipeline(AffineForOp &forOp,
+                                         ModuloProblem &problem) {
   ImplicitLocOpBuilder builder(forOp->getLoc(), forOp);
 
   // Create Values for the loop's lower and upper bounds.
@@ -452,12 +494,12 @@ LogicalResult AffineToPipeline::createPipelinePipeline(
 
   // Iterate in order of the start times.
   SmallVector<unsigned> startTimes;
-  for (const auto& group : startGroups)
+  for (const auto &group : startGroups)
     startTimes.push_back(group.first);
   llvm::sort(startTimes);
 
   DominanceInfo dom(getOperation());
-  for (const auto& i : enumerate(startTimes)) {
+  for (const auto &i : enumerate(startTimes)) {
     auto startTime = i.value();
     auto group = startGroups[startTime];
     OpBuilder::InsertionGuard g(builder);
@@ -526,8 +568,9 @@ LogicalResult AffineToPipeline::createPipelinePipeline(
     if (i.index() < startTimes.size() - 1) {
       for (int i = 0, s = iterArgs.size(); i < s; ++i) {
         // Add induction variable forwarding
-        stageTerminator->insertOperands(stageTerminator->getNumOperands(),
-                                        valueMap.lookup(forOp.getLoopBody().getArgument(0)));
+        stageTerminator->insertOperands(
+            stageTerminator->getNumOperands(),
+            valueMap.lookup(forOp.getLoopBody().getArgument(0)));
         auto operandNum = stageTerminator->getNumOperands() - 1 - i;
 
         // Update mapping for induction variable to forwarded result

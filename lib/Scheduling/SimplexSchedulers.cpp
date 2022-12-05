@@ -261,6 +261,7 @@ protected:
   enum { OBJ_LATENCY = 0, OBJ_AXAP /* i.e. either ASAP or ALAP */ };
   bool fillObjectiveRow(SmallVector<int> &row, unsigned obj) override;
   void updateMargins();
+  unsigned int resII();
   void incrementII();
   void scheduleOperation(Operation *n);
   unsigned computeResMinII();

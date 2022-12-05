@@ -94,8 +94,6 @@ void AffineToSTG::runOnOperation() {
   schedulingAnalysis = &getAnalysis<SharedOperatorsSchedulingAnalysis>();
 
   SmallVector<WhileOp> loops;
-  // auto loopOps = getOperation().getOps<WhileOp>();
-  // loops.append(loopOps.begin(), loopOps.end());
 
   getOperation().walk([&](WhileOp loop) {
     loops.push_back(loop);
@@ -322,7 +320,8 @@ LogicalResult AffineToSTG::populateOperatorTypes(
 
   Operation *unsupported;
   WalkResult result = region->walk<WalkOrder::PreOrder>([&](Operation *op) {
-    if (op->getParentOfType<STGWhileOp>() != nullptr) {
+    if (op->getParentOfType<STGWhileOp>() != nullptr
+        || op->getParentOfType<PipelineWhileOp>() != nullptr) {
       return WalkResult::advance();
     }
 
@@ -370,6 +369,12 @@ LogicalResult AffineToSTG::populateOperatorTypes(
         .Case<MulIOp>([&](Operation *mcOp) {
           // Some known multi-cycle ops.
           problem.setLinkedOperatorType(mcOp, mcOpr);
+          return WalkResult::advance();
+        })
+        .Case<PipelineWhileOp>([&](Operation *pipelineOp) {
+          // Problem::OperatorType whileOpr = problem.getOrInsertOperatorType("while");
+          // problem.setLatency(whileOpr, 3);
+          problem.setLinkedOperatorType(pipelineOp, seqOpr);
           return WalkResult::advance();
         })
         // .Case<STGWhileOp>([&](Operation *whileOp) {
@@ -659,7 +664,6 @@ LogicalResult AffineToSTG::createWhileOpSTG(
       }
     }
   }
-
 
   // Add the iter args and results to the terminator.
   auto scheduleTerminator =

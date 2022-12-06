@@ -128,6 +128,28 @@ bool noStoresToMemory(Value memoryReference) {
   });
 }
 
+bool singleLoadFromMemoryInBlock(Value memoryReference, Block *block) {
+  return llvm::count_if(memoryReference.getUses(), [&block](OpOperand &user) {
+          auto res = block->walk([&](mlir::memref::LoadOp op) {
+            if (op.getOperation() == user.getOwner())
+              return WalkResult::interrupt();
+            return WalkResult::advance();
+          });
+          return res.wasInterrupted();
+        }) <= 1;
+}
+
+bool noStoresToMemoryInBlock(Value memoryReference, Block *block) {
+  return llvm::none_of(memoryReference.getUses(), [&block](OpOperand &user) {
+    auto res = block->walk([&](mlir::memref::StoreOp op) {
+      if (op.getOperation() == user.getOwner())
+        return WalkResult::interrupt();
+      return WalkResult::advance();
+    });
+    return res.wasInterrupted();
+  });
+}
+
 Value getComponentOutput(calyx::ComponentOp compOp, unsigned outPortIdx) {
   size_t index = compOp.getInputPortInfo().size() + outPortIdx;
   assert(index < compOp.getNumArguments() &&

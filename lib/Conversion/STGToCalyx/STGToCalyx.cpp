@@ -189,40 +189,87 @@ public:
 
   /// Create the pipeline prologue.
   void createPipelinePrologue(PipelineWhileOp op, PatternRewriter &rewriter) {
-    auto ii = op.getII();
+    int ii = op.getII();
     auto stages = pipelinePrologue[op];
     for (size_t i = 0, e = stages.size(); i < e; ++i) {
       PatternRewriter::InsertionGuard g(rewriter);
       auto parOp = rewriter.create<calyx::ParOp>(op->getLoc());
       rewriter.setInsertionPointToStart(parOp.getBodyBlock());
-      for (size_t j = 0; j < i + 1; ++j)
+      int inSeq = 0;
+      calyx::SeqOp seqOp = rewriter.create<calyx::SeqOp>(op->getLoc());
+      for (size_t j = 0; j < i + 1; ++j) {
+        if (inSeq == ii) {
+          inSeq = 0;
+          rewriter.setInsertionPointAfter(seqOp);
+          seqOp = rewriter.create<calyx::SeqOp>(op->getLoc());
+        }
+
+        rewriter.setInsertionPointToStart(seqOp.getBodyBlock());
+
+        auto parOp = rewriter.create<calyx::ParOp>(op->getLoc());
+        rewriter.setInsertionPointToStart(parOp.getBodyBlock());
+
         for (auto group : stages[j])
           rewriter.create<calyx::EnableOp>(op->getLoc(), group);
+        ++inSeq;
+      }
     }
   }
 
   /// Create the pipeline body.
   void createPipelineBody(PipelineWhileOp op, PatternRewriter &rewriter) {
-    auto ii = op.getII();
-    auto stages = pipelinePrologue[op];
+    int ii = op.getII();
+    auto stages = pipelineBody[op];
+    int i = 0;
+
+    PatternRewriter::InsertionGuard g(rewriter);
+    // auto insertionPoint = rewriter.getInsertionPoint();
+    // auto *insertionBlock = rewriter.getInsertionBlock();
+    calyx::SeqOp seqOp = rewriter.create<calyx::SeqOp>(op->getLoc());
+    rewriter.setInsertionPointToStart(seqOp.getBodyBlock());
     for (const auto& stage : stages) {
-      PatternRewriter::InsertionGuard g(rewriter);
+      if (i == ii) {
+        i = 0;
+        rewriter.setInsertionPointAfter(seqOp);
+        seqOp = rewriter.create<calyx::SeqOp>(op->getLoc());
+      }
+
+      rewriter.setInsertionPointToStart(seqOp.getBodyBlock());
+
+      auto parOp = rewriter.create<calyx::ParOp>(op->getLoc());
+      rewriter.setInsertionPointToStart(parOp.getBodyBlock());
       for (auto group : stage)
         rewriter.create<calyx::EnableOp>(op->getLoc(), group);
+
+      ++i;
     }
   }
 
   /// Create the pipeline epilogue.
   void createPipelineEpilogue(PipelineWhileOp op, PatternRewriter &rewriter) {
-    auto ii = op.getII();
+    int ii = op.getII();
     auto stages = pipelineEpilogue[op];
     for (size_t i = 0, e = stages.size(); i < e; ++i) {
       PatternRewriter::InsertionGuard g(rewriter);
       auto parOp = rewriter.create<calyx::ParOp>(op->getLoc());
       rewriter.setInsertionPointToStart(parOp.getBodyBlock());
-      for (size_t j = i, f = stages.size(); j < f; ++j)
+      int inSeq = 0;
+      calyx::SeqOp seqOp = rewriter.create<calyx::SeqOp>(op->getLoc());
+      for (size_t j = i, f = stages.size(); j < f; ++j) {
+        if (inSeq == ii) {
+          inSeq = 0;
+          rewriter.setInsertionPointAfter(seqOp);
+          seqOp = rewriter.create<calyx::SeqOp>(op->getLoc());
+        }
+
+        rewriter.setInsertionPointToStart(seqOp.getBodyBlock());
+
+        auto parOp = rewriter.create<calyx::ParOp>(op->getLoc());
+        rewriter.setInsertionPointToStart(parOp.getBodyBlock());
         for (auto group : stages[j])
           rewriter.create<calyx::EnableOp>(op->getLoc(), group);
+        inSeq++;
+      }
     }
   }
 
@@ -476,6 +523,26 @@ private:
 LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      memref::LoadOp loadOp) const {
   Value memref = loadOp.getMemref();
+  Block *block = nullptr;
+  if (auto stageOp = loadOp->getParentOfType<PipelineWhileStageOp>(); stageOp) {
+    block = &stageOp.getBody().front();
+  } else if (auto stepOp = loadOp->getParentOfType<STGStepOp>(); stepOp) {
+    block = &stepOp.getBody().front();
+  } else {
+    loadOp->emitOpError("LoadOp not in stage or step op");
+    return failure();
+  }
+
+  if (!calyx::singleLoadFromMemoryInBlock(memref, block)) {
+    loadOp->emitOpError("LoadOp has more than one load in block");
+    return failure();
+  }
+
+  if (!calyx::noStoresToMemoryInBlock(memref, block)) {
+    loadOp->emitOpError("LoadOp has stores in block");
+    return failure();
+  }
+
   auto memoryInterface =
       getState<ComponentLoweringState>().getMemoryInterface(memref);
   // TODO: Check only one access to this memory per cycle
@@ -1495,16 +1562,12 @@ class BuildPipelineGroups : public calyx::FuncOpPartialLoweringPattern {
 
     MutableArrayRef<OpOperand> operands =
         stage.getBodyBlock().getTerminator()->getOpOperands();
-    bool isStageWithNoPipelinedValues =
-        operands.empty() && !stage.getBodyBlock().empty();
-    if (isStageWithNoPipelinedValues) {
-      // Covers the case where there are no values that need to be passed
-      // through to the next stage, e.g., some intermediary store.
-      for (auto &op : stage.getBodyBlock())
-        if (auto group = getState<ComponentLoweringState>()
-                             .getSinkGroupFrom<calyx::GroupOp>(&op))
-          updatePrologueAndEpilogue(*group);
-    }
+    // Covers the case where there are ops without values that need to be passed
+    // through to the next stage, e.g., some intermediary store.
+    for (auto &op : stage.getBodyBlock())
+      if (auto group = getState<ComponentLoweringState>()
+                           .getSinkGroupFrom<calyx::GroupOp>(&op))
+        updatePrologueAndEpilogue(*group);
 
     for (auto &operand : operands) {
       unsigned i = operand.getOperandNumber();
@@ -1874,7 +1937,7 @@ class LateSSAReplacement : public calyx::FuncOpPartialLoweringPattern {
   LogicalResult partiallyLowerFuncToComp(FuncOp funcOp,
                                          PatternRewriter &) const override {
     funcOp.walk([&](memref::LoadOp loadOp) {
-      if (calyx::singleLoadFromMemory(loadOp)) {
+      if (calyx::singleLoadFromMemoryInBlock(loadOp, loadOp->getBlock())) {
         /// In buildOpGroups we did not replace loadOp's results, to ensure a
         /// link between evaluating groups (which fix the input addresses of a
         /// memory op) and a readData result. Now, we may replace these SSA

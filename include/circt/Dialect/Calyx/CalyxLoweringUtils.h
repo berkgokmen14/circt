@@ -58,6 +58,14 @@ bool singleLoadFromMemory(Value memoryReference);
 // memory.
 bool noStoresToMemory(Value memoryReference);
 
+// Returns true if there exists only a single memref::LoadOp which loads from
+// the memory referenced by loadOp.
+bool singleLoadFromMemoryInBlock(Value memoryReference, Block *block);
+
+// Returns true if there are no memref::StoreOp uses with the referenced
+// memory.
+bool noStoresToMemoryInBlock(Value memoryReference, Block *block);
+
 // Get the index'th output port of compOp.
 Value getComponentOutput(calyx::ComponentOp compOp, unsigned outPortIdx);
 

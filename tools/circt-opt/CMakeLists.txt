@@ -53,6 +53,7 @@ target_link_libraries(circt-opt
   CIRCTSeq
   CIRCTSeqTransforms
   CIRCTSSP
+  CIRCTSSPTransforms
   CIRCTStandardToHandshake
   CIRCTPipelineOps
   CIRCTSTGOps

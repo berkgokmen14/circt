@@ -130,15 +130,15 @@ def AggregateConstantOp : FIRRTLOp<"aggregateconstant", [Pure, ConstantLike]> {
   let description = [{
     The constant operations produces a constant value of an aggregate type.  The
     type must be passive.  Clock and reset values are supported.
-    For nested aggregates, values are applied in depth-first fassion.
+    For nested aggregates, embedded arrays are used.
     ```
-      %result = firrtl.aggregateconstant 1, 2, 3 : !firrtl.bundle<a: uint<8>, b: uint<5>, c: uint<4>>
-      %result = firrtl.aggregateconstant 1, 2, 3 : !firrtl.vector<uint<8>, 3>
-
+      %result = firrtl.aggregateconstant [1, 2, 3] : !firrtl.bundle<a: uint<8>, b: uint<5>, c: uint<4>>
+      %result = firrtl.aggregateconstant [1, 2, 3] : !firrtl.vector<uint<8>, 3>
+      %result = firrtl.aggregateconstant [[1, 2], [3, 5]] : !firrtl.vector<!firrtl.bundle<a: uint<8>, b: uint<5>>, 2>
     ```
   }];
 
-  let arguments = (ins TypedArrayAttrBase<APSIntAttr, "field constants">:$fields);
+  let arguments = (ins ArrayAttr:$fields);
   let results = (outs AggregateType:$result);
 
   let assemblyFormat = "$fields attr-dict `:` type($result)";
@@ -265,7 +265,6 @@ def SubindexOp : FIRRTLExprOp<"subindex", [
   let hasFolder = 1;
   let hasCanonicalizer = 1;
 
-  // TODO: Could drop the result type, inferring it from the source.
   let assemblyFormat =
      "$input `[` $index `]` attr-dict `:` qualified(type($input))";
 
@@ -396,9 +395,11 @@ def DivPrimOp : IntBinaryPrimOp<"div", IntType> {
 }
 def RemPrimOp : IntBinaryPrimOp<"rem", IntType>;
 let inferType = "impl::inferBitwiseResult" in {
-  def AndPrimOp : IntBinaryPrimOp<"and", UIntType, [Commutative]>;
-  def OrPrimOp  : IntBinaryPrimOp<"or",  UIntType, [Commutative]>;
-  def XorPrimOp : IntBinaryPrimOp<"xor", UIntType, [Commutative]>;
+  let hasCanonicalizer = true in {
+    def AndPrimOp : IntBinaryPrimOp<"and", UIntType, [Commutative]>;
+    def OrPrimOp  : IntBinaryPrimOp<"or",  UIntType, [Commutative]>;
+    def XorPrimOp : IntBinaryPrimOp<"xor", UIntType, [Commutative]>;
+  }
 }
 
 // Comparison Operations
@@ -761,12 +762,6 @@ class RefResultTypeConstraint<string base, string ref>
   : TypesMatchWith<"reference base type should match",
                    base, ref,
                    "RefType::get($_self.cast<FIRRTLBaseType>())">;
-
-def RefInstancePortConstraint
-  : PredOpTrait<"it cannot have module port as an operand because it implies"
-  " upward reference XMR, which are not supported."
-  " The reference operand must be a port from firrtl.instance",
-                CPred<"!($ref.isa<BlockArgument>())">>;
 
 //===----------------------------------------------------------------------===//
 // RefOps

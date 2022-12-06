@@ -516,11 +516,31 @@ LogicalResult LowerAnnotationsPass::solveWiringProblems(ApplyState &state) {
     return {};
   };
 
+  auto getNoopCast = [](Value v) -> mlir::UnrealizedConversionCastOp {
+    auto op =
+        dyn_cast_or_null<mlir::UnrealizedConversionCastOp>(v.getDefiningOp());
+    if (op && op.getNumResults() == 1 && op.getNumOperands() == 1 &&
+        op.getResultTypes()[0] == op.getOperandTypes()[0])
+      return op;
+    return {};
+  };
+
   // Utility function to connect a destination to a source.  Always use a
   // ConnectOp as the widths may be uninferred.
   SmallVector<Operation *> opsToErase;
   auto connect = [&](Value src, Value dest,
                      ImplicitLocOpBuilder &builder) -> LogicalResult {
+    // Strip away noop unrealized_conversion_cast's, used as placeholders.
+    // In the future, these should be created/managed as part of creating WP's.
+    if (auto op = getNoopCast(dest)) {
+      dest = op.getOperand(0);
+      opsToErase.push_back(op);
+      std::swap(src, dest);
+    } else if (auto op = getNoopCast(src)) {
+      src = op.getOperand(0);
+      opsToErase.push_back(op);
+    }
+
     if (foldFlow(dest) == Flow::Source)
       std::swap(src, dest);
 
@@ -565,7 +585,7 @@ LogicalResult LowerAnnotationsPass::solveWiringProblems(ApplyState &state) {
   // to be made per-module.
   LLVM_DEBUG({ llvm::dbgs() << "Analyzing wiring problems:\n"; });
   DenseMap<FModuleLike, ModuleModifications> moduleModifications;
-  DenseSet<Value> sinks;
+  DenseSet<Value> visitedSinks;
   for (auto [index, problem] : llvm::enumerate(state.wiringProblems)) {
     // This is a unique index that is assigned to this specific wiring problem
     // and is used as a key during wiring to know which Values (ports, sources,
@@ -575,7 +595,7 @@ LogicalResult LowerAnnotationsPass::solveWiringProblems(ApplyState &state) {
 
     // Check that no WiringProblems are trying to use the same sink.  This
     // should never happen.
-    if (!sinks.insert(sink).second) {
+    if (!visitedSinks.insert(sink).second) {
       auto diag = mlir::emitError(source.getLoc())
                   << "This sink is involved with a Wiring Problem which is "
                      "targeted by a source used by another Wiring Problem. "

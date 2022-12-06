@@ -311,9 +311,15 @@ Value lowerInternalPathAnno(AnnoPathValue &srcTarget,
         return state.getNamespace(mod);
       },
       &state.targetCaches);
-  // Since the intance op genenerates the RefType output, no need of another
-  // RefSendOp.
+  // Since the instance op generates the RefType output, no need of another
+  // RefSendOp.  Store into an op to ensure we have stable reference,
+  // so future tapping won't invalidate this Value.
   sendVal = modInstance.getResults().back();
+  sendVal =
+      builder
+          .create<mlir::UnrealizedConversionCastOp>(sendVal.getType(), sendVal)
+          ->getResult(0);
+
   // Now set the instance as the source for the final datatap xmr.
   srcTarget = AnnoPathValue(modInstance);
   if (auto extMod = dyn_cast<FExtModuleOp>((Operation *)mod)) {
@@ -365,12 +371,13 @@ LogicalResult static applyNoBlackBoxStyleDataTaps(const AnnoPathValue &target,
     if (classAttr.getValue() != referenceKeyClass &&
         classAttr.getValue() != internalKeyClass)
       return mlir::emitError(loc, "Annotation '" + Twine(dataTapsClass) +
-                                      "' with path '" + path + ".class" +
-                                      +"' contained an unknown/unimplemented "
-                                       "DataTapKey class '" +
+                                      "' with path '" +
+                                      (Twine(path) + ".class") +
+                                      "' contained an unknown/unimplemented "
+                                      "DataTapKey class '" +
                                       classAttr.getValue() + "'.")
                  .attachNote()
-             << "The full Annotation is reprodcued here: " << anno << "\n";
+             << "The full Annotation is reproduced here: " << anno << "\n";
 
     auto sinkNameAttr =
         tryGetAs<StringAttr>(bDict, anno, "sink", loc, dataTapsClass, path);
@@ -390,8 +397,9 @@ LogicalResult static applyNoBlackBoxStyleDataTaps(const AnnoPathValue &target,
                                       "' couldnot be resolved.");
     if (!wireTarget->ref.getImpl().isOp())
       return mlir::emitError(loc, "Annotation '" + Twine(dataTapsClass) +
-                                      "' with path '" + path + ".class" +
-                                      +"' cannot specify a port for sink.");
+                                      "' with path '" +
+                                      (Twine(path) + ".class") +
+                                      "' cannot specify a port for sink.");
     // Extract the name of the wire, used for datatap.
     auto tapName = StringAttr::get(
         context, wirePathStr.substr(wirePathStr.find_last_of('>') + 1));
@@ -490,10 +498,7 @@ LogicalResult static applyNoBlackBoxStyleDataTaps(const AnnoPathValue &target,
                                                         targetOp->getBlock());
     auto wireType = cast<FIRRTLBaseType>(targetOp->getResult(0).getType());
     // Get type of sent value, if already a RefType, the base type.
-    FIRRTLBaseType valType =
-        TypeSwitch<Type, FIRRTLBaseType>(sendVal.getType())
-            .Case<FIRRTLBaseType>([](FIRRTLBaseType base) { return base; })
-            .Case<RefType>([](RefType ref) { return ref.getType(); });
+    auto valType = getBaseType(cast<FIRRTLType>(sendVal.getType()));
     Value sink = getValueByFieldID(sinkBuilder, targetOp->getResult(0),
                                    wireTarget->fieldIdx);
 
@@ -679,12 +684,12 @@ LogicalResult circt::firrtl::applyGCTDataTaps(const AnnoPathValue &target,
     }
 
     mlir::emitError(
-        loc, "Annotation '" + Twine(dataTapsClass) + "' with path '" + path +
-                 ".class" +
-                 +"' contained an unknown/unimplemented DataTapKey class '" +
+        loc, "Annotation '" + Twine(dataTapsClass) + "' with path '" +
+                 (Twine(path) + ".class") +
+                 "' contained an unknown/unimplemented DataTapKey class '" +
                  classAttr.getValue() + "'.")
             .attachNote()
-        << "The full Annotation is reprodcued here: " << anno << "\n";
+        << "The full Annotation is reproduced here: " << anno << "\n";
     return failure();
   }
 

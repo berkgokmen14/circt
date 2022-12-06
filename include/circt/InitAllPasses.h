@@ -26,6 +26,7 @@
 #include "circt/Dialect/LLHD/Transforms/Passes.h"
 #include "circt/Dialect/MSFT/MSFTPasses.h"
 #include "circt/Dialect/Pipeline/PipelinePasses.h"
+#include "circt/Dialect/SSP/SSPPasses.h"
 #include "circt/Dialect/SV/SVPasses.h"
 #include "circt/Dialect/Seq/SeqPasses.h"
 #include "circt/Dialect/SystemC/SystemCPasses.h"
@@ -53,6 +54,7 @@ inline void registerAllPasses() {
   hls::registerPasses();
   hw::registerPasses();
   pipeline::registerPasses();
+  ssp::registerPasses();
   systemc::registerPasses();
 }
 

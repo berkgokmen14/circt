@@ -36,6 +36,7 @@
 #include "llvm/Support/Debug.h"
 #include <string>
 #include <utility>
+#include <cassert>
 
 #define DEBUG_TYPE "affine-to-pipeline"
 
@@ -326,8 +327,6 @@ LogicalResult AffineToPipeline::unrollSubLoops(
 LogicalResult
 AffineToPipeline::populateOperatorTypes(AffineForOp &forOp,
                                         ModuloProblem &problem) {
-  llvm::MapVector<TypedValue<MemRefType> *, std::pair<unsigned, unsigned>>
-      memOps;
   // Load the Calyx operator library into the problem. This is a very minimal
   // set of arithmetic and memory operators for now. This should ultimately be
   // pulled out into some sort of dialect interface.
@@ -338,6 +337,7 @@ AffineToPipeline::populateOperatorTypes(AffineForOp &forOp,
   Problem::OperatorType mcOpr = problem.getOrInsertOperatorType("multicycle");
   problem.setLatency(mcOpr, 3);
 
+  SmallDenseMap<TypedValue<MemRefType> *, std::pair<unsigned, unsigned>> memOps;
   Operation *unsupported;
   WalkResult result = forOp.getBody()->walk([&](Operation *op) {
     return TypeSwitch<Operation *, WalkResult>(op)
@@ -364,8 +364,7 @@ AffineToPipeline::populateOperatorTypes(AffineForOp &forOp,
           memOps[&memRef] =
               std::pair(memOps[&memRef].first, memOps[&memRef].second + 1);
           Problem::OperatorType memOpr = problem.getOrInsertOperatorType(
-              std::to_string(hash_value(memRef)));
-          llvm::errs() << memOpr << "\n";
+              "mem_" + std::to_string(hash_value(memRef)));
           problem.setLatency(memOpr, 1);
           problem.setLimit(memOpr, 1);
           problem.setLinkedOperatorType(memOp, memOpr);
@@ -382,8 +381,7 @@ AffineToPipeline::populateOperatorTypes(AffineForOp &forOp,
           memOps[&memRef] =
               std::pair(memOps[&memRef].first + 1, memOps[&memRef].second);
           Problem::OperatorType memOpr = problem.getOrInsertOperatorType(
-              std::to_string(hash_value(memRef)));
-          llvm::errs() << memOpr << "\n";
+              "mem_" + std::to_string(hash_value(memRef)));
           problem.setLatency(memOpr, 1);
           problem.setLimit(memOpr, 1);
           problem.setLinkedOperatorType(memOp, memOpr);
@@ -519,10 +517,10 @@ AffineToPipeline::createPipelinePipeline(AffineForOp &forOp,
 
   // Maintain mappings of values in the loop body and results of stages,
   // initially populated with the iter args.
-  BlockAndValueMapping valueMap;
-  for (size_t i = 0; i < iterArgs.size(); ++i)
-    valueMap.map(forOp.getBody()->getArgument(i),
-                 pipeline.getStagesBlock().getArgument(i));
+  BlockAndValueMapping iterValueMap;
+  for (size_t i = 0; i < forOp.getBody()->getNumArguments(); ++i)
+    iterValueMap.map(forOp.getBody()->getArgument(i),
+                     pipeline.getStagesBlock().getArgument(i));
 
   // Create the stages.
   Block &stagesBlock = pipeline.getStagesBlock();
@@ -534,38 +532,75 @@ AffineToPipeline::createPipelinePipeline(AffineForOp &forOp,
     startTimes.push_back(group.first);
   llvm::sort(startTimes);
 
+  
   DominanceInfo dom(getOperation());
-  for (const auto &i : enumerate(startTimes)) {
-    auto startTime = i.value();
+  SmallVector<DenseSet<Value>> registerValues;
+  SmallVector<SmallVector<mlir::Type>> registerTypes;
+  SmallVector<BlockAndValueMapping> valueMaps;
+  for (auto startTime : startTimes) {
     auto group = startGroups[startTime];
-    OpBuilder::InsertionGuard g(builder);
 
     // Collect the return types for this stage. Operations whose results are not
     // used within this stage are returned.
     auto isLoopTerminator = [forOp](Operation *op) {
       return isa<AffineYieldOp>(op) && op->getParentOp() == forOp;
     };
-    SmallVector<Type> stageTypes;
-    DenseSet<Operation *> opsWithReturns;
+    registerValues.push_back(DenseSet<Value>());
+
     for (auto *op : group) {
+      if (op->getUsers().empty())
+        continue;
+      unsigned finTime =
+          startTime + *problem.getLatency(*problem.getLinkedOperatorType(op));
       for (auto *user : op->getUsers()) {
-        if (*problem.getStartTime(user) > startTime || isLoopTerminator(user)) {
-          opsWithReturns.insert(op);
-          stageTypes.append(op->getResultTypes().begin(),
-                            op->getResultTypes().end());
-        }
+        if (*problem.getStartTime(user) > startTime || isLoopTerminator(user))
+          finTime = std::max(finTime, *problem.getStartTime(user));
+      }
+
+      unsigned opLatency =
+          *problem.getLatency(*problem.getLinkedOperatorType(op));
+      for (unsigned i = opLatency > 0 ? startTime + opLatency - 1 : startTime;
+           i < finTime; i++) {
+        if (registerValues.size() <= i)
+          registerValues.push_back(DenseSet<Value>());
+
+        for (auto result : op->getResults())
+          registerValues.data()[i].insert(result);
       }
     }
+  }
 
-    // Add induction variable passthrough.
-    if (i.index() < startTimes.size() - 1)
-      stageTypes.push_back(lowerBound.getType());
+  for (auto iterArg : forOp.getLoopBody().getArguments()) {
+    unsigned iterArgPipeLen = 0;
+    for (auto *user : iterArg.getUsers())
+      iterArgPipeLen = std::max(iterArgPipeLen, *problem.getStartTime(user));
 
+    for (unsigned i = 0; i < iterArgPipeLen; i++)
+      registerValues.data()[i].insert(iterArg);
+  }
+
+  // Now make register Types and valueMaps
+  for (unsigned i = 0; i < registerValues.size(); i++) {
+    SmallVector<mlir::Type> types;
+    for (auto val : registerValues.data()[i]) {
+      types.push_back(val.getType());
+    }
+    registerTypes.push_back(types);
+    valueMaps.push_back(BlockAndValueMapping(iterValueMap));
+  }
+
+  // Create stages along with maps
+  for (auto startTime : startTimes) {
+    auto group = startGroups[startTime];
+    llvm::sort(group,
+               [&](Operation *a, Operation *b) { return dom.dominates(a, b); });
+    auto stageTypes = registerTypes.data()[startTime];
     // Add the induction variable increment in the first stage.
     if (startTime == 0)
       stageTypes.push_back(lowerBound.getType());
 
     // Create the stage itself.
+    builder.setInsertionPoint(stagesBlock.getTerminator());
     auto startTimeAttr = builder.getIntegerAttr(
         builder.getIntegerType(64, /*isSigned=*/true), startTime);
     auto stage =
@@ -574,49 +609,31 @@ AffineToPipeline::createPipelinePipeline(AffineForOp &forOp,
     auto *stageTerminator = stageBlock.getTerminator();
     builder.setInsertionPointToStart(&stageBlock);
 
-    // Sort the group according to original dominance.
-    llvm::sort(group,
-               [&](Operation *a, Operation *b) { return dom.dominates(a, b); });
-
-    // Move over the operations and add their results to the terminator.
-    SmallVector<std::tuple<Operation *, Operation *, unsigned>> movedOps;
     for (auto *op : group) {
-      unsigned resultIndex = stageTerminator->getNumOperands();
-      auto *newOp = builder.clone(*op, valueMap);
-      if (opsWithReturns.contains(op)) {
-        stageTerminator->insertOperands(resultIndex, newOp->getResults());
-        movedOps.emplace_back(op, newOp, resultIndex);
-      }
+      auto *newOp = builder.clone(*op, valueMaps.data()[startTime]);
+
+      for (auto result : op->getResults())
+        valueMaps.data()[startTime].map(
+            result, newOp->getResult(result.getResultNumber()));
     }
 
-    // Add the stage results to the value map for the original op.
-    for (auto tuple : movedOps) {
-      Operation *op = std::get<0>(tuple);
-      Operation *newOp = std::get<1>(tuple);
-      unsigned resultIndex = std::get<2>(tuple);
-      for (size_t i = 0; i < newOp->getNumResults(); ++i) {
-        auto newValue = stage->getResult(resultIndex + i);
-        auto oldValue = op->getResult(i);
-        valueMap.map(oldValue, newValue);
-      }
+    SmallVector<Value> stageOperands;
+    for (auto res : registerValues.data()[startTime]) {
+      stageOperands.push_back(valueMaps.data()[startTime].lookup(res));
     }
+    stageTerminator->insertOperands(stageTerminator->getNumOperands(),
+                                    stageOperands);
 
-    if (i.index() < startTimes.size() - 1) {
-      for (int i = 0, s = iterArgs.size(); i < s; ++i) {
-        // Add induction variable forwarding
-        stageTerminator->insertOperands(
-            stageTerminator->getNumOperands(),
-            valueMap.lookup(forOp.getLoopBody().getArgument(0)));
-        auto operandNum = stageTerminator->getNumOperands() - 1 - i;
-
-        // Update mapping for induction variable to forwarded result
-        auto iterArg = stage->getResult(operandNum);
-        valueMap.map(forOp.getLoopBody().getArgument(0), iterArg);
+    // Give the next stage the mappings it needs
+    unsigned destTime = startTime + 1;
+    unsigned resIndex = 0;
+    if (destTime < registerValues.size())
+      for (auto res : registerValues.data()[startTime]) {
+        valueMaps.data()[destTime].map(res, stage.getResult(resIndex++));
       }
-    }
 
     // Add the induction variable increment to the first stage.
-    if (i.index() == 0) {
+    if (startTime == 0) {
       auto incResult =
           builder.create<arith::AddIOp>(stagesBlock.getArgument(0), step);
       stageTerminator->insertOperands(stageTerminator->getNumOperands(),
@@ -635,8 +652,8 @@ AffineToPipeline::createPipelinePipeline(AffineForOp &forOp,
   termIterArgs.push_back(
       stagesBlock.front().getResult(stagesBlock.front().getNumResults() - 1));
   for (auto value : forOp.getBody()->getTerminator()->getOperands()) {
-    termIterArgs.push_back(valueMap.lookup(value));
-    termResults.push_back(valueMap.lookup(value));
+    termIterArgs.push_back(iterValueMap.lookup(value));
+    termResults.push_back(iterValueMap.lookup(value));
   }
 
   stagesTerminator.getIterArgsMutable().append(termIterArgs);

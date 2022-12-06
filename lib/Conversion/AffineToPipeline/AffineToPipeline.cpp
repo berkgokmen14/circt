@@ -57,10 +57,10 @@ struct AffineToPipeline : public AffineToPipelineBase<AffineToPipeline> {
 private:
   LogicalResult
   lowerAffineStructures(MemoryDependenceAnalysis &dependenceAnalysis);
-  LogicalResult unrollSubLoops(AffineForOp &loop);
-  LogicalResult populateOperatorTypes(AffineForOp &loop, ModuloProblem &problem);
-  LogicalResult solveSchedulingProblem(AffineForOp &loop, ModuloProblem &problem);
-  LogicalResult createPipelinePipeline(AffineForOp &loop, ModuloProblem &problem);
+  LogicalResult unrollSubLoops(AffineForOp &forOp);
+  LogicalResult populateOperatorTypes(AffineForOp &forOp, ModuloProblem &problem);
+  LogicalResult solveSchedulingProblem(AffineForOp &forOp, ModuloProblem &problem);
+  LogicalResult createPipelinePipeline(AffineForOp &forOp, ModuloProblem &problem);
 
   CyclicSchedulingAnalysis *schedulingAnalysis;
   unsigned resII = 1;
@@ -72,6 +72,7 @@ private:
 void AffineToPipeline::runOnOperation() {
   // Get dependence analysis for the whole function.
   auto dependenceAnalysis = getAnalysis<MemoryDependenceAnalysis>();
+
 
   // Collect loops to pipeline and work on them.
   SmallVector<AffineForOp> loops;
@@ -108,6 +109,9 @@ void AffineToPipeline::runOnOperation() {
   if (failed(lowerAffineStructures(dependenceAnalysis)))
     return signalPassFailure();
 
+  // getOperation()->dump();
+
+
   // Get scheduling analysis for the whole function.
   schedulingAnalysis = &getAnalysis<CyclicSchedulingAnalysis>();
 
@@ -115,6 +119,36 @@ void AffineToPipeline::runOnOperation() {
     // Populate the target operator types.
     ModuloProblem moduloProblem =
         ModuloProblem::get(schedulingAnalysis->getProblem(loop));
+
+    // Insert memory dependences into the problem.
+    loop.getBody()->walk([&](Operation *op) {
+
+      ArrayRef<MemoryDependence> dependences = dependenceAnalysis.getDependences(op);
+      if (dependences.empty())
+        return;
+
+      for (MemoryDependence memoryDep : dependences) {
+        // Don't insert a dependence into the problem if there is no dependence.
+        if (!hasDependence(memoryDep.dependenceType))
+          continue;
+        
+        memoryDep.source->dump();
+        // Insert a dependence into the problem.
+        Problem::Dependence dep(memoryDep.source, op);
+        auto depInserted = moduloProblem.insertDependence(dep);
+        assert(succeeded(depInserted));
+        (void)depInserted;
+
+        // Use the lower bound of the innermost loop for this dependence. This
+        // assumes outer loops execute sequentially, i.e. one iteration of the
+        // inner loop completes before the next iteration is initiated. With
+        // proper analysis and lowerings, this can be relaxed.
+        unsigned distance = memoryDep.dependenceComponents.back().lb.value();
+        if (distance > 0)
+          moduloProblem.setDistance(dep, distance);
+      }
+    });
+
     if (failed(populateOperatorTypes(loop, moduloProblem)))
       return signalPassFailure();
 
@@ -153,6 +187,8 @@ public:
     auto memrefLoad = rewriter.replaceOpWithNewOp<memref::LoadOp>(
         op, op.getMemRef(), *resultOperands);
 
+    llvm::errs() << "replace op\n";
+    op->dump();
     dependenceAnalysis.replaceOp(op, memrefLoad);
 
     return success();
@@ -252,7 +288,7 @@ LogicalResult AffineToPipeline::lowerAffineStructures(
   target.addDynamicallyLegalOp<AffineYieldOp>(yieldOpLegalityCallback);
 
   RewritePatternSet patterns(context);
-  populateAffineToStdConversionPatterns(patterns);
+  // populateAffineToStdConversionPatterns(patterns);
   patterns.add<AffineLoadLowering>(context, dependenceAnalysis);
   patterns.add<AffineStoreLowering>(context, dependenceAnalysis);
   patterns.add<IfOpHoisting>(context);

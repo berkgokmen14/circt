@@ -40,6 +40,7 @@ namespace analysis {
 /// and associate operator types.
 struct CyclicSchedulingAnalysis {
   CyclicSchedulingAnalysis(Operation *funcOp, AnalysisManager &am);
+  CyclicSchedulingAnalysis(Operation *funcOp, MemoryDependenceAnalysis &memoryAnalysis);
 
   CyclicProblem &getProblem(AffineForOp forOp);
 

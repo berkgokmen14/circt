@@ -35,8 +35,26 @@ circt::analysis::CyclicSchedulingAnalysis::CyclicSchedulingAnalysis(
     Operation *op, AnalysisManager &am) {
   auto funcOp = cast<func::FuncOp>(op);
 
+  funcOp->dump();
+
   MemoryDependenceAnalysis &memoryAnalysis =
       am.getAnalysis<MemoryDependenceAnalysis>();
+
+  // Only consider innermost loops of perfectly nested AffineForOps.
+  for (auto root : funcOp.getOps<AffineForOp>()) {
+    SmallVector<AffineForOp> nestedLoops;
+    getPerfectlyNestedLoops(nestedLoops, root);
+    analyzeForOp(nestedLoops.back(), memoryAnalysis);
+  }
+}
+
+circt::analysis::CyclicSchedulingAnalysis::CyclicSchedulingAnalysis(
+    Operation *op, MemoryDependenceAnalysis &memoryAnalysis) {
+  auto funcOp = cast<func::FuncOp>(op);
+
+
+  // MemoryDependenceAnalysis &memoryAnalysis =
+  //     analysisOpt.value();
 
   // Only consider innermost loops of perfectly nested AffineForOps.
   for (auto root : funcOp.getOps<AffineForOp>()) {
@@ -51,6 +69,7 @@ void circt::analysis::CyclicSchedulingAnalysis::analyzeForOp(
   // Create a cyclic scheduling problem.
   CyclicProblem problem = CyclicProblem::get(forOp);
 
+  llvm::errs() << "yo\n";
   // Insert memory dependences into the problem.
   forOp.getBody()->walk([&](Operation *op) {
     // Insert every operation into the problem.
@@ -60,11 +79,15 @@ void circt::analysis::CyclicSchedulingAnalysis::analyzeForOp(
     if (dependences.empty())
       return;
 
+    llvm::errs() << "\n";
+    op->dump();
+    llvm::errs() << "depends on:\n";
     for (MemoryDependence memoryDep : dependences) {
       // Don't insert a dependence into the problem if there is no dependence.
       if (!hasDependence(memoryDep.dependenceType))
         continue;
-
+      
+      memoryDep.source->dump();
       // Insert a dependence into the problem.
       Problem::Dependence dep(memoryDep.source, op);
       auto depInserted = problem.insertDependence(dep);

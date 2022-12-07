@@ -188,8 +188,6 @@ public:
     auto memrefLoad = rewriter.replaceOpWithNewOp<memref::LoadOp>(
         op, op.getMemRef(), *resultOperands);
 
-    llvm::errs() << "replace op\n";
-    op->dump();
     dependenceAnalysis.replaceOp(op, memrefLoad);
 
     return success();

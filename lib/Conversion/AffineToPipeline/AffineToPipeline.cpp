@@ -133,7 +133,6 @@ void AffineToPipeline::runOnOperation() {
         if (!hasDependence(memoryDep.dependenceType))
           continue;
         
-        memoryDep.source->dump();
         // Insert a dependence into the problem.
         Problem::Dependence dep(memoryDep.source, op);
         auto depInserted = moduloProblem.insertDependence(dep);
@@ -181,7 +180,7 @@ public:
     SmallVector<Value, 8> indices(op.getMapOperands());
     auto resultOperands =
         expandAffineMap(rewriter, op.getLoc(), op.getAffineMap(), indices);
-    if (!resultOperands)
+    if (!resultOperands.has_value())
       return failure();
 
     // Build memref.load memref[expandedMap.results].
@@ -215,7 +214,7 @@ public:
     SmallVector<Value, 8> indices(op.getMapOperands());
     auto maybeExpandedMap =
         expandAffineMap(rewriter, op.getLoc(), op.getAffineMap(), indices);
-    if (!maybeExpandedMap)
+    if (!maybeExpandedMap.has_value())
       return failure();
 
     // Build memref.store valueToStore, memref[expandedMap.results].
@@ -282,12 +281,12 @@ LogicalResult AffineToPipeline::lowerAffineStructures(
   ConversionTarget target(*context);
   target.addLegalDialect<AffineDialect, ArithDialect, MemRefDialect,
                          SCFDialect>();
-  target.addIllegalOp<AffineIfOp, AffineLoadOp, AffineStoreOp>();
+  target.addIllegalOp<AffineIfOp, AffineLoadOp, AffineStoreOp, AffineApplyOp>();
   target.addDynamicallyLegalOp<IfOp>(ifOpLegalityCallback);
   target.addDynamicallyLegalOp<AffineYieldOp>(yieldOpLegalityCallback);
 
   RewritePatternSet patterns(context);
-  // populateAffineToStdConversionPatterns(patterns);
+  populateAffineToStdConversionPatterns(patterns);
   patterns.add<AffineLoadLowering>(context, dependenceAnalysis);
   patterns.add<AffineStoreLowering>(context, dependenceAnalysis);
   patterns.add<IfOpHoisting>(context);
@@ -631,6 +630,7 @@ AffineToPipeline::createPipelinePipeline(AffineForOp &forOp,
       stageOperands.push_back(valueMaps.data()[startTime].lookup(res));
       unsigned destTime =
           std::max(startTime + 1, pipeTimes[res.getDefiningOp()].first);
+      iterValueMap.map(res, stage.getResult(resIndex));
       valueMaps.data()[destTime].map(res, stage.getResult(resIndex++));
     }
     stageTerminator->insertOperands(stageTerminator->getNumOperands(),
@@ -653,6 +653,7 @@ AffineToPipeline::createPipelinePipeline(AffineForOp &forOp,
   // mapped values that were originally yielded.
   SmallVector<Value> termIterArgs;
   SmallVector<Value> termResults;
+  
   termIterArgs.push_back(
       stagesBlock.front().getResult(stagesBlock.front().getNumResults() - 1));
   for (auto value : forOp.getBody()->getTerminator()->getOperands()) {

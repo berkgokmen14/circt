@@ -88,8 +88,6 @@ void AffineToSTG::runOnOperation() {
   if (failed(lowerAffineStructures(dependenceAnalysis)))
     return signalPassFailure();
 
-  // getOperation().dump();
-
   // Get scheduling analysis for the whole function.
   schedulingAnalysis = &getAnalysis<SharedOperatorsSchedulingAnalysis>();
 
@@ -688,12 +686,14 @@ LogicalResult AffineToSTG::createWhileOpSTG(
   scheduleTerminator.getIterArgsMutable().append(termIterArgs);
   scheduleTerminator.getResultsMutable().append(termResults);
 
-  // Replace loop results with pipeline results.
+
+  // Replace loop results with while results.
+  auto resultNum = 0;
   for (size_t i = 0; i < whileOp.getNumResults(); ++i) {
     auto result = whileOp.getResult(i);
     auto numUses = std::distance(result.getUses().begin(), result.getUses().end());
     if (numUses > 0) {
-      whileOp.getResult(i).replaceAllUsesWith(stgWhile.getResult(i));
+      whileOp.getResult(i).replaceAllUsesWith(stgWhile.getResult(resultNum++));
     }
   }
 

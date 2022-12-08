@@ -362,6 +362,11 @@ public:
     }
   }
 
+  bool hasEvaluatingGroup(Value v) {
+    auto it = valueGroupAssigns.find(v);
+    return it != valueGroupAssigns.end();
+  }
+
   template <typename TLibraryOp>
   TLibraryOp getNewLibraryOpInstance(OpBuilder &builder, Location loc,
                                      TypeRange resTypes) {

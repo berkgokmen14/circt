@@ -341,13 +341,12 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
                              AndIOp, XOrIOp, OrIOp, ExtUIOp, TruncIOp, MulIOp,
                              DivUIOp, RemUIOp, IndexCastOp,
                              /// scf
-                             scf::IfOp,
-                             /// static logic
-                             stg::STGTerminatorOp>(
+                             scf::IfOp>(
                   [&](auto op) { return buildOp(rewriter, op).succeeded(); })
               .template Case<FuncOp, stg::STGWhileOp,
                              stg::STGRegisterOp,
                              stg::STGStepOp,
+                             stg::STGTerminatorOp,
                              pipeline::PipelineWhileOp,
                              pipeline::PipelineWhileStageOp,
                              pipeline::PipelineRegisterOp,
@@ -712,9 +711,9 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
     return success();
 
   // Replace the stg's result(s) with the terminator's results.
-  auto *stg = term->getParentOp();
-  for (size_t i = 0, e = stg->getNumResults(); i < e; ++i)
-    stg->getResult(i).replaceAllUsesWith(term.getResults()[i]);
+  // auto *stg = term->getParentOp();
+  // for (size_t i = 0, e = stg->getNumResults(); i < e; ++i)
+  //   stg->getResult(i).replaceAllUsesWith(term.getResults()[i]);
 
   return success();
 }
@@ -1114,6 +1113,32 @@ class BuildScheduleRegs : public calyx::FuncOpPartialLoweringPattern {
         if (isIterArg)
           continue;
 
+        if (auto pipeline = operand.get().getDefiningOp<PipelineWhileOp>()) {
+          PipelineWhileOpInterface pipelineOp(pipeline);
+          auto opResultNum = dyn_cast<OpResult>(operand.get()).getResultNumber();
+          auto term = cast<PipelineTerminatorOp>(pipeline.getStagesBlock().getTerminator());
+          auto numIterArgs = term.getIterArgs().size() - term.getResults().size();
+          auto iterRegNum = numIterArgs + opResultNum;
+          auto reg = getState<ComponentLoweringState>()
+            .calyx::LoopLoweringStateInterface<PipelineWhileOpInterface>::getLoopIterReg(
+              pipelineOp, iterRegNum);
+          getState<ComponentLoweringState>().addSTGReg(step, reg, i);
+          continue;
+        } 
+
+        if (auto whileOp = operand.get().getDefiningOp<STGWhileOp>()) {
+          STGWhileOpInterface whileOpInterface(whileOp);
+          auto opResultNum = dyn_cast<OpResult>(operand.get()).getResultNumber();
+          auto term = cast<STGTerminatorOp>(whileOp.getScheduleBlock().getTerminator());
+          auto numIterArgs = term.getIterArgs().size() - term.getResults().size();
+          auto iterRegNum = numIterArgs + opResultNum;
+          auto reg = getState<ComponentLoweringState>()
+            .calyx::LoopLoweringStateInterface<STGWhileOpInterface>::getLoopIterReg(
+              whileOpInterface, iterRegNum);
+          getState<ComponentLoweringState>().addSTGReg(step, reg, i);
+          continue;
+        }
+
         // Create a register for passing this result to later steps.
         Value value = operand.get();
         Type resultType = value.getType();
@@ -1206,6 +1231,12 @@ class BuildSTGGroups : public calyx::FuncOpPartialLoweringPattern {
       // Get the stg register for that result.
       auto stgRegister = stgRegisters[i];
 
+      if (operand.get().getDefiningOp<PipelineWhileOp>() != nullptr ||
+          operand.get().getDefiningOp<STGWhileOp>() != nullptr) {
+        step.getResult(i).replaceAllUsesWith(stgRegister.getOut());
+        continue;
+      }
+
       // Get the evaluating group for that value.
       calyx::GroupInterface evaluatingGroup =
           getState<ComponentLoweringState>().getEvaluatingGroup(value);
@@ -1259,8 +1290,17 @@ class BuildSTGGroups : public calyx::FuncOpPartialLoweringPattern {
       unsigned i = operand.getOperandNumber();
       Value value = operand.get();
 
+      if (value.getType().isa<MemRefType>())
+        continue;
+
       // Get the stg register for that result.
       auto stgRegister = stgRegisters[i];
+
+      if (operand.get().getDefiningOp<PipelineWhileOp>() != nullptr ||
+          operand.get().getDefiningOp<STGWhileOp>() != nullptr) {
+        step.getResult(i).replaceAllUsesWith(stgRegister.getOut());
+        continue;
+      }
 
       // Get the evaluating group for that value.
       calyx::GroupInterface evaluatingGroup =
@@ -1294,12 +1334,14 @@ class BuildSTGGroups : public calyx::FuncOpPartialLoweringPattern {
     // Create a sequential group and replace the comb group.
     PatternRewriter::InsertionGuard g(rewriter);
     rewriter.setInsertionPoint(combGroup);
+    auto groupName = getState<ComponentLoweringState>().getUniqueName(
+        combGroup.getName());
     auto group = rewriter.create<calyx::GroupOp>(combGroup.getLoc(),
-                                                 combGroup.getName());
+                                                 groupName);
     rewriter.cloneRegionBefore(combGroup.getBodyRegion(),
                                &group.getBody().front());
     group.getBodyRegion().back().erase();
-    rewriter.eraseOp(combGroup);
+    // rewriter.eraseOp(combGroup);
 
     // Stitch evaluating group to register.
     calyx::buildAssignmentsForRegisterWrite(
@@ -1422,6 +1464,7 @@ class BuildPipelineWhileGroups : public calyx::FuncOpPartialLoweringPattern {
                                                   whileOp,
                                                   initGroups,
                                               });
+
       return WalkResult::advance();
     });
     return res;
@@ -1511,6 +1554,7 @@ class BuildPipelineGroups : public calyx::FuncOpPartialLoweringPattern {
   LogicalResult
   partiallyLowerFuncToComp(FuncOp funcOp,
                            PatternRewriter &rewriter) const override {
+
     auto res = funcOp.walk([&](pipeline::PipelineWhileOp pipeline) {
       for (auto stage :
            pipeline.getStagesBlock().getOps<pipeline::PipelineWhileStageOp>())
@@ -1623,12 +1667,14 @@ class BuildPipelineGroups : public calyx::FuncOpPartialLoweringPattern {
     // Create a sequential group and replace the comb group.
     PatternRewriter::InsertionGuard g(rewriter);
     rewriter.setInsertionPoint(combGroup);
+    auto groupName = getState<ComponentLoweringState>().getUniqueName(
+        combGroup.getName());
     auto group = rewriter.create<calyx::GroupOp>(combGroup.getLoc(),
-                                                 combGroup.getName());
+                                                 groupName);
     rewriter.cloneRegionBefore(combGroup.getBodyRegion(),
                                &group.getBody().front());
     group.getBodyRegion().back().erase();
-    rewriter.eraseOp(combGroup);
+    // rewriter.eraseOp(combGroup);
 
     // Stitch evaluating group to register.
     calyx::buildAssignmentsForRegisterWrite(
@@ -1719,6 +1765,8 @@ private:
       } else if (auto *schedPtr = std::get_if<STGScheduleable>(&group);
                  schedPtr) {
         auto &whileOp = schedPtr->whileOp;
+        auto seqOp = rewriter.create<calyx::SeqOp>(loc);
+        rewriter.setInsertionPointToStart(seqOp.getBodyBlock());
         auto whileCtrlOp =
             buildWhileCtrlOp(whileOp, schedPtr->initGroups, rewriter);
         rewriter.setInsertionPointToEnd(whileCtrlOp.getBodyBlock());
@@ -1733,6 +1781,7 @@ private:
         LogicalResult res = buildCFGControl(path, rewriter, whileBodyOpBlock,
                                             block, whileOp.getBodyBlock());
 
+        rewriter.setInsertionPointAfter(seqOp);
         if (res.failed())
           return whileOp.getOperation()->emitError("Cannot schedule STGWhileOp body");
       } else if (auto *schedPtr = std::get_if<stg::STGStepOp>(&group);

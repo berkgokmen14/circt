@@ -1182,7 +1182,7 @@ class BuildSTGGroups : public calyx::FuncOpPartialLoweringPattern {
     auto res = funcOp.walk([&](stg::STGWhileOp stg) {
       for (auto step :
            stg.getScheduleBlock().getOps<stg::STGStepOp>())
-        if (failed(buildWhileStepGroups(stg, step, rewriter)))
+        if (failed(buildStepGroups(stg, step, rewriter)))
           return WalkResult::interrupt();
         return WalkResult::advance();
     });
@@ -1191,94 +1191,35 @@ class BuildSTGGroups : public calyx::FuncOpPartialLoweringPattern {
       return failure();
 
     for (auto step : funcOp.getOps<stg::STGStepOp>())
-      if (failed(buildFuncStepGroups(funcOp, step, rewriter)))
+      if (failed(buildStepGroups(funcOp, step, rewriter)))
         return failure();
 
     return success();
   }
 
-  LogicalResult buildFuncStepGroups(func::FuncOp funcOp,
-                                 stg::STGStepOp step,
-                                 PatternRewriter &rewriter) const {
+  LogicalResult buildStepGroups(Operation *op,
+                                stg::STGStepOp step,
+                                PatternRewriter &rewriter) const {
     // Collect stg registers for step.
     auto stgRegisters =
         getState<ComponentLoweringState>().getSTGRegs(step);
     // Get the number of stg steps in the steps block, excluding the
     // terminator. The verifier guarantees there is at least one step followed
     // by a terminator.
-    auto steps = funcOp.getBody().getOps<stg::STGStepOp>();
-    size_t numStages = std::distance(steps.begin(), steps.end());
-    assert(numStages > 0);
-
-    getState<ComponentLoweringState>().addBlockScheduleable(step->getBlock(),
-                                                            step);
-
-    auto makeScheduleable = [&](calyx::GroupOp group) {
-      getState<ComponentLoweringState>().addBlockScheduleable(&step.getBodyBlock(), 
-                                                              group);
-    };
-
-    MutableArrayRef<OpOperand> operands =
-        step.getBodyBlock().getTerminator()->getOpOperands();
-
-    for (auto &operand : operands) {
-      unsigned i = operand.getOperandNumber();
-      Value value = operand.get();
-
-      if (value.getType().isa<MemRefType>())
-        continue;
-
-      // Get the stg register for that result.
-      auto stgRegister = stgRegisters[i];
-
-      if (operand.get().getDefiningOp<PipelineWhileOp>() != nullptr ||
-          operand.get().getDefiningOp<STGWhileOp>() != nullptr) {
-        step.getResult(i).replaceAllUsesWith(stgRegister.getOut());
-        continue;
-      }
-
-      // Get the evaluating group for that value.
-      calyx::GroupInterface evaluatingGroup =
-          getState<ComponentLoweringState>().getEvaluatingGroup(value);
-
-      // Remember the final group for this step result.
-      calyx::GroupOp group;
-
-      // Stitch the register in, depending on whether the group was
-      // combinational or sequential.
-      if (auto combGroup =
-              dyn_cast<calyx::CombGroupOp>(evaluatingGroup.getOperation())) {
-        group =
-            convertCombToSeqGroup(combGroup, stgRegister, value, rewriter);
-        makeScheduleable(group);
-      } else
-        group =
-            replaceGroupRegister(evaluatingGroup, stgRegister, rewriter);
-
-      // Replace the step result uses with the register out.
-      step.getResult(i).replaceAllUsesWith(stgRegister.getOut());
-
+    size_t numStages = 0;
+    if (auto funcOp = dyn_cast<FuncOp>(op)) {
+      auto steps = funcOp.getBody().getOps<stg::STGStepOp>();
+      numStages = std::distance(steps.begin(), steps.end());
+    } else if (auto whileOp = dyn_cast<STGWhileOp>(op)) {
+      auto steps = whileOp.getScheduleBlock().getOps<STGStepOp>();
+      numStages = std::distance(steps.begin(), steps.end());
     }
-    return success();
-  }
-
-  LogicalResult buildWhileStepGroups(stg::STGWhileOp whileOp,
-                                 stg::STGStepOp step,
-                                 PatternRewriter &rewriter) const {
-    // Collect stg registers for step.
-    auto stgRegisters =
-        getState<ComponentLoweringState>().getSTGRegs(step);
-    // Get the number of stg steps in the steps block, excluding the
-    // terminator. The verifier guarantees there is at least one step followed
-    // by a terminator.
-    size_t numStages = whileOp.getScheduleBlock().getOperations().size() - 1;
     assert(numStages > 0);
 
     getState<ComponentLoweringState>().addBlockScheduleable(step->getBlock(),
                                                             step);
 
     auto makeScheduleable = [&](calyx::GroupOp group) {
-      // llvm::errs() << group.getSymName() << "\n";
       getState<ComponentLoweringState>().addBlockScheduleable(&step.getBodyBlock(), 
                                                               group);
     };
@@ -1297,7 +1238,8 @@ class BuildSTGGroups : public calyx::FuncOpPartialLoweringPattern {
       auto stgRegister = stgRegisters[i];
 
       if (operand.get().getDefiningOp<PipelineWhileOp>() != nullptr ||
-          operand.get().getDefiningOp<STGWhileOp>() != nullptr) {
+          operand.get().getDefiningOp<STGWhileOp>() != nullptr ||
+          isa<hw::ConstantOp>(value.getDefiningOp())) {
         step.getResult(i).replaceAllUsesWith(stgRegister.getOut());
         continue;
       }

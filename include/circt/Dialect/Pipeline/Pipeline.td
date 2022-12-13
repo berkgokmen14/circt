@@ -273,6 +273,7 @@ def PipelineWhileOp : Op<Pipeline_Dialect, "while", []> {
   let extraClassDeclaration = [{
     Block &getCondBlock() { return getCondition().front(); }
     Block &getStagesBlock() { return getStages().front(); }
+    unsigned getLatency();
   }];
 }
 

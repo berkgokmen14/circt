@@ -296,6 +296,20 @@ void PipelineWhileOp::build(OpBuilder &builder, OperationState &state,
                                        ValueRange());
 }
 
+unsigned PipelineWhileOp::getLatency() {
+  auto *block = &this->getStages();
+  
+  int latency = 0;
+  for (PipelineWhileStageOp stage : block->getOps<PipelineWhileStageOp>()) {
+    auto startTime = stage.getStart();
+    if (startTime > latency) {
+      latency = startTime;
+    }
+  }
+
+  return latency;
+}
+
 //===----------------------------------------------------------------------===//
 // PipelineStageRegisterOp
 //===----------------------------------------------------------------------===//

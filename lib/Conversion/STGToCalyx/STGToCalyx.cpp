@@ -167,51 +167,57 @@ public:
     return pipelineRegs[stage];
   }
 
-  /// Add a stage's groups to the pipeline prologue.
-  void addPipelinePrologue(PipelineWhileOp op, const SmallVector<StringAttr>& groupNames) {
-    pipelinePrologue[op].push_back(groupNames);
-  }
-
   /// Add a stage's groups to the pipeline body.
-  void addPipelineBody(PipelineWhileOp op, const SmallVector<StringAttr>& groupNames) {
-    pipelineBody[op].push_back(groupNames);
-  }
-
-  /// Add a stage's groups to the pipeline epilogue.
-  void addPipelineEpilogue(PipelineWhileOp op, const SmallVector<StringAttr>& groupNames) {
-    pipelineEpilogue[op].push_back(groupNames);
-  }
-
-  /// Get the pipeline prologue.
-  SmallVector<SmallVector<StringAttr>> getPipelinePrologue(PipelineWhileOp op) {
-    return pipelinePrologue[op];
+  void addPipelineStage(PipelineWhileOp op, const int startTime, const SmallVector<StringAttr>& groupNames) {
+    pipelineStages[op].insert(std::pair(startTime, groupNames));
   }
 
   /// Create the pipeline prologue.
   void createPipelinePrologue(PipelineWhileOp op, PatternRewriter &rewriter) {
     int ii = op.getII();
-    auto stages = pipelinePrologue[op];
-    for (size_t i = 0, e = stages.size(); i < e; ++i) {
+    int latency = op.getLatency();
+    auto stages = pipelineStages[op];
+
+    SmallVector<SmallVector<SmallVector<StringAttr>>> stageClusters;
+
+    int i = 0;
+    while (i <= latency) {
+      SmallVector<SmallVector<StringAttr>> cluster;
+      for (int j = 0; j < ii; ++j) {
+        cluster.push_back(stages[i + j]);
+      }
+      stageClusters.push_back(cluster);
+      i += ii;
+    }
+
+    for (int i = 0, e = stageClusters.size() - 1; i < e; ++i) {
       PatternRewriter::InsertionGuard g(rewriter);
       auto parOp = rewriter.create<calyx::ParOp>(op->getLoc());
       rewriter.setInsertionPointToStart(parOp.getBodyBlock());
-      int inSeq = 0;
       calyx::SeqOp seqOp = rewriter.create<calyx::SeqOp>(op->getLoc());
-      for (size_t j = 0; j < i + 1; ++j) {
-        if (inSeq == ii) {
-          inSeq = 0;
-          rewriter.setInsertionPointAfter(seqOp);
-          seqOp = rewriter.create<calyx::SeqOp>(op->getLoc());
-        }
-
+      for (int j = 0; j < i + 1; ++j) {
         rewriter.setInsertionPointToStart(seqOp.getBodyBlock());
 
-        auto parOp = rewriter.create<calyx::ParOp>(op->getLoc());
-        rewriter.setInsertionPointToStart(parOp.getBodyBlock());
+        auto cluster = stageClusters[j];
 
-        for (auto group : stages[j])
-          rewriter.create<calyx::EnableOp>(op->getLoc(), group);
-        ++inSeq;
+        if (cluster.empty())
+          continue;
+
+        auto clusterSeq = rewriter.create<calyx::SeqOp>(op->getLoc());
+        rewriter.setInsertionPointToStart(clusterSeq.getBodyBlock());
+
+        for (const auto& stage : cluster) {
+          if (stage.empty())
+            continue;
+          
+          PatternRewriter::InsertionGuard h(rewriter);
+
+          auto parOp = rewriter.create<calyx::ParOp>(op->getLoc());
+          rewriter.setInsertionPointToStart(parOp.getBodyBlock());
+
+          for (auto group : stage)
+            rewriter.create<calyx::EnableOp>(op->getLoc(), group);
+        }
       }
     }
   }
@@ -219,27 +225,30 @@ public:
   /// Create the pipeline body.
   void createPipelineBody(PipelineWhileOp op, PatternRewriter &rewriter) {
     int ii = op.getII();
-    auto stages = pipelineBody[op];
+    int latency = op.getLatency();
+    auto stages = pipelineStages[op];
     int i = 0;
 
     PatternRewriter::InsertionGuard g(rewriter);
-    // auto insertionPoint = rewriter.getInsertionPoint();
-    // auto *insertionBlock = rewriter.getInsertionBlock();
     calyx::SeqOp seqOp = rewriter.create<calyx::SeqOp>(op->getLoc());
     rewriter.setInsertionPointToStart(seqOp.getBodyBlock());
-    for (const auto& stage : stages) {
+    for (int t = 0; t <= latency; ++t) {
       if (i == ii) {
         i = 0;
         rewriter.setInsertionPointAfter(seqOp);
         seqOp = rewriter.create<calyx::SeqOp>(op->getLoc());
       }
 
-      rewriter.setInsertionPointToStart(seqOp.getBodyBlock());
+      rewriter.setInsertionPointToEnd(seqOp.getBodyBlock());
 
-      auto parOp = rewriter.create<calyx::ParOp>(op->getLoc());
-      rewriter.setInsertionPointToStart(parOp.getBodyBlock());
-      for (auto group : stage)
-        rewriter.create<calyx::EnableOp>(op->getLoc(), group);
+      auto stage = stages[t];
+      
+      if (!stage.empty()) {
+        auto parOp = rewriter.create<calyx::ParOp>(op->getLoc());
+        rewriter.setInsertionPointToEnd(parOp.getBodyBlock());
+        for (auto group : stage)
+          rewriter.create<calyx::EnableOp>(op->getLoc(), group);
+      }
 
       ++i;
     }
@@ -248,29 +257,62 @@ public:
   /// Create the pipeline epilogue.
   void createPipelineEpilogue(PipelineWhileOp op, PatternRewriter &rewriter) {
     int ii = op.getII();
-    auto stages = pipelineEpilogue[op];
-    for (size_t i = 0, e = stages.size(); i < e; ++i) {
+    int latency = op.getLatency();
+    auto stages = pipelineStages[op];
+    
+
+    SmallVector<SmallVector<SmallVector<StringAttr>>> stageClusters;
+
+    int i = 0;
+    while (i <= latency) {
+      SmallVector<SmallVector<StringAttr>> cluster;
+      for (int j = 0; j < ii; ++j) {
+        cluster.push_back(stages[i + j]);
+      }
+      stageClusters.push_back(cluster);
+      i += ii;
+    }
+
+    for (int i = 1, e = stageClusters.size(); i < e; ++i) {
       PatternRewriter::InsertionGuard g(rewriter);
       auto parOp = rewriter.create<calyx::ParOp>(op->getLoc());
       rewriter.setInsertionPointToStart(parOp.getBodyBlock());
-      int inSeq = 0;
       calyx::SeqOp seqOp = rewriter.create<calyx::SeqOp>(op->getLoc());
-      for (size_t j = i, f = stages.size(); j < f; ++j) {
-        if (inSeq == ii) {
-          inSeq = 0;
-          rewriter.setInsertionPointAfter(seqOp);
-          seqOp = rewriter.create<calyx::SeqOp>(op->getLoc());
-        }
-
+      for (int j = i, f = stageClusters.size(); j < f; ++j) {
         rewriter.setInsertionPointToStart(seqOp.getBodyBlock());
 
-        auto parOp = rewriter.create<calyx::ParOp>(op->getLoc());
-        rewriter.setInsertionPointToStart(parOp.getBodyBlock());
-        for (auto group : stages[j])
-          rewriter.create<calyx::EnableOp>(op->getLoc(), group);
-        inSeq++;
+        auto cluster = stageClusters[j];
+
+        if (cluster.empty())
+          continue;
+
+        auto clusterSeq = rewriter.create<calyx::SeqOp>(op->getLoc());
+        rewriter.setInsertionPointToStart(clusterSeq.getBodyBlock());
+
+        for (const auto& stage : cluster) {
+          if (stage.empty())
+            continue;
+          
+          PatternRewriter::InsertionGuard h(rewriter);
+
+          auto parOp = rewriter.create<calyx::ParOp>(op->getLoc());
+          rewriter.setInsertionPointToStart(parOp.getBodyBlock());
+
+          for (auto group : stage)
+            rewriter.create<calyx::EnableOp>(op->getLoc(), group);
+        }
       }
     }
+  }
+
+  void setPipelineLatency(PipelineWhileOp op, int latency) {
+    pipelineLatency[op] = latency;
+  }
+
+  int getPrologueSize(PipelineWhileOp op) {
+    float ii = op.getII();
+    int i = std::ceil((float) pipelineLatency[op] / ii);
+    return i - 1;
   }
 
 private:
@@ -286,19 +328,11 @@ private:
   DenseMap<Operation *, DenseMap<unsigned, calyx::RegisterOp>> pipelineRegs;
 
   /// A mapping from pipeline ops to a vector of vectors of group names that
-  /// constitute the pipeline prologue. Each inner vector consists of the groups
+  /// constitute the pipeline stages. Each inner vector consists of the groups
   /// for one stage.
-  DenseMap<Operation *, SmallVector<SmallVector<StringAttr>>> pipelinePrologue;
+  DenseMap<Operation *, DenseMap<int, SmallVector<StringAttr>>> pipelineStages;
 
-  /// A mapping from pipeline ops to a vector of vectors of group names that
-  /// constitute the pipeline body. Each inner vector consists of the groups
-  /// for one stage.
-  DenseMap<Operation *, SmallVector<SmallVector<StringAttr>>> pipelineBody;
-
-  /// A mapping from pipeline ops to a vector of vectors of group names that
-  /// constitute the pipeline epilogue. Each inner vector consists of the groups
-  /// for one stage.
-  DenseMap<Operation *, SmallVector<SmallVector<StringAttr>>> pipelineEpilogue;
+  DenseMap<Operation *, int> pipelineLatency;
 };
 
 /// Handles the current state of lowering of a Calyx component. It is mainly
@@ -375,9 +409,9 @@ private:
                         arith::ConstantOp constOp) const;
   LogicalResult buildOp(PatternRewriter &rewriter, AddIOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, SubIOp op) const;
-  LogicalResult buildOp(PatternRewriter &rewriter, MulIOp op) const;
-  LogicalResult buildOp(PatternRewriter &rewriter, DivUIOp op) const;
-  LogicalResult buildOp(PatternRewriter &rewriter, RemUIOp op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter, MulIOp mul) const;
+  LogicalResult buildOp(PatternRewriter &rewriter, DivUIOp div) const;
+  LogicalResult buildOp(PatternRewriter &rewriter, RemUIOp rem) const;
   LogicalResult buildOp(PatternRewriter &rewriter, ShRUIOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, ShRSIOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, ShLIOp op) const;
@@ -1349,6 +1383,9 @@ class BuildPipelineWhileGroups : public calyx::FuncOpPartialLoweringPattern {
       getState<ComponentLoweringState>().setUniqueName(whileOp.getOperation(),
                                                        "while");
 
+      getState<ComponentLoweringState>().setPipelineLatency(whileOp.getOperation(), 
+                                                            whileOp.getOperation().getLatency());
+
       /// Create iteration argument registers.
       /// The iteration argument registers will be referenced:
       /// - In the "before" part of the while loop, calculating the conditional,
@@ -1524,7 +1561,7 @@ class BuildPipelineGroups : public calyx::FuncOpPartialLoweringPattern {
     assert(numStages > 0);
 
     // Collect group names for the prologue or epilogue.
-    SmallVector<StringAttr> prologueGroups, bodyGroups, epilogueGroups;
+    SmallVector<StringAttr> bodyGroups;
 
     auto updatePrologueAndEpilogue = [&](calyx::GroupOp group) {
       // Mark the group for scheduling in the pipeline's block.
@@ -1537,11 +1574,6 @@ class BuildPipelineGroups : public calyx::FuncOpPartialLoweringPattern {
       // the epilogue. Every stage but the last should have its groups in the
       // prologue, and every stage but the first should have its groups in the
       // epilogue.
-      unsigned stageNumber = stage.getStageNumber();
-      if (stageNumber < numStages - 1)
-        prologueGroups.push_back(group.getSymNameAttr());
-      if (stageNumber > 0)
-        epilogueGroups.push_back(group.getSymNameAttr());
 
       bodyGroups.push_back(group.getSymNameAttr());
     };
@@ -1585,19 +1617,17 @@ class BuildPipelineGroups : public calyx::FuncOpPartialLoweringPattern {
       updatePrologueAndEpilogue(group);
     }
 
-    // Append the stage to the prologue, body, or epilogue list of stages if any groups
+    // Append the stage to the list of stages if any groups
     // were added for this stage. We append a list of groups for each stage, so
     // we can group by stage later, when we generate the schedule.
-    if (!prologueGroups.empty())
-      getState<ComponentLoweringState>().addPipelinePrologue(whileOp,
-                                                             prologueGroups);
-    if (!bodyGroups.empty())
-      getState<ComponentLoweringState>().addPipelineBody(whileOp,
-                                                         bodyGroups);
 
-    if (!epilogueGroups.empty())
-      getState<ComponentLoweringState>().addPipelineEpilogue(whileOp,
-                                                             epilogueGroups);
+    unsigned startTime = stage.getStart();
+
+    if (!bodyGroups.empty()) {
+      getState<ComponentLoweringState>().addPipelineStage(whileOp,
+                                                          startTime,
+                                                          bodyGroups);
+    }
 
     return success();
   }
@@ -1910,9 +1940,9 @@ private:
     /// If a bound was specified, add it.
     if (auto bound = whileOp.getBound()) {
       // Subtract the number of iterations unrolled into the prologue.
-      auto prologue = getState<ComponentLoweringState>().getPipelinePrologue(
+      auto prologue = getState<ComponentLoweringState>().getPrologueSize(
           whileOp.getOperation());
-      auto unrolledBound = *bound - prologue.size();
+      auto unrolledBound = *bound - prologue;
       whileCtrlOp->setAttr("bound", rewriter.getI64IntegerAttr(unrolledBound));
     }
 

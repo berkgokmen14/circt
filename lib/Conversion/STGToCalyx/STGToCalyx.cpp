@@ -131,7 +131,7 @@ public:
   Optional<TGroupOp> getSinkGroupFrom(Operation *op) {
     auto it = operationToGroup.find(op);
     if (it == operationToGroup.end())
-      return None;
+      return std::nullopt;
 
     if constexpr (std::is_same<TGroupOp, calyx::GroupInterface>::value)
       return it->second;
@@ -723,12 +723,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
     rewriter.setInsertionPointToEnd(group.getBodyBlock());
 
     auto res = ifOp.getResult(i);
-    SmallVector<Type> types;
-    types.push_back(res.getType());
-    types.push_back(res.getType());
     auto wireOp =
         getState<ComponentLoweringState>().getNewLibraryOpInstance<calyx::WireLibOp>(
-            rewriter, ifOp.getLoc(), types);
+            rewriter, ifOp.getLoc(), res.getType());
     rewriter.create<calyx::AssignOp>(ifOp.getLoc(), wireOp.getIn(), thenYield.getOperand(i), cond);
     rewriter.create<calyx::AssignOp>(ifOp.getLoc(), wireOp.getIn(), elseYield.getOperand(i), notCond);
     getState<ComponentLoweringState>().registerEvaluatingGroup(wireOp.getOut(), group);

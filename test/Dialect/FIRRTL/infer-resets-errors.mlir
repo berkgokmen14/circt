@@ -96,9 +96,11 @@ firrtl.circuit "top"   {
 // -----
 // Should not allow ResetType as an Input
 firrtl.circuit "top" {
-  // expected-error @+1 {{reset network never driven with concrete type}}
+  // expected-error @+2 {{reset network never driven with concrete type}}
+  // expected-note @+1 {{here: }}
   firrtl.module @top(in %in: !firrtl.bundle<foo: reset>, out %out: !firrtl.reset) {
-    %0 = firrtl.subfield %in(0) : (!firrtl.bundle<foo: reset>) -> !firrtl.reset
+    // expected-note @+1 {{here: }}
+    %0 = firrtl.subfield %in[foo] : !firrtl.bundle<foo: reset>
     firrtl.connect %out, %0 : !firrtl.reset, !firrtl.reset
   }
 }
@@ -107,10 +109,13 @@ firrtl.circuit "top" {
 // Should not allow ResetType as an ExtModule output
 firrtl.circuit "top" {
   firrtl.extmodule @ext(out out: !firrtl.bundle<foo: reset>)
+  // expected-note @+1 {{here: }}
   firrtl.module @top(out %out: !firrtl.reset) {
-    // expected-error @+1 {{reset network never driven with concrete type}}
+    // expected-error @+2 {{reset network never driven with concrete type}}
+    // expected-note @+1 {{here: }}
     %e_out = firrtl.instance e @ext(out out: !firrtl.bundle<foo: reset>)
-    %0 = firrtl.subfield %e_out(0) : (!firrtl.bundle<foo: reset>) -> !firrtl.reset
+    // expected-note @+1 {{here: }}
+    %0 = firrtl.subfield %e_out[foo] : !firrtl.bundle<foo: reset>
     firrtl.connect %out, %0 : !firrtl.reset, !firrtl.reset
   }
 }

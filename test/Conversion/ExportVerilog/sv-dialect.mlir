@@ -1321,25 +1321,16 @@ hw.module @XMR_src(%a : i23) -> (aa: i3) {
 // Additionally, test that XMRs use properly legalized Verilog names.  The XMR
 // target is "new" and the root of the reference is "wait_order".
 
-hw.globalRef @ref [
-  #hw.innerNameRef<@wait_order::@bar>,
-  #hw.innerNameRef<@XMRRef_Bar::@new>
-]
-hw.globalRef @ref2 [
-  #hw.innerNameRef<@wait_order::@baz>
-]
+hw.hierpath private @ref [@wait_order::@bar, @XMRRef_Bar::@new]
+hw.hierpath private @ref2 [@wait_order::@baz]
 hw.module @XMRRef_Bar() {
-  %new = sv.wire sym @new {
-    circt.globalRef = [#hw.globalNameRef<@ref>]
-  } : !hw.inout<i2>
+  %new = sv.wire sym @new : !hw.inout<i2>
 }
 hw.module.extern @XMRRef_Baz(%a: i2, %b: i1)
 hw.module.extern @XMRRef_Qux(%a: i2, %b: i1)
 // CHECK-LABEL: module wait_order
 hw.module @wait_order() {
-  hw.instance "bar" sym @bar @XMRRef_Bar() -> () {
-    circt.globalRef = [#hw.globalNameRef<@ref>]
-  }
+  hw.instance "bar" sym @bar @XMRRef_Bar() -> ()
   %xmr = sv.xmr.ref @ref : !hw.inout<i2>
   %xmrRead = sv.read_inout %xmr : !hw.inout<i2>
   %xmr2 = sv.xmr.ref @ref2 ".x.y.z[42]" : !hw.inout<i1>
@@ -1351,8 +1342,7 @@ hw.module @wait_order() {
   // CHECK-NEXT: );
   // CHECK-NEXT: */
   hw.instance "baz" sym @baz @XMRRef_Baz(a: %xmrRead: i2, b: %xmr2Read: i1) -> () {
-    doNotPrint = true,
-    circt.globalRef = [#hw.globalNameRef<@ref2>]
+    doNotPrint = true
   }
   // CHECK-NEXT: XMRRef_Qux qux (
   // CHECK-NEXT:   .a (wait_order_0.bar.new_0),
@@ -1362,6 +1352,32 @@ hw.module @wait_order() {
 }
 
 hw.module.extern @MyExtModule(%in: i8)
+hw.module.extern @ExtModule(%in: i8) -> (out: i8)
+
+// CHECK-LABEL: module InlineBind
+// CHEC:        output wire_0
+hw.module @InlineBind(%a_in: i8) -> (wire: i8){
+  // CHECK:      wire [7:0] _ext1_out;
+  // CHECK-NEXT: wire [7:0] _GEN;
+  // CHECK-NEXT: /* This instance is elsewhere emitted as a bind statement.
+  // CHECK-NEXT:   ExtModule ext1 (
+  // CHECK-NEXT:     .in  (8'(a_in + _GEN)),
+  // CHECK-NEXT:     .out (_ext1_out)
+  // CHECK-NEXT:   );
+  // CHECK-NEXT: */
+  // CHECK-NEXT: /* This instance is elsewhere emitted as a bind statement.
+  // CHECK-NEXT:   ExtModule ext2 (
+  // CHECK-NEXT:     .in  (_ext1_out),
+  // CHECK-NEXT:     .out (wire_0)
+  // CHECK-NEXT:   );
+  // CHECK-NEXT: */
+  %0 = sv.wire : !hw.inout<i8>
+  %1 = sv.read_inout %0: !hw.inout<i8>
+  %2 = comb.add %a_in, %1 : i8
+  %3 = hw.instance "ext1" sym @foo1 @ExtModule(in: %2: i8) -> (out: i8) {doNotPrint=1}
+  %4 = hw.instance "ext2" sym @foo2 @ExtModule(in: %3: i8) -> (out: i8) {doNotPrint=1}
+  hw.output %4: i8
+}
 
 // CHECK-LABEL: module MoveInstances
 hw.module @MoveInstances(%a_in: i8) -> (outc : i8){
@@ -1413,10 +1429,7 @@ hw.module @remoteInstDut(%i: i1, %j: i1, %z: i0) -> () {
   hw.instance "a1" sym @bindInst @extInst(_h: %mywire_rd: i1, _i: %myreg_rd: i1, _j: %j: i1, _k: %0: i1, _z: %z: i0) -> () {doNotPrint=1}
   hw.instance "a2" sym @bindInst2 @extInst(_h: %mywire_rd: i1, _i: %myreg_rd: i1, _j: %j: i1, _k: %0: i1, _z: %z: i0) -> () {doNotPrint=1}
   hw.instance "signed" sym @bindInst3 @extInst2(signed: %mywire_rd1 : i1, _i: %myreg_rd1 : i1, _j: %j: i1, _k: %0: i1, _z: %z: i0) -> () {doNotPrint=1}
-// CHECK: wire _signed__k
-// CHECK-NEXT: wire _a2__k = 1'h1;
-// CHECK-NEXT: wire _a1__k = 1'h1;
-// CHECK-NEXT: wire mywire
+// CHECK:      wire mywire
 // CHECK-NEXT: myreg
 // CHECK-NEXT: wire signed_0
 // CHECK-NEXT: reg  output_0
@@ -1689,6 +1702,28 @@ hw.module @ConditionalComments() {
   }                             // CHECK-NEXT: `endif // not def BAR
 }
 
+
+// CHECK-LABEL: module intrinsic
+hw.module @intrinsic(%clk: i1) -> (io1: i1, io2: i1, io3: i1, io4: i5) {
+  // CHECK: wire [4:0] [[tmp:.*]];
+
+  %x_i1 = sv.constantX : i1
+  %0 = comb.icmp bin ceq %clk, %x_i1 : i1
+  // CHECK: assign io1 = clk === 1'bx
+
+  %1 = sv.constantStr "foo"
+  %2 = sv.system "test$plusargs"(%1) : (!sv.string) -> i1
+  // CHECK: assign io2 = $test$plusargs("foo")
+
+  %_pargs = sv.wire  : !hw.inout<i5>
+  %3 = sv.read_inout %_pargs : !hw.inout<i5>
+  %4 = sv.system "value$plusargs"(%1, %_pargs) : (!sv.string, !hw.inout<i5>) -> i1
+  // CHECK: assign io3 = $value$plusargs("foo", [[tmp]])
+  // CHECK: assign io4 = [[tmp]]
+
+  hw.output %0, %2, %4, %3 : i1, i1, i1, i5
+}
+
 hw.module @bindInMod() {
   sv.bind #hw.innerNameRef<@remoteInstDut::@bindInst>
   sv.bind #hw.innerNameRef<@remoteInstDut::@bindInst3>
@@ -1699,14 +1734,14 @@ hw.module @bindInMod() {
 // CHECK-NEXT:   ._h (mywire),
 // CHECK-NEXT:   ._i (myreg),
 // CHECK-NEXT:   ._j (j),
-// CHECK-NEXT:   ._k (_a1__k)
+// CHECK-NEXT:   ._k (1'h1)
 // CHECK-NEXT: //._z (z)
 // CHECK-NEXT: );
 // CHECK-NEXT:  bind remoteInstDut extInst2 signed_1 (
 // CHECK-NEXT:    .signed_0 (signed_0),
 // CHECK-NEXT:    ._i       (output_0),
 // CHECK-NEXT:    ._j       (j),
-// CHECK-NEXT:    ._k       (_signed__k)
+// CHECK-NEXT:    ._k       (1'h1)
 // CHECK: endmodule
 
 sv.bind <@wait_order::@baz>
@@ -1722,7 +1757,7 @@ sv.bind #hw.innerNameRef<@remoteInstDut::@bindInst2>
 // CHECK-NEXT:   ._h (mywire),
 // CHECK-NEXT:   ._i (myreg),
 // CHECK-NEXT:   ._j (j),
-// CHECK-NEXT:   ._k (_a2__k)
+// CHECK-NEXT:   ._k (1'h1)
 // CHECK-NEXT: //._z (z)
 // CHECK-NEXT: );
 
@@ -1737,8 +1772,19 @@ hw.module @NastyPort(%.lots$of.dots: i1) -> (".more.dots": i1) {
 }
 sv.bind #hw.innerNameRef<@NastyPortParent::@foo>
 // CHECK-LABEL: bind NastyPortParent NastyPort foo (
-// CHECK-NEXT:    ._lots24of_dots (_foo__lots24of_dots)
+// CHECK-NEXT:    ._lots24of_dots (1'h0)
 // CHECK-NEXT:    ._more_dots     (_foo__more_dots)
+// CHECK-NEXT:  );
+
+sv.bind #hw.innerNameRef<@InlineBind::@foo1>
+sv.bind #hw.innerNameRef<@InlineBind::@foo2>
+// CHECK-LABEL: bind InlineBind ExtModule ext1 (
+// CHECK-NEXT:    .in  (8'(a_in + _GEN))
+// CHECK-NEXT:    .out (_ext1_out)
+// CHECK-NEXT:  );
+// CHECK-LABEL: bind InlineBind ExtModule ext2 (
+// CHECK-NEXT:    .in  (_ext1_out)
+// CHECK-NEXT:    .out (wire_0)
 // CHECK-NEXT:  );
 
 // CHECK-LABEL:  hw.module @issue595
@@ -1750,3 +1796,4 @@ sv.bind #hw.innerNameRef<@NastyPortParent::@foo>
 // CHECK-LABEL:  hw.module @remoteInstDut
 // CHECK:    %signed = sv.wire  {hw.verilogName = "signed_0"} : !hw.inout<i1>
 // CHECK:    %output = sv.reg  {hw.verilogName = "output_0"} : !hw.inout<i1>
+

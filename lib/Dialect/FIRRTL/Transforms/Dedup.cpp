@@ -22,7 +22,7 @@
 #include "circt/Dialect/FIRRTL/Passes.h"
 #include "circt/Dialect/HW/HWAttributes.h"
 #include "circt/Support/LLVM.h"
-#include "mlir/IR/BlockAndValueMapping.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/DenseMap.h"
@@ -46,7 +46,7 @@ using hw::InnerRefAttr;
 llvm::raw_ostream &printHex(llvm::raw_ostream &stream,
                             ArrayRef<uint8_t> bytes) {
   // Print the hash on a single line.
-  return stream << format_bytes(bytes, llvm::None, 32) << "\n";
+  return stream << format_bytes(bytes, std::nullopt, 32) << "\n";
 }
 
 llvm::raw_ostream &printHash(llvm::raw_ostream &stream, llvm::SHA256 &data) {
@@ -269,9 +269,8 @@ struct Equivalence {
     return failure();
   }
 
-  LogicalResult check(InFlightDiagnostic &diag, BlockAndValueMapping &map,
-                      Operation *a, Block &aBlock, Operation *b,
-                      Block &bBlock) {
+  LogicalResult check(InFlightDiagnostic &diag, IRMapping &map, Operation *a,
+                      Block &aBlock, Operation *b, Block &bBlock) {
 
     // Block argument types.
     auto portNames = a->getAttrOfType<ArrayAttr>("portNames");
@@ -348,9 +347,8 @@ struct Equivalence {
     return success();
   }
 
-  LogicalResult check(InFlightDiagnostic &diag, BlockAndValueMapping &map,
-                      Operation *a, Region &aRegion, Operation *b,
-                      Region &bRegion) {
+  LogicalResult check(InFlightDiagnostic &diag, IRMapping &map, Operation *a,
+                      Region &aRegion, Operation *b, Region &bRegion) {
     auto aIt = aRegion.begin();
     auto aEnd = aRegion.end();
     auto bIt = bRegion.begin();
@@ -395,8 +393,8 @@ struct Equivalence {
     return success();
   }
 
-  LogicalResult check(InFlightDiagnostic &diag, BlockAndValueMapping &map,
-                      Operation *a, DictionaryAttr aDict, Operation *b,
+  LogicalResult check(InFlightDiagnostic &diag, IRMapping &map, Operation *a,
+                      DictionaryAttr aDict, Operation *b,
                       DictionaryAttr bDict) {
     // Fast path.
     if (aDict == bDict)
@@ -461,7 +459,7 @@ struct Equivalence {
       auto aModule = instanceGraph.getReferencedModule(a);
       auto bModule = instanceGraph.getReferencedModule(b);
       // Create a new error for the submodule.
-      diag.attachNote(llvm::None)
+      diag.attachNote(std::nullopt)
           << "in instance " << a.getNameAttr() << " of " << aName
           << ", and instance " << b.getNameAttr() << " of " << bName;
       check(diag, aModule, bModule);
@@ -471,8 +469,8 @@ struct Equivalence {
   }
 
   // NOLINTNEXTLINE(misc-no-recursion)
-  LogicalResult check(InFlightDiagnostic &diag, BlockAndValueMapping &map,
-                      Operation *a, Operation *b) {
+  LogicalResult check(InFlightDiagnostic &diag, IRMapping &map, Operation *a,
+                      Operation *b) {
     // Operation name.
     if (a->getName() != b->getName()) {
       diag.attachNote(a->getLoc()) << "first operation is a " << a->getName();
@@ -517,12 +515,13 @@ struct Equivalence {
       if (bValue != map.lookup(aValue)) {
         diag.attachNote(a->getLoc())
             << "operations use different operands, first operand is '"
-            << getFieldName(getFieldRefFromValue(aValue)) << "'";
+            << getFieldName(getFieldRefFromValue(aValue)).first << "'";
         diag.attachNote(b->getLoc())
             << "second operand is '"
-            << getFieldName(getFieldRefFromValue(bValue))
+            << getFieldName(getFieldRefFromValue(bValue)).first
             << "', but should have been '"
-            << getFieldName(getFieldRefFromValue(map.lookup(aValue))) << "'";
+            << getFieldName(getFieldRefFromValue(map.lookup(aValue))).first
+            << "'";
         return failure();
       }
     }
@@ -550,7 +549,7 @@ struct Equivalence {
 
   // NOLINTNEXTLINE(misc-no-recursion)
   void check(InFlightDiagnostic &diag, Operation *a, Operation *b) {
-    BlockAndValueMapping map;
+    IRMapping map;
     if (AnnotationSet(a).hasAnnotation(noDedupClass)) {
       diag.attachNote(a->getLoc()) << "module marked NoDedup";
       return;
@@ -644,7 +643,7 @@ struct Deduper {
         nonLocalString(StringAttr::get(context, "circt.nonlocal")),
         classString(StringAttr::get(context, "class")) {
     // Populate the NLA cache.
-    for (auto nla : circuit.getOps<HierPathOp>())
+    for (auto nla : circuit.getOps<hw::HierPathOp>())
       nlaCache[nla.getNamepathAttr()] = nla.getSymNameAttr();
   }
 
@@ -679,7 +678,7 @@ struct Deduper {
     // Record any annotations on the module.
     recordAnnotations(module);
     // Record port annotations.
-    for (unsigned i = 0, e = module.getNumPorts(); i < e; ++i)
+    for (unsigned i = 0, e = getNumPorts(module); i < e; ++i)
       recordAnnotations(PortAnnoTarget(module, i));
     // Record any annotations in the module body.
     module->walk([&](Operation *op) { recordAnnotations(op); });
@@ -756,7 +755,7 @@ private:
       // Check the NLA cache to see if we already have this NLA.
       auto &cacheEntry = nlaCache[arrayAttr];
       if (!cacheEntry) {
-        auto nla = OpBuilder::atBlockBegin(nlaBlock).create<HierPathOp>(
+        auto nla = OpBuilder::atBlockBegin(nlaBlock).create<hw::HierPathOp>(
             loc, "nla", arrayAttr);
         // Insert it into the symbol table to get a unique name.
         symbolTable.insert(nla);
@@ -802,7 +801,7 @@ private:
   /// This erases the NLA op, and removes the NLA from every module's NLA map,
   /// but it does not delete the NLA reference from the target operation's
   /// annotations.
-  void eraseNLA(HierPathOp nla) {
+  void eraseNLA(hw::HierPathOp nla) {
     // Erase the NLA from the leaf module's nlaMap.
     targetMap.erase(nla.getNameAttr());
     nlaTable->erase(nla);
@@ -992,7 +991,7 @@ private:
     // Merge port annotations.
     if (toModule == to) {
       // Merge module port annotations.
-      for (unsigned i = 0, e = toModule.getNumPorts(); i < e; ++i)
+      for (unsigned i = 0, e = getNumPorts(toModule); i < e; ++i)
         mergeAnnotations(toModule, PortAnnoTarget(toModule, i),
                          AnnotationSet::forPort(toModule, i), fromModule,
                          PortAnnoTarget(fromModule, i),
@@ -1211,7 +1210,7 @@ void fixupAllModules(InstanceGraph &instanceGraph) {
     auto module = cast<FModuleLike>(*node->getModule());
     for (auto *instRec : node->uses()) {
       auto inst = instRec->getInstance();
-      for (unsigned i = 0, e = module.getNumPorts(); i < e; ++i)
+      for (unsigned i = 0, e = getNumPorts(module); i < e; ++i)
         fixupReferences(inst->getResult(i), module.getPortType(i));
     }
   }
@@ -1291,6 +1290,13 @@ class DedupPass : public DedupBase<DedupPass> {
         // marks the module as both NoDedup and MustDedup. We do not record this
         // module in the hasher to make sure no other module dedups "into" this
         // one.
+        dedupMap[moduleName] = moduleName;
+        continue;
+      }
+      // If the module has input RefType ports, also skip it.
+      if (llvm::any_of(module.getPorts(), [&](PortInfo port) {
+            return isa<RefType>(port.type) && port.isInput();
+          })) {
         dedupMap[moduleName] = moduleName;
         continue;
       }

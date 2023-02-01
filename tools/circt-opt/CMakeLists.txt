@@ -49,7 +49,6 @@ target_link_libraries(circt-opt
   CIRCTSTGToCalyx
   CIRCTAffineToSTG
   CIRCTScheduling
-  CIRCTSchedulingTestPasses
   CIRCTSeq
   CIRCTSeqTransforms
   CIRCTSSP

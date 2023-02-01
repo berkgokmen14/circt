@@ -4,19 +4,19 @@
 # This is intended to be a simple 'tutorial' example.  Run it as a test to
 # ensure that we keep it up to date (ensure it doesn't crash).
 
-from pycde import dim, module, generator, types, Clock, Input, Output
+from pycde import dim, generator, Clock, Input, Output, Module
+from pycde.types import Bits
 import pycde
 
 import sys
 
 
-@module
-class Mux:
+class Mux(Module):
   clk = Clock()
   data = Input(dim(8, 14))
-  sel = Input(types.i4)
+  sel = Input(Bits(4))
 
-  out = Output(types.i8)
+  out = Output(Bits(8))
 
   @generator
   def build(ports):

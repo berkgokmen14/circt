@@ -533,11 +533,11 @@ hw.module @UnaryParensIssue755(%a: i8) -> (b: i1) {
 
 // Inner name references to ports which are renamed to avoid collisions with
 // reserved Verilog keywords.
-hw.module.extern @VerbatimModuleExtern(%foo: i1 {hw.exportPort = @symA}) -> (bar: i1 {hw.exportPort = @symB})
+hw.module.extern @VerbatimModuleExtern(%foo: i1 {hw.exportPort = #hw<innerSym@symA>}) -> (bar: i1 {hw.exportPort = #hw<innerSym@symB>})
 // CHECK-LABEL: module VerbatimModule(
 // CHECK-NEXT:    input  signed_0
 // CHECK-NEXT:    output unsigned_0
-hw.module @VerbatimModule(%signed: i1 {hw.exportPort = @symA}) -> (unsigned: i1 {hw.exportPort = @symB}) {
+hw.module @VerbatimModule(%signed: i1 {hw.exportPort = #hw<innerSym@symA>}) -> (unsigned: i1 {hw.exportPort = #hw<innerSym@symB>}) {
   %parameter = sv.wire sym @symC : !hw.inout<i4>
   %localparam = sv.reg sym @symD : !hw.inout<i4>
   %shortint = sv.interface.instance sym @symE : !sv.interface<@Interface>
@@ -610,7 +610,7 @@ hw.module @SiFive_MulDiv(%clock: i1, %reset: i1) -> (io_req_ready: i1) {
   hw.probe @unused, %false, %reset, %clock: i1,i1,i1
   hw.output %false : i1
   //      CHECK: bind_rename_port InvisibleBind_assert (
-  // CHECK-NEXT:   ._io_req_ready_output (_InvisibleBind_assert__io_req_ready_output),
+  // CHECK-NEXT:   ._io_req_ready_output (1'h0),
   // CHECK-NEXT:   .resetSignalName      (reset),
   // CHECK-NEXT:   .clock                (clock)
   // CHECK-NEXT: );
@@ -654,6 +654,6 @@ hw.module @BindInterface() -> () {
 
 sv.bind #hw.innerNameRef<@SiFive_MulDiv::@__ETC_SiFive_MulDiv_assert>
 // CHECK-LABEL: bind SiFive_MulDiv bind_rename_port InvisibleBind_assert
-// CHECK-NEXT:  ._io_req_ready_output (_InvisibleBind_assert__io_req_ready_output)
+// CHECK-NEXT:  ._io_req_ready_output (1'h0)
 // CHECK-NEXT:  .resetSignalName      (reset),
 // CHECK-NEXT:  .clock                (clock)

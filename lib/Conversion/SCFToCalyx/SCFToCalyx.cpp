@@ -64,7 +64,7 @@ public:
     return getOperation().getConditionOp().getOperand(0);
   }
 
-  Optional<uint64_t> getBound() override { return None; }
+  std::optional<uint64_t> getBound() override { return std::nullopt; }
 };
 
 //===----------------------------------------------------------------------===//
@@ -1132,10 +1132,15 @@ class LateSSAReplacement : public calyx::FuncOpPartialLoweringPattern {
 class CleanupFuncOps : public calyx::FuncOpPartialLoweringPattern {
   using FuncOpPartialLoweringPattern::FuncOpPartialLoweringPattern;
 
+  LogicalResult matchAndRewrite(FuncOp funcOp,
+                                PatternRewriter &rewriter) const override {
+    rewriter.eraseOp(funcOp);
+    return success();
+  }
+
   LogicalResult
   partiallyLowerFuncToComp(FuncOp funcOp,
                            PatternRewriter &rewriter) const override {
-    rewriter.eraseOp(funcOp);
     return success();
   }
 };
@@ -1261,7 +1266,7 @@ public:
     GreedyRewriteConfig config;
     config.enableRegionSimplification = false;
     if (runOnce)
-      config.maxIterations = 0;
+      config.maxIterations = 1;
 
     /// Can't return applyPatternsAndFoldGreedily. Root isn't
     /// necessarily erased so it will always return failed(). Instead,

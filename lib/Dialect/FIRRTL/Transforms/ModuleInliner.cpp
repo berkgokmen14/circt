@@ -21,9 +21,10 @@
 #include "circt/Dialect/FIRRTL/Namespace.h"
 #include "circt/Dialect/FIRRTL/Passes.h"
 #include "circt/Dialect/HW/HWAttributes.h"
+#include "circt/Dialect/HW/HWOps.h"
 #include "circt/Support/BackedgeBuilder.h"
 #include "circt/Support/LLVM.h"
-#include "mlir/IR/BlockAndValueMapping.h"
+#include "mlir/IR/IRMapping.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/SetOperations.h"
 #include "llvm/ADT/SetVector.h"
@@ -52,7 +53,7 @@ namespace {
 /// written back to the IR to replace the original NLA.
 class MutableNLA {
   // Storage of the NLA this represents.
-  HierPathOp nla;
+  hw::HierPathOp nla;
 
   // A namespace that can be used to generate new symbol names if needed.
   CircuitNamespace *circuitNamespace;
@@ -108,7 +109,7 @@ class MutableNLA {
   }
 
 public:
-  MutableNLA(HierPathOp nla, CircuitNamespace *circuitNamespace)
+  MutableNLA(hw::HierPathOp nla, CircuitNamespace *circuitNamespace)
       : nla(nla), circuitNamespace(circuitNamespace),
         inlinedSymbols(BitVector(nla.getNamepath().size(), true)),
         size(nla.getNamepath().size()) {
@@ -137,7 +138,7 @@ public:
   void markModuleOnly() { moduleOnly = true; }
 
   /// Return the original NLA that this was pointing at.
-  HierPathOp getNLA() { return nla; }
+  hw::HierPathOp getNLA() { return nla; }
 
   /// Writeback updates accumulated in this MutableNLA to the IR.  This method
   /// should only ever be called once and, if a writeback occurrs, the
@@ -145,7 +146,7 @@ public:
   /// MutableNLA in any way after calling this method may result in crashes.
   /// (This is done to save unnecessary state cleanup of a pass-private
   /// utility.)
-  HierPathOp applyUpdates() {
+  hw::HierPathOp applyUpdates() {
     // Delete an NLA which is either dead or has been made local.
     if (isLocal() || isDead()) {
       nla.erase();
@@ -161,7 +162,7 @@ public:
     // The NLA has updates.  Generate a new NLA with the same symbol and delete
     // the original NLA.
     OpBuilder b(nla);
-    auto writeBack = [&](StringAttr root, StringAttr sym) -> HierPathOp {
+    auto writeBack = [&](StringAttr root, StringAttr sym) -> hw::HierPathOp {
       SmallVector<Attribute> namepath;
       StringAttr lastMod;
 
@@ -200,13 +201,13 @@ public:
       else
         namepath.push_back(FlatSymbolRefAttr::get(modPart));
 
-      auto hp = b.create<HierPathOp>(b.getUnknownLoc(), sym,
-                                     b.getArrayAttr(namepath));
+      auto hp = b.create<hw::HierPathOp>(b.getUnknownLoc(), sym,
+                                         b.getArrayAttr(namepath));
       hp.setVisibility(nla.getVisibility());
       return hp;
     };
 
-    HierPathOp last;
+    hw::HierPathOp last;
     assert(!dead || !newTops.empty());
     if (!dead)
       last = writeBack(nla.root(), nla.getNameAttr());
@@ -377,9 +378,7 @@ public:
     return sym;
   }
 
-  ArrayRef<InnerRefAttr> getAdditionalSymbols() {
-    return llvm::makeArrayRef(newTops);
-  }
+  ArrayRef<InnerRefAttr> getAdditionalSymbols() { return ArrayRef(newTops); }
 
   void setInnerSym(Attribute module, StringAttr innerSym) {
     assert(symIdx.count(module) && "Mutable NLA did not contain symbol");
@@ -394,8 +393,7 @@ public:
 /// result of the instance operation.  When future operations are cloned from
 /// the current block, they will use the value of the wire instead of the
 /// instance results.
-static void mapResultsToWires(BlockAndValueMapping &mapper,
-                              SmallVectorImpl<Value> &wires,
+static void mapResultsToWires(IRMapping &mapper, SmallVectorImpl<Value> &wires,
                               InstanceOp instance) {
   for (unsigned i = 0, e = instance.getNumResults(); i < e; ++i) {
     auto result = instance.getResult(i);
@@ -507,7 +505,7 @@ private:
   /// Returns true if the NLA matches the current path.  This will only return
   /// false if there is a mismatch indicating that the NLA definitely is
   /// referring to some other path.
-  bool doesNLAMatchCurrentPath(HierPathOp nla);
+  bool doesNLAMatchCurrentPath(hw::HierPathOp nla);
 
   /// Rename an operation and unique any symbols it has. If the op is an
   /// InstanceOp, then `validHierPaths` is the set of HierPaths that the
@@ -518,17 +516,16 @@ private:
               SmallVector<StringAttr> &validHierPaths);
 
   /// Clone and rename an operation.
-  void cloneAndRename(StringRef prefix, OpBuilder &b,
-                      BlockAndValueMapping &mapper, Operation &op,
+  void cloneAndRename(StringRef prefix, OpBuilder &b, IRMapping &mapper,
+                      Operation &op,
                       const DenseMap<Attribute, Attribute> &symbolRenames,
                       const DenseSet<Attribute> &localSymbols,
                       ModuleNamespace &moduleNamespace);
 
   /// Rewrite the ports of a module as wires.  This is similar to
   /// cloneAndRename, but operating on ports.
-  void mapPortsToWires(StringRef prefix, OpBuilder &b,
-                       BlockAndValueMapping &mapper, BackedgeBuilder &beb,
-                       FModuleOp target,
+  void mapPortsToWires(StringRef prefix, OpBuilder &b, IRMapping &mapper,
+                       BackedgeBuilder &beb, FModuleOp target,
                        const DenseSet<Attribute> &localSymbols,
                        ModuleNamespace &moduleNamespace,
                        SmallVectorImpl<Value> &wires,
@@ -543,7 +540,7 @@ private:
   /// Flattens a target module into the insertion point of the builder,
   /// renaming all operations using the prefix.  This clones all operations from
   /// the target, and does not trigger inlining on the target itself.
-  void flattenInto(StringRef prefix, OpBuilder &b, BlockAndValueMapping &mapper,
+  void flattenInto(StringRef prefix, OpBuilder &b, IRMapping &mapper,
                    BackedgeBuilder &beb, SmallVectorImpl<Backedge> &edges,
                    FModuleOp target, DenseSet<Attribute> localSymbols,
                    ModuleNamespace &moduleNamespace);
@@ -551,7 +548,7 @@ private:
   /// Inlines a target module into the insertion point of the builder,
   /// prefixing all operations with prefix.  This clones all operations from
   /// the target, and does not trigger inlining on the target itself.
-  void inlineInto(StringRef prefix, OpBuilder &b, BlockAndValueMapping &mapper,
+  void inlineInto(StringRef prefix, OpBuilder &b, IRMapping &mapper,
                   BackedgeBuilder &beb, SmallVectorImpl<Backedge> &edges,
                   FModuleOp target,
                   DenseMap<Attribute, Attribute> &symbolRenames,
@@ -624,7 +621,7 @@ private:
 /// Check if the NLA applies to our instance path. This works by verifying the
 /// instance paths backwards starting from the current module. We drop the back
 /// element from the NLA because it obviously matches the current operation.
-bool Inliner::doesNLAMatchCurrentPath(HierPathOp nla) {
+bool Inliner::doesNLAMatchCurrentPath(hw::HierPathOp nla) {
   return (activeHierpaths.find(nla.getSymNameAttr()) != activeHierpaths.end());
 }
 
@@ -705,15 +702,14 @@ void Inliner::rename(StringRef prefix, Operation *op,
 /// used instead of the module's ports.
 /// Cannot have a RefType wire, so create backedge and put in 'edges' for
 /// resolution later.  Mapper and 'wires' will have the placeholder value.
-void Inliner::mapPortsToWires(StringRef prefix, OpBuilder &b,
-                              BlockAndValueMapping &mapper,
+void Inliner::mapPortsToWires(StringRef prefix, OpBuilder &b, IRMapping &mapper,
                               BackedgeBuilder &beb, FModuleOp target,
                               const DenseSet<Attribute> &localSymbols,
                               ModuleNamespace &moduleNamespace,
                               SmallVectorImpl<Value> &wires,
                               SmallVectorImpl<Backedge> &edges) {
   auto portInfo = target.getPorts();
-  for (unsigned i = 0, e = target.getNumPorts(); i < e; ++i) {
+  for (unsigned i = 0, e = getNumPorts(target); i < e; ++i) {
     auto arg = target.getArgument(i);
     // Get the type of the wire.
     auto type = arg.getType().cast<FIRRTLType>();
@@ -781,7 +777,7 @@ void Inliner::mapPortsToWires(StringRef prefix, OpBuilder &b,
 /// apply the prefix to the name of the operation. This will clone to the
 /// insert point of the builder.
 void Inliner::cloneAndRename(
-    StringRef prefix, OpBuilder &b, BlockAndValueMapping &mapper, Operation &op,
+    StringRef prefix, OpBuilder &b, IRMapping &mapper, Operation &op,
     const DenseMap<Attribute, Attribute> &symbolRenames,
     const DenseSet<Attribute> &localSymbols, ModuleNamespace &moduleNamespace) {
   // Strip any non-local annotations which are local.
@@ -862,8 +858,8 @@ bool Inliner::shouldInline(Operation *op) {
 }
 
 // NOLINTNEXTLINE(misc-no-recursion)
-void Inliner::flattenInto(StringRef prefix, OpBuilder &b,
-                          BlockAndValueMapping &mapper, BackedgeBuilder &beb,
+void Inliner::flattenInto(StringRef prefix, OpBuilder &b, IRMapping &mapper,
+                          BackedgeBuilder &beb,
                           SmallVectorImpl<Backedge> &edges, FModuleOp target,
                           DenseSet<Attribute> localSymbols,
                           ModuleNamespace &moduleNamespace) {
@@ -957,7 +953,7 @@ void Inliner::flattenInstances(FModuleOp module) {
 
     // Create the wire mapping for results + ports. We RAUW the results instead
     // of mapping them.
-    BlockAndValueMapping mapper;
+    IRMapping mapper;
     b.setInsertionPoint(instance);
 
     auto nestedPrefix = (instance.getName() + "_").str();
@@ -982,9 +978,9 @@ void Inliner::flattenInstances(FModuleOp module) {
 }
 
 // NOLINTNEXTLINE(misc-no-recursion)
-void Inliner::inlineInto(StringRef prefix, OpBuilder &b,
-                         BlockAndValueMapping &mapper, BackedgeBuilder &beb,
-                         SmallVectorImpl<Backedge> &edges, FModuleOp target,
+void Inliner::inlineInto(StringRef prefix, OpBuilder &b, IRMapping &mapper,
+                         BackedgeBuilder &beb, SmallVectorImpl<Backedge> &edges,
+                         FModuleOp target,
                          DenseMap<Attribute, Attribute> &symbolRenames,
                          ModuleNamespace &moduleNamespace) {
   auto moduleName = target.getNameAttr();
@@ -1157,7 +1153,7 @@ void Inliner::inlineInstances(FModuleOp parent) {
     currentPath.emplace_back(moduleName, instInnerSym);
     // Create the wire mapping for results + ports. We RAUW the results instead
     // of mapping them.
-    BlockAndValueMapping mapper;
+    IRMapping mapper;
     b.setInsertionPoint(instance);
     auto nestedPrefix = (instance.getName() + "_").str();
     mapPortsToWires(nestedPrefix, b, mapper, beb, target, {}, moduleNamespace,
@@ -1208,7 +1204,7 @@ void Inliner::identifyNLAsTargetingOnlyModules() {
           referencedNLASyms.insert(sym.getAttr());
     };
     // Scan ports
-    for (unsigned i = 0, e = mod.getNumPorts(); i != e; ++i)
+    for (unsigned i = 0, e = getNumPorts(mod); i != e; ++i)
       scanAnnos(AnnotationSet::forPort(mod, i));
 
     // Scan operations (and not the module itself):
@@ -1257,7 +1253,7 @@ void Inliner::run() {
   CircuitNamespace circuitNamespace(circuit);
 
   // Gather all NLA's, build information about the instance ops used:
-  for (auto nla : circuit.getBodyBlock()->getOps<HierPathOp>()) {
+  for (auto nla : circuit.getBodyBlock()->getOps<hw::HierPathOp>()) {
     auto mnla = MutableNLA(nla, &circuitNamespace);
     nlaMap.insert({nla.getSymNameAttr(), mnla});
     rootMap[mnla.getNLA().root()].push_back(nla.getSymNameAttr());
@@ -1317,7 +1313,7 @@ void Inliner::run() {
 
   LLVM_DEBUG({
     llvm::dbgs() << "NLA modifications:\n";
-    for (auto nla : circuit.getBodyBlock()->getOps<HierPathOp>()) {
+    for (auto nla : circuit.getBodyBlock()->getOps<hw::HierPathOp>()) {
       auto &mnla = nlaMap[nla.getNameAttr()];
       mnla.dump();
     }

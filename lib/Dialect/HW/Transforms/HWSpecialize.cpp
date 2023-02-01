@@ -19,8 +19,8 @@
 #include "circt/Dialect/SV/SVPasses.h"
 #include "circt/Support/Namespace.h"
 #include "circt/Support/ValueMapper.h"
-#include "mlir/IR/BlockAndValueMapping.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -196,10 +196,10 @@ static void populateTypeConversion(Location loc, TypeConverter &typeConverter,
                                    ArrayAttr parameters) {
   // Possibly parametric types
   typeConverter.addConversion([=](hw::IntType type) {
-    return evaluateParametricType(loc, parameters, type).value();
+    return evaluateParametricType(loc, parameters, type);
   });
   typeConverter.addConversion([=](hw::ArrayType type) {
-    return evaluateParametricType(loc, parameters, type).value();
+    return evaluateParametricType(loc, parameters, type);
   });
 
   // Valid target types.
@@ -308,7 +308,7 @@ static LogicalResult specializeModule(
   builder.setInsertionPointToStart(target.getBodyBlock());
 
   for (auto &op : source.getOps()) {
-    BlockAndValueMapping bvMapper;
+    IRMapping bvMapper;
     for (auto operand : op.getOperands())
       bvMapper.map(operand, mapper.get(operand));
     auto *newOp = builder.clone(op, bvMapper);

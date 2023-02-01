@@ -25,18 +25,18 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/IR/BlockAndValueMapping.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/Dominance.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
+#include <cassert>
 #include <string>
 #include <utility>
-#include <cassert>
 
 #define DEBUG_TYPE "affine-to-pipeline"
 
@@ -483,7 +483,7 @@ AffineToPipeline::createPipelinePipeline(AffineForOp &forOp,
   // iter arg is created for the induction variable.
   TypeRange resultTypes = forOp.getResultTypes();
 
-  auto ii = builder.getI64IntegerAttr(problem.getInitiationInterval().value());
+  auto ii = builder.getI64IntegerAttr(*problem.getInitiationInterval());
 
   SmallVector<Value> iterArgs;
   iterArgs.push_back(lowerBound);
@@ -492,7 +492,7 @@ AffineToPipeline::createPipelinePipeline(AffineForOp &forOp,
 
   // If possible, attach a constant trip count attribute. This could be
   // generalized to support non-constant trip counts by supporting an AffineMap.
-  Optional<IntegerAttr> tripCountAttr;
+  std::optional<IntegerAttr> tripCountAttr;
   if (auto tripCount = getConstantTripCount(forOp))
     tripCountAttr = builder.getI64IntegerAttr(*tripCount);
 
@@ -519,10 +519,10 @@ AffineToPipeline::createPipelinePipeline(AffineForOp &forOp,
 
   // Maintain mappings of values in the loop body and results of stages,
   // initially populated with the iter args.
-  BlockAndValueMapping iterValueMap;
+  IRMapping valueMap;
   for (size_t i = 0; i < forOp.getBody()->getNumArguments(); ++i)
-    iterValueMap.map(forOp.getBody()->getArgument(i),
-                     pipeline.getStagesBlock().getArgument(i));
+    valueMap.map(forOp.getBody()->getArgument(i),
+                 pipeline.getStagesBlock().getArgument(i));
 
   // Create the stages.
   Block &stagesBlock = pipeline.getStagesBlock();
@@ -538,7 +538,7 @@ AffineToPipeline::createPipelinePipeline(AffineForOp &forOp,
   DominanceInfo dom(getOperation());
   SmallVector<DenseSet<Value>> registerValues;
   SmallVector<SmallVector<mlir::Type>> registerTypes;
-  SmallVector<BlockAndValueMapping> valueMaps;
+  SmallVector<IRMapping> valueMaps;
   DenseMap<Operation *, std::pair<unsigned, unsigned>> pipeTimes;
   for (auto startTime : startTimes) {
     auto group = startGroups[startTime];
@@ -598,7 +598,7 @@ AffineToPipeline::createPipelinePipeline(AffineForOp &forOp,
       types.push_back(val.getType());
     }
     registerTypes.push_back(types);
-    valueMaps.push_back(BlockAndValueMapping(iterValueMap));
+    valueMaps.push_back(IRMapping(valueMap));
   }
 
   // Create stages along with maps
@@ -635,7 +635,7 @@ AffineToPipeline::createPipelinePipeline(AffineForOp &forOp,
       stageOperands.push_back(valueMaps.data()[startTime].lookup(res));
       unsigned destTime =
           std::max(startTime + 1, pipeTimes[res.getDefiningOp()].first);
-      iterValueMap.map(res, stage.getResult(resIndex));
+      valueMap.map(res, stage.getResult(resIndex));
       valueMaps.data()[destTime].map(res, stage.getResult(resIndex++));
     }
     stageTerminator->insertOperands(stageTerminator->getNumOperands(),
@@ -662,8 +662,8 @@ AffineToPipeline::createPipelinePipeline(AffineForOp &forOp,
   termIterArgs.push_back(
       stagesBlock.front().getResult(stagesBlock.front().getNumResults() - 1));
   for (auto value : forOp.getBody()->getTerminator()->getOperands()) {
-    termIterArgs.push_back(iterValueMap.lookup(value));
-    termResults.push_back(iterValueMap.lookup(value));
+    termIterArgs.push_back(valueMap.lookup(value));
+    termResults.push_back(valueMap.lookup(value));
   }
 
   stagesTerminator.getIterArgsMutable().append(termIterArgs);

@@ -85,6 +85,15 @@ static cl::opt<bool>
                             "chunk independently"),
                    cl::init(false), cl::Hidden, cl::cat(mainCategory));
 
+static cl::list<std::string> includeDirs(
+    "include-dir",
+    cl::desc("Directory to search in when resolving source references"),
+    cl::value_desc("directory"), cl::cat(mainCategory));
+static cl::alias includeDirsShort(
+    "I", cl::desc("Alias for --include-dir.  Example: -I<directory>"),
+    cl::aliasopt(includeDirs), cl::Prefix, cl::NotHidden,
+    cl::cat(mainCategory));
+
 static cl::opt<bool>
     verifyDiagnostics("verify-diagnostics",
                       cl::desc("Check that emitted diagnostics match "
@@ -110,9 +119,16 @@ static cl::opt<bool>
                            cl::desc("Convert all chisel asserts into SVA"),
                            cl::init(false), cl::cat(mainCategory));
 
-static cl::opt<bool> stripMuxPragmas("strip-mux-pragmas",
-                                     cl::desc("Don't emit mux pragmas"),
-                                     cl::init(false), cl::cat(mainCategory));
+static cl::opt<bool> addMuxPragmas("add-mux-pragmas",
+                                   cl::desc("Annotate mux pragmas"),
+                                   cl::init(false), cl::cat(mainCategory));
+
+static cl::opt<bool>
+    stripMuxPragmas("strip-mux-pragmas",
+                    cl::desc("Strip mux pragmas. This option was deprecated "
+                             "since mux pragma annotatations are "
+                             "not emitted by default"),
+                    cl::init(true), cl::Hidden, cl::cat(mainCategory));
 
 static cl::opt<bool> disableAnnotationsClassless(
     "disable-annotation-classless",
@@ -123,6 +139,12 @@ static cl::opt<bool> disableAnnotationsUnknown(
     "disable-annotation-unknown",
     cl::desc("Ignore unknown annotations when parsing"), cl::init(false),
     cl::cat(mainCategory));
+
+static cl::opt<bool> lowerAnnotationsNoRefTypePorts(
+    "lower-annotations-no-ref-type-ports",
+    cl::desc("Create real ports instead of ref type ports when resolving "
+             "wiring problems inside the LowerAnnotations pass"),
+    cl::init(false), cl::Hidden, cl::cat(mainCategory));
 
 static cl::opt<bool>
     emitMetadata("emit-metadata",
@@ -287,6 +309,15 @@ static cl::opt<bool>
                         cl::desc("Disable the Grand Central passes"),
                         cl::init(false), cl::Hidden, cl::cat(mainCategory));
 
+static cl::opt<bool> grandCentralInstantiateCompanionOnly(
+    "grand-central-instantiate-companion",
+    cl::desc(
+        "Run Grand Central in a mode where the companion module is "
+        "instantiated and not bound in and the interface is dropped.  This is "
+        "intended for situations where there is useful assertion logic inside "
+        "the companion, but you don't care about the actual interface."),
+    cl::init(false), cl::Hidden, cl::cat(mainCategory));
+
 static cl::opt<bool> exportModuleHierarchy(
     "export-module-hierarchy",
     cl::desc("Export module and instance hierarchy as JSON"), cl::init(false),
@@ -296,6 +327,11 @@ static cl::opt<bool>
     disableCheckCombCycles("disable-check-comb-cycles",
                            cl::desc("Disable the CheckCombCycles pass"),
                            cl::init(false), cl::Hidden, cl::cat(mainCategory));
+
+static cl::opt<bool> useOldCheckCombCycles(
+    "use-old-check-comb-cycles",
+    cl::desc("Use old CheckCombCycles pass, that does not support aggregates"),
+    cl::init(false), cl::Hidden, cl::cat(mainCategory));
 
 static cl::opt<bool> disableIMDCE("disable-imdce",
                                   cl::desc("Disable the IMDCE pass"),
@@ -533,9 +569,9 @@ static void printOp(Operation *op, raw_ostream &os) {
 }
 
 /// Process a single buffer of the input.
-static LogicalResult
-processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
-              Optional<std::unique_ptr<llvm::ToolOutputFile>> &outputFile) {
+static LogicalResult processBuffer(
+    MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
+    std::optional<std::unique_ptr<llvm::ToolOutputFile>> &outputFile) {
   // Add the annotation file if one was explicitly specified.
   unsigned numAnnotationFiles = 0;
   for (const auto &inputAnnotationFilename : inputAnnotationFilenames) {
@@ -601,16 +637,19 @@ processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
   applyPassManagerCLOptions(pm);
 
   pm.nest<firrtl::CircuitOp>().addPass(firrtl::createLowerFIRRTLAnnotationsPass(
-      disableAnnotationsUnknown, disableAnnotationsClassless));
+      disableAnnotationsUnknown, disableAnnotationsClassless,
+      lowerAnnotationsNoRefTypePorts));
 
   // If the user asked for --parse-only, stop after running LowerAnnotations.
   if (outputFormat == OutputParseOnly) {
     if (failed(pm.run(module.get())))
       return failure();
     auto outputTimer = ts.nest("Print .mlir output");
-    printOp(*module, outputFile.value()->os());
+    printOp(*module, (*outputFile)->os());
     return success();
   }
+
+  pm.nest<firrtl::CircuitOp>().addPass(firrtl::createLowerIntrinsicsPass());
 
   // TODO: Move this to the O1 pipeline.
   pm.nest<firrtl::CircuitOp>().nest<firrtl::FModuleOp>().addPass(
@@ -683,14 +722,16 @@ processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
         firrtl::createRandomizeRegisterInitPass());
 
   if (!disableCheckCombCycles) {
-    // TODO: Currently CheckCombCyles pass doesn't support aggregates so skip
-    // the pass for now.
-    if (preserveAggregate == firrtl::PreserveAggregate::None)
-      pm.nest<firrtl::CircuitOp>().addPass(firrtl::createCheckCombCyclesPass());
-    else
-      emitWarning(module->getLoc())
-          << "CheckCombCyclesPass doens't support aggregate "
-             "values yet so it is skipped\n";
+    if (useOldCheckCombCycles) {
+      if (preserveAggregate == firrtl::PreserveAggregate::None)
+        pm.nest<firrtl::CircuitOp>().addPass(
+            firrtl::createCheckCombCyclesPass());
+      else
+        emitWarning(module->getLoc())
+            << "CheckCombCyclesPass doens't support aggregate "
+               "values yet so it is skipped\n";
+    } else
+      pm.nest<firrtl::CircuitOp>().addPass(firrtl::createCheckCombLoopsPass());
   }
 
   // If we parsed a FIRRTL file and have optimizations enabled, clean it up.
@@ -725,17 +766,11 @@ processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
 
   // Run passes to resolve Grand Central features.  This should run before
   // BlackBoxReader because Grand Central needs to inform BlackBoxReader where
-  // certain black boxes should be placed.
-  if (!disableGrandCentral) {
-    auto &circuitPM = pm.nest<firrtl::CircuitOp>();
-    circuitPM.addPass(firrtl::createGrandCentralPass());
-    circuitPM.addPass(firrtl::createGrandCentralTapsPass());
-    circuitPM.addPass(
-        firrtl::createGrandCentralSignalMappingsPass(outputFilename));
-  }
-
-  // Run SymbolDCE after GC for hierpathop's and just for general cleanup.
-  pm.addNestedPass<firrtl::CircuitOp>(mlir::createSymbolDCEPass());
+  // certain black boxes should be placed.  Note: all Grand Central Taps related
+  // collateral is resolved entirely by LowerAnnotations.
+  if (!disableGrandCentral)
+    pm.addNestedPass<firrtl::CircuitOp>(
+        firrtl::createGrandCentralPass(grandCentralInstantiateCompanionOnly));
 
   // Read black box source files into the IR.
   StringRef blackBoxRoot = blackBoxRootPath.empty()
@@ -746,6 +781,10 @@ processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
 
   pm.nest<firrtl::CircuitOp>().nest<firrtl::FModuleOp>().addPass(
       firrtl::createDropNamesPass(preserveMode));
+
+  // Run SymbolDCE as late as possible, but before InnerSymbolDCE. This is for
+  // hierpathop's and just for general cleanup.
+  pm.addNestedPass<firrtl::CircuitOp>(mlir::createSymbolDCEPass());
 
   // Run InnerSymbolDCE as late as possible, but before IMDCE.
   pm.addPass(firrtl::createInnerSymbolDCEPass());
@@ -789,7 +828,7 @@ processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
 
     pm.addPass(createLowerFIRRTLToHWPass(
         enableAnnotationWarning.getValue(), emitChiselAssertsAsSVA.getValue(),
-        stripMuxPragmas.getValue(), !isRandomEnabled(RandomKind::Mem),
+        addMuxPragmas.getValue(), !isRandomEnabled(RandomKind::Mem),
         !isRandomEnabled(RandomKind::Reg)));
 
     if (outputFormat == OutputIRHW) {
@@ -812,7 +851,7 @@ processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
            /*addVivadoRAMAddressConflictSynthesisBugWorkaround=*/
            addVivadoRAMAddressConflictSynthesisBugWorkaround}));
       pm.addPass(sv::createHWMemSimImplPass(
-          replSeqMem, ignoreReadEnableMem, stripMuxPragmas,
+          replSeqMem, ignoreReadEnableMem, addMuxPragmas,
           !isRandomEnabled(RandomKind::Mem), !isRandomEnabled(RandomKind::Reg),
           addVivadoRAMAddressConflictSynthesisBugWorkaround));
 
@@ -873,7 +912,7 @@ processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
     default:
       llvm_unreachable("can't reach this");
     case OutputVerilog:
-      exportPm.addPass(createExportVerilogPass(outputFile.value()->os()));
+      exportPm.addPass(createExportVerilogPass((*outputFile)->os()));
       break;
     case OutputSplitVerilog:
       exportPm.addPass(createExportSplitVerilogPass(outputFilename));
@@ -896,7 +935,7 @@ processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
   if (outputFormat == OutputIRFir || outputFormat == OutputIRHW ||
       outputFormat == OutputIRSV || outputFormat == OutputIRVerilog) {
     auto outputTimer = ts.nest("Print .mlir output");
-    printOp(*module, outputFile.value()->os());
+    printOp(*module, (*outputFile)->os());
   }
 
   // If requested, print the final MLIR into mlirOutFile.
@@ -922,12 +961,13 @@ processBuffer(MLIRContext &context, TimingScope &ts, llvm::SourceMgr &sourceMgr,
 /// Process a single split of the input. This allocates a source manager and
 /// creates a regular or verifying diagnostic handler, depending on whether the
 /// user set the verifyDiagnostics option.
-static LogicalResult
-processInputSplit(MLIRContext &context, TimingScope &ts,
-                  std::unique_ptr<llvm::MemoryBuffer> buffer,
-                  Optional<std::unique_ptr<llvm::ToolOutputFile>> &outputFile) {
+static LogicalResult processInputSplit(
+    MLIRContext &context, TimingScope &ts,
+    std::unique_ptr<llvm::MemoryBuffer> buffer,
+    std::optional<std::unique_ptr<llvm::ToolOutputFile>> &outputFile) {
   llvm::SourceMgr sourceMgr;
   sourceMgr.AddNewSourceBuffer(std::move(buffer), llvm::SMLoc());
+  sourceMgr.setIncludeDirs(includeDirs);
   if (!verifyDiagnostics) {
     SourceMgrDiagnosticHandler sourceMgrHandler(sourceMgr, &context);
     return processBuffer(context, ts, sourceMgr, outputFile);
@@ -944,7 +984,7 @@ processInputSplit(MLIRContext &context, TimingScope &ts,
 static LogicalResult
 processInput(MLIRContext &context, TimingScope &ts,
              std::unique_ptr<llvm::MemoryBuffer> input,
-             Optional<std::unique_ptr<llvm::ToolOutputFile>> &outputFile) {
+             std::optional<std::unique_ptr<llvm::ToolOutputFile>> &outputFile) {
   if (!splitInputFile)
     return processInputSplit(context, ts, std::move(input), outputFile);
 
@@ -973,6 +1013,12 @@ processInput(MLIRContext &context, TimingScope &ts,
 /// command line options are parsed and LLVM/MLIR are all set up and ready to
 /// go.
 static LogicalResult executeFirtool(MLIRContext &context) {
+  if (stripMuxPragmas == addMuxPragmas) {
+    llvm::errs()
+        << "--strip-mux-pragmas and --add-mux-pragmas are conflicting.";
+    return failure();
+  }
+
   // Create the timing manager we use to sample execution times.
   DefaultTimingManager tm;
   applyDefaultTimingManagerCLOptions(tm);
@@ -1002,11 +1048,11 @@ static LogicalResult executeFirtool(MLIRContext &context) {
   }
 
   // Create the output directory or output file depending on our mode.
-  Optional<std::unique_ptr<llvm::ToolOutputFile>> outputFile;
+  std::optional<std::unique_ptr<llvm::ToolOutputFile>> outputFile;
   if (outputFormat != OutputSplitVerilog) {
     // Create an output file.
     outputFile.emplace(openOutputFile(outputFilename, &errorMessage));
-    if (!outputFile.value()) {
+    if (!(*outputFile)) {
       llvm::errs() << errorMessage << "\n";
       return failure();
     }
@@ -1035,7 +1081,7 @@ static LogicalResult executeFirtool(MLIRContext &context) {
 
   // If the result succeeded and we're emitting a file, close it.
   if (outputFile.has_value())
-    outputFile.value()->keep();
+    (*outputFile)->keep();
 
   return success();
 }

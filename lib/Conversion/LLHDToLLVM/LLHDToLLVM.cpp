@@ -25,7 +25,7 @@
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/IR/BlockAndValueMapping.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
@@ -501,8 +501,8 @@ static unsigned getIndexOfOperandResult(Operation *op, Value result) {
 /// up to the initial constant value(s). This is required to clone the
 /// initialization of array and struct signals, where the init operand cannot
 /// originate from a constant operation.
-static Value recursiveCloneInit(OpBuilder &initBuilder,
-                                BlockAndValueMapping &mapping, Value init) {
+static Value recursiveCloneInit(OpBuilder &initBuilder, IRMapping &mapping,
+                                Value init) {
   SmallVector<Value> clonedOperands;
   Operation *initOp = init.getDefiningOp();
 
@@ -974,7 +974,7 @@ struct WaitOpConversion : public ConvertToLLVMPattern {
           op->getLoc(), transformed.getTime(), 2);
 
       std::array<Value, 5> args({statePtr, procStateBC, realTime, delta, eps});
-      rewriter.create<LLVM::CallOp>(op->getLoc(), llvm::None,
+      rewriter.create<LLVM::CallOp>(op->getLoc(), std::nullopt,
                                     SymbolRefAttr::get(llhdSuspendFunc), args);
     }
 
@@ -1127,7 +1127,7 @@ struct InstOpConversion : public ConvertToLLVMPattern {
 
       // Add reg state pointer to global state.
       initBuilder.create<LLVM::CallOp>(
-          op->getLoc(), llvm::None, SymbolRefAttr::get(allocEntityFunc),
+          op->getLoc(), std::nullopt, SymbolRefAttr::get(allocEntityFunc),
           ArrayRef<Value>({initStatePtr, owner, regMall}));
 
       // Index of the signal in the entity's signal table.
@@ -1143,7 +1143,7 @@ struct InstOpConversion : public ConvertToLLVMPattern {
 
         // Clone and insert the operation that defines the signal's init
         // operand (assmued to be a constant/array op)
-        BlockAndValueMapping mapping;
+        IRMapping mapping;
         Value initDef = recursiveCloneInit(initBuilder, mapping, op.getInit());
 
         if (!initDef)
@@ -1221,7 +1221,7 @@ struct InstOpConversion : public ConvertToLLVMPattern {
 
           // Add information to the state.
           initBuilder.create<LLVM::CallOp>(
-              op.getLoc(), llvm::None, SymbolRefAttr::get(addSigElemFunc),
+              op.getLoc(), std::nullopt, SymbolRefAttr::get(addSigElemFunc),
               ArrayRef<Value>({initStatePtr, sigIndex, toInt, numElements}));
         } else if (auto structTy =
                        underlyingTy.dyn_cast<LLVM::LLVMStructType>()) {
@@ -1254,7 +1254,7 @@ struct InstOpConversion : public ConvertToLLVMPattern {
 
             // Add information to the state.
             initBuilder.create<LLVM::CallOp>(
-                op.getLoc(), llvm::None, SymbolRefAttr::get(addSigStructFunc),
+                op.getLoc(), std::nullopt, SymbolRefAttr::get(addSigStructFunc),
                 ArrayRef<Value>(
                     {initStatePtr, sigIndex, elemToInt, elemSizeToInt}));
           }
@@ -1347,7 +1347,7 @@ struct InstOpConversion : public ConvertToLLVMPattern {
                                         procStateSensesPtr);
 
       std::array<Value, 3> allocProcArgs({initStatePtr, owner, procStateMall});
-      initBuilder.create<LLVM::CallOp>(op->getLoc(), llvm::None,
+      initBuilder.create<LLVM::CallOp>(op->getLoc(), std::nullopt,
                                        SymbolRefAttr::get(allocProcFunc),
                                        allocProcArgs);
     }
@@ -1572,7 +1572,7 @@ struct DrvOpConversion : public ConvertToLLVMPattern {
     std::array<Value, 7> args({statePtr, transformed.getSignal(), bc, sigWidth,
                                realTime, delta, eps});
     // Create the library call.
-    rewriter.create<LLVM::CallOp>(op->getLoc(), llvm::None,
+    rewriter.create<LLVM::CallOp>(op->getLoc(), std::nullopt,
                                   SymbolRefAttr::get(drvFunc), args);
 
     rewriter.eraseOp(op);

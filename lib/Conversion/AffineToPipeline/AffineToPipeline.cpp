@@ -71,8 +71,6 @@ private:
 } // namespace
 
 void AffineToPipeline::runOnOperation() {
-  // Get dependence analysis for the whole function.
-  auto dependenceAnalysis = getAnalysis<MemoryDependenceAnalysis>();
 
 
   // Collect loops to pipeline and work on them.
@@ -106,11 +104,13 @@ void AffineToPipeline::runOnOperation() {
       return signalPassFailure();
   }
 
+  // Get dependence analysis for the whole function.
+  auto dependenceAnalysis = getAnalysis<MemoryDependenceAnalysis>();
+
   // After dependence analysis, materialize affine structures.
   if (failed(lowerAffineStructures(dependenceAnalysis)))
     return signalPassFailure();
 
-  // getOperation()->dump();
 
 
   // Get scheduling analysis for the whole function.
@@ -128,10 +128,15 @@ void AffineToPipeline::runOnOperation() {
       if (dependences.empty())
         return;
 
+      llvm::errs() << "To: ";
+      op->dump();
+
       for (MemoryDependence memoryDep : dependences) {
         // Don't insert a dependence into the problem if there is no dependence.
         if (!hasDependence(memoryDep.dependenceType))
           continue;
+
+        memoryDep.source->dump();
         
         // Insert a dependence into the problem.
         Problem::Dependence dep(memoryDep.source, op);

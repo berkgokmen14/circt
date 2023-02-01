@@ -412,6 +412,7 @@ LogicalResult AffineToSTG::solveSchedulingProblem(
     return failure();
   }
 
+  // op->dump();
   // Optionally debug problem inputs.
   // LLVM_DEBUG(
   // region->walk<WalkOrder::PreOrder>([&](Operation *op) {

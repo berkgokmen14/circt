@@ -75,7 +75,7 @@ class OperatorError(Module):
 
   @generator
   def build(ports):
-    # CHECK: Operator '+' is not supported on non-int or signless values. RHS operand should be cast .as_sint()/.as_uint() if possible.
+    # CHECK: Operator '+' is not supported on non-int or signless signals. RHS operand should be cast .as_sint()/.as_uint() if possible.
     ports.b + ports.a
 
 
@@ -89,5 +89,5 @@ class OperatorError2(Module):
 
   @generator
   def build(ports):
-    # CHECK: Comparisons of signed/unsigned integers to bits32 not supported. RHS operand should be cast .as_sint()/.as_uint() if possible.
+    # CHECK: Comparisons of signed/unsigned integers to Bits<32> not supported. RHS operand should be cast .as_sint()/.as_uint() if possible.
     ports.b == ports.a

@@ -3,15 +3,13 @@
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 from __future__ import annotations
-from typing import List, Optional, Set, Tuple, Union, Dict
-from pycde.types import ClockType
-
-from pycde.support import _obj_to_value
+from typing import List, Optional, Set, Tuple, Dict
 
 from .common import (AppID, Clock, Input, Output, PortError, _PyProxy)
-from .support import (get_user_loc, _obj_to_attribute, OpOperandConnect,
-                      create_type_string, create_const_zero)
-from .value import ClockSignal, Signal, Value
+from .support import (get_user_loc, _obj_to_attribute, create_type_string,
+                      create_const_zero)
+from .signals import ClockSignal, Signal, _FromCirctValue
+from .types import ClockType
 
 from .circt import ir, support
 from .circt.dialects import hw, msft
@@ -125,14 +123,15 @@ class PortProxyBase:
 
   def __init__(self, block_args, builder):
     self._block_args = block_args
-    self._output_values = [None] * len(builder.outputs)
+    if builder.outputs is not None:
+      self._output_values = [None] * len(builder.outputs)
     self._builder = builder
 
   def _get_input(self, idx):
     val = self._block_args[idx]
     if idx in self._builder.clocks:
       return ClockSignal(val, ClockType())
-    return Value(val)
+    return _FromCirctValue(val)
 
   def _set_output(self, idx, signal):
     assert signal is not None
@@ -142,7 +141,7 @@ class PortProxyBase:
         raise PortError(
             f"Input port {pname} expected type {ptype}, not {signal.type}")
     else:
-      signal = _obj_to_value(signal, ptype)
+      signal = ptype(signal)
     self._output_values[idx] = signal
 
   def _set_outputs(self, signal_dict: Dict[str, Signal]):
@@ -281,7 +280,7 @@ class ModuleLikeBuilderBase(_PyProxy):
     for idx, (name, port_type) in enumerate(self.outputs):
 
       def fget(self, idx=idx):
-        return Value(self.inst.results[idx])
+        return _FromCirctValue(self.inst.results[idx])
 
       named_outputs[name] = fget
       setattr(self.modcls, name, property(fget=fget))
@@ -316,7 +315,7 @@ class ModuleLikeBuilderBase(_PyProxy):
       self.loc = loc
       self.clk = None
       self.ports = ports
-      if len(builder.clocks) == 1:
+      if builder.clocks is not None and len(builder.clocks) == 1:
         # Enter clock block implicitly if only one clock given.
         clk_port = list(builder.clocks)[0]
         self.clk = ClockSignal(ports._block_args[clk_port], ClockType())
@@ -435,7 +434,7 @@ class ModuleBuilder(ModuleLikeBuilderBase):
       else:
         # If it's not a signal, assume the user wants to specify a constant and
         # try to convert it to a hardware constant.
-        signal = _obj_to_value(signal, ptype)
+        signal = ptype(signal)
       input_values[idx] = signal
       del input_lookup[name]
 

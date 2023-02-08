@@ -1075,7 +1075,8 @@ parseAugmentedType(ApplyState &state, DictionaryAttr augmentedType,
 
     // Append this new Wiring Problem to the ApplyState.  The Wiring Problem
     // will be resolved to bore RefType ports before LowerAnnotations finishes.
-    state.wiringProblems.push_back({*source, sink, (path + "__bore").str()});
+    state.wiringProblems.push_back({*source, sink, (path + "__bore").str(),
+                                    WiringProblem::RefTypeUsage::Prefer});
 
     return DictionaryAttr::getWithSorted(context, elementIface);
   }
@@ -1549,7 +1550,14 @@ void GrandCentralPass::runOnOperation() {
   bool removalError = false;
   AnnotationSet::removeAnnotations(circuitOp, [&](Annotation anno) {
     if (anno.isClass(augmentedBundleTypeClass)) {
-      worklist.push_back(anno);
+      // If we are in "instantiateCompanionOnly" mode, then we don't need to
+      // create the interface, so we can skip adding it to the worklist.  This
+      // is a janky hack for situations where you want to synthesize assertion
+      // logic included in the companion, but don't want to have a dead
+      // interface hanging around (or have problems with tools understanding
+      // interfaces).
+      if (!instantiateCompanionOnly)
+        worklist.push_back(anno);
       ++numAnnosRemoved;
       return true;
     }
@@ -2033,14 +2041,6 @@ void GrandCentralPass::runOnOperation() {
     }
   });
 
-  // If we are in "instantiateCompanionOnly" mode, then just exit here.  We
-  // don't need to create the interface.  This is a janky hack for situations
-  // where you want to synthesize assertion logic included in the companion, but
-  // don't want to have a dead interface hanging around (or have problems with
-  // tools understanding interfaces).
-  if (instantiateCompanionOnly)
-    return;
-
   // Now, iterate over the worklist of interface-encoding annotations to create
   // the interface and all its sub-interfaces (interfaces that it instantiates),
   // instantiate the top-level interface, and generate a "mappings file" that
@@ -2134,11 +2134,15 @@ void GrandCentralPass::runOnOperation() {
       continue;
     auto companionBuilder =
         OpBuilder::atBlockEnd(companionModule.getBodyBlock());
+
+    // Generate gathered XMR's.
     for (auto xmrElem : xmrElems) {
       auto uloc = companionBuilder.getUnknownLoc();
       companionBuilder.create<sv::VerbatimOp>(uloc, xmrElem.str, xmrElem.val,
                                               xmrElem.syms);
     }
+    numXMRs += xmrElems.size();
+
     sv::InterfaceOp topIface;
     for (const auto &ifaceBuilder : interfaceBuilder) {
       auto builder = OpBuilder::atBlockEnd(getOperation().getBodyBlock());

@@ -2,10 +2,11 @@
 #  See https://llvm.org/LICENSE.txt for license information.
 #  SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+from .common import (Input, Output, InputChannel, OutputChannel, Clock,
+                     _PyProxy, PortError)
+from .module import Generator, Module, ModuleLikeBuilderBase, PortProxyBase
+from .signals import ChannelSignal, Signal, _FromCirctValue
 from .system import System
-from .module import Generator, _BlockContext, Module, ModuleLikeBuilderBase
-from .value import ChannelValue, Signal, Value
-from .common import Input, Output, InputChannel, OutputChannel, _PyProxy
 from .types import Channel, Type, types, _FromCirctType
 
 from .circt import ir
@@ -101,7 +102,7 @@ class ServiceDecl(_PyProxy):
             self._materialize_service_decl()),
         impl_type=ir.StringAttr.get(builtin),
         inputs=[x.value for x in inputs]).operation.results
-    return [Value(x) for x in impl_results]
+    return [_FromCirctValue(x) for x in impl_results]
 
 
 class _RequestConnection:
@@ -125,7 +126,7 @@ class _RequestConnection:
 
 class _RequestToServerConn(_RequestConnection):
 
-  def __call__(self, chan: ChannelValue, chan_name: str = ""):
+  def __call__(self, chan: ChannelSignal, chan_name: str = ""):
     self.decl._materialize_service_decl()
     raw_esi.RequestToServerConnectionOp(
         self.service_port, chan.value,
@@ -146,13 +147,13 @@ class _RequestToClientConn(_RequestConnection):
     req_op = raw_esi.RequestToClientConnectionOp(
         type._type, self.service_port,
         ir.ArrayAttr.get([ir.StringAttr.get(chan_name)]))
-    return ChannelValue(req_op)
+    return ChannelSignal(req_op.result, type)
 
 
 class _RequestToFromServerConn(_RequestConnection):
 
   def __call__(self,
-               to_server_channel: ChannelValue,
+               to_server_channel: ChannelSignal,
                chan_name: str = "",
                to_client_type: Optional[Type] = None):
     self.decl._materialize_service_decl()
@@ -167,7 +168,7 @@ class _RequestToFromServerConn(_RequestConnection):
     to_client = raw_esi.RequestInOutChannelOp(
         self.to_client_type._type, self.service_port, to_server_channel.value,
         ir.ArrayAttr.get([ir.StringAttr.get(chan_name)]))
-    return ChannelValue(to_client)
+    return ChannelSignal(to_client.result, type)
 
 
 def Cosim(decl: ServiceDecl, clk, rst):
@@ -218,12 +219,12 @@ def CosimBSP(user_module):
   return top
 
 
-class NamedChannelValue(ChannelValue):
+class NamedChannelValue(ChannelSignal):
   """A ChannelValue with the name of the client request."""
 
   def __init__(self, input_chan: ir.Value, client_name: List[str]):
     self.client_name = client_name
-    super().__init__(input_chan)
+    super().__init__(input_chan, _FromCirctType(input_chan.type))
 
 
 class _OutputChannelSetter:
@@ -232,12 +233,12 @@ class _OutputChannelSetter:
   have implemented for this request."""
 
   def __init__(self, req: raw_esi.RequestToClientConnectionOp,
-               old_chan_to_replace: ChannelValue):
+               old_chan_to_replace: ChannelSignal):
     self.type = Channel(_FromCirctType(req.toClient.type))
     self.client_name = req.clientNamePath
     self._chan_to_replace = old_chan_to_replace
 
-  def assign(self, new_value: ChannelValue):
+  def assign(self, new_value: ChannelSignal):
     """Assign the generated channel to this request."""
     if self._chan_to_replace is None:
       name_str = ".".join(self.client_name)
@@ -452,3 +453,66 @@ def _import_ram_decl(sys: "System", ram_op: raw_esi.RandomAccessMemoryDeclOp):
   ram.symbol = ir.StringAttr.get(sym)
   install(ram_op)
   return ram
+
+
+class PureModuleBuilder(ModuleLikeBuilderBase):
+  """Defines how an ESI `PureModule` gets built."""
+
+  @property
+  def circt_mod(self):
+    from .system import System
+    sys: System = System.current()
+    ret = sys._op_cache.get_circt_mod(self)
+    if ret is None:
+      return sys._create_circt_mod(self)
+    return ret
+
+  def create_op(self, sys: System, symbol):
+    """Callback for creating a ESIPureModule op."""
+    return raw_esi.ESIPureModuleOp(symbol, loc=self.loc, ip=sys._get_ip())
+
+  def scan_cls(self):
+    """Scan the class for input/output ports and generators. (Most `ModuleLike`
+    will use these.) Store the results for later use."""
+
+    generators = {}
+    for attr_name, attr in self.cls_dct.items():
+      if attr_name.startswith("_"):
+        continue
+
+      if isinstance(attr, (Clock, Input, Output)):
+        raise PortError("ESI pure modules cannot have ports")
+      elif isinstance(attr, Generator):
+        generators[attr_name] = attr
+
+    self.generators = generators
+
+  def create_port_proxy(self):
+    """Since pure ESI modules don't have any ports, this function is pretty
+    boring."""
+    proxy_attrs = {}
+    return type(self.modcls.__name__ + "Ports", (PortProxyBase,), proxy_attrs)
+
+  def add_external_port_accessors(self):
+    """Since we don't have ports, do nothing."""
+    pass
+
+  def generate(self):
+    """Fill in (generate) this module. Only supports a single generator
+    currently."""
+    if len(self.generators) != 1:
+      raise ValueError("Must have exactly one generator.")
+    g: Generator = list(self.generators.values())[0]
+
+    entry_block = self.circt_mod.add_entry_block()
+    ports = self.generator_port_proxy(None, self)
+    with self.GeneratorCtxt(self, ports, entry_block, g.loc):
+      g.gen_func(ports)
+
+
+class PureModule(Module):
+  """A pure ESI module has no ports and contains only instances of modules with
+  only ESI ports and connections between said instances. Use ESI services for
+  external communication."""
+
+  BuilderType = PureModuleBuilder

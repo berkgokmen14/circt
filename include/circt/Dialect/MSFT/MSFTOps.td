@@ -10,7 +10,6 @@ include "circt/Dialect/HW/HWOpInterfaces.td"
 
 def InstanceOp : MSFTOp<"instance", [
         Symbol,
-        ParentOneOf<["MSFTModuleOp"]>,
         DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>,
         DeclareOpInterfaceMethods<SymbolUserOpInterface>,
         DeclareOpInterfaceMethods<HWInstanceLike>
@@ -133,7 +132,10 @@ def MSFTModuleOp : MSFTModuleOpBase<"module",
       TypeAttrOf<FunctionType>:$function_type,
       OptionalAttr<DictArrayAttr>:$arg_attrs,
       OptionalAttr<DictArrayAttr>:$res_attrs,
-      StrArrayAttr:$argNames, StrArrayAttr:$resultNames,
+      StrArrayAttr:$argNames,
+      StrArrayAttr:$resultNames,
+      LocationArrayAttr:$argLocs,
+      LocationArrayAttr:$resultLocs,
       DictionaryAttr:$parameters,
       OptionalAttr<StrAttr>:$fileName,
       OptionalAttr<StrArrayAttr>:$childAppIDBases);
@@ -191,6 +193,7 @@ def MSFTModuleOp : MSFTModuleOpBase<"module",
   }];
 
   let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
 }
 
 def MSFTModuleExternOp : MSFTOp<"module.extern",

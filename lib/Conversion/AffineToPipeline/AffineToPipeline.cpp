@@ -61,9 +61,12 @@ private:
   LogicalResult
   lowerAffineStructures(MemoryDependenceAnalysis &dependenceAnalysis);
   LogicalResult unrollSubLoops(AffineForOp &forOp);
-  LogicalResult populateOperatorTypes(AffineForOp &forOp, ModuloProblem &problem);
-  LogicalResult solveSchedulingProblem(AffineForOp &forOp, ModuloProblem &problem);
-  LogicalResult createPipelinePipeline(AffineForOp &forOp, ModuloProblem &problem);
+  LogicalResult populateOperatorTypes(AffineForOp &loop,
+                                      ModuloProblem &problem);
+  LogicalResult solveSchedulingProblem(AffineForOp &loop,
+                                       ModuloProblem &problem);
+  LogicalResult createPipelinePipeline(AffineForOp &loop,
+                                       ModuloProblem &problem);
 
   CyclicSchedulingAnalysis *schedulingAnalysis;
   unsigned resII = 1;
@@ -71,6 +74,138 @@ private:
 };
 
 } // namespace
+
+ModuloProblem AffineToPipeline::getModuloProblem(CyclicProblem &prob) {
+  auto modProb = ModuloProblem::get(prob.getContainingOp());
+  for (auto *op : prob.getOperations()) {
+    auto opr = prob.getLinkedOperatorType(op);
+    if (opr.has_value()) {
+      modProb.setLinkedOperatorType(op, opr.value());
+      auto latency = prob.getLatency(opr.value());
+      if (latency.has_value())
+        modProb.setLatency(opr.value(), latency.value());
+    }
+    modProb.insertOperation(op);
+  }
+
+  for (auto *op : prob.getOperations()) {
+    for (auto dep : prob.getDependences(op)) {
+      if (dep.isAuxiliary())
+        assert(modProb.insertDependence(dep).succeeded());
+      auto distance = prob.getDistance(dep);
+      if (distance.has_value())
+        modProb.setDistance(dep, distance.value());
+    }
+  }
+
+  return modProb;
+}
+
+LogicalResult AffineToPipeline::unrollSubLoops(AffineForOp &forOp) {
+  auto result = forOp.getBody()->walk<WalkOrder::PostOrder>([](AffineForOp op) {
+    if (loopUnrollFull(op).failed())
+      return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+
+  if (result.wasInterrupted()) {
+    forOp.emitOpError("Could not unroll sub loops");
+    return failure();
+  }
+
+  return success();
+}
+
+void AffineToPipeline::runOnOperation() {
+
+  // Collect loops to pipeline and work on them.
+  SmallVector<AffineForOp> loops;
+
+  auto hasPipelinedParent = [](Operation *op) {
+    Operation *currentOp = op;
+
+    while (!isa<ModuleOp>(currentOp->getParentOp())) {
+      if (currentOp->getParentOp()->hasAttr("hls.pipeline"))
+        return true;
+      currentOp = currentOp->getParentOp();
+    }
+
+    return false;
+  };
+
+  getOperation()->walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (!isa<AffineForOp>(op) || !op->hasAttr("hls.pipeline"))
+      return;
+
+    if (hasPipelinedParent(op))
+      return;
+
+    loops.push_back(cast<AffineForOp>(op));
+  });
+
+  // Unroll loops within this loop to make pipelining possible
+  for (auto loop : llvm::make_early_inc_range(loops)) {
+    if (failed(unrollSubLoops(loop)))
+      return signalPassFailure();
+  }
+
+  // Get dependence analysis for the whole function.
+  auto dependenceAnalysis = getAnalysis<MemoryDependenceAnalysis>();
+
+  // After dependence analysis, materialize affine structures.
+  if (failed(lowerAffineStructures(dependenceAnalysis)))
+    return signalPassFailure();
+
+  // Get scheduling analysis for the whole function.
+  schedulingAnalysis = &getAnalysis<CyclicSchedulingAnalysis>();
+
+  for (auto loop : llvm::make_early_inc_range(loops)) {
+    // Populate the target operator types.
+    ModuloProblem moduloProblem =
+        getModuloProblem(schedulingAnalysis->getProblem(loop));
+
+    // Insert memory dependences into the problem.
+    loop.getBody()->walk([&](Operation *op) {
+      ArrayRef<MemoryDependence> dependences =
+          dependenceAnalysis.getDependences(op);
+      if (dependences.empty())
+        return;
+
+      for (MemoryDependence memoryDep : dependences) {
+        // Don't insert a dependence into the problem if there is no dependence.
+        if (!hasDependence(memoryDep.dependenceType))
+          continue;
+
+        memoryDep.source->dump();
+
+        // Insert a dependence into the problem.
+        Problem::Dependence dep(memoryDep.source, op);
+        auto depInserted = moduloProblem.insertDependence(dep);
+        assert(succeeded(depInserted));
+        (void)depInserted;
+
+        // Use the lower bound of the innermost loop for this dependence. This
+        // assumes outer loops execute sequentially, i.e. one iteration of the
+        // inner loop completes before the next iteration is initiated. With
+        // proper analysis and lowerings, this can be relaxed.
+        unsigned distance = memoryDep.dependenceComponents.back().lb.value();
+        if (distance > 0)
+          moduloProblem.setDistance(dep, distance);
+      }
+    });
+
+    if (failed(populateOperatorTypes(loop, moduloProblem)))
+      return signalPassFailure();
+
+    // Solve the scheduling problem computed by the analysis.
+    if (failed(solveSchedulingProblem(loop, moduloProblem)))
+      return signalPassFailure();
+
+    // Convert the IR.
+    if (failed(createPipelinePipeline(loop, moduloProblem)))
+      return signalPassFailure();
+  }
+}
 
 /// Apply the affine map from an 'affine.load' operation to its operands, and
 /// feed the results to a newly created 'memref.load' operation (which replaces
@@ -211,142 +346,6 @@ LogicalResult AffineToPipeline::lowerAffineStructures(
   return success();
 }
 
-LogicalResult AffineToPipeline::unrollSubLoops(
-    AffineForOp &forOp) {
-  auto result = forOp.getBody()->walk<WalkOrder::PostOrder>([](AffineForOp op) {
-    if (loopUnrollFull(op).failed())
-      return WalkResult::interrupt();
-    return WalkResult::advance();
-  });
-
-  if (result.wasInterrupted()) {
-    forOp.emitOpError("Could not unroll sub loops");
-    return failure();
-  }
-
-  return success();
-}
-
-ModuloProblem AffineToPipeline::getModuloProblem(CyclicProblem &prob) {
-  auto modProb = ModuloProblem::get(prob.getContainingOp());
-  for (auto *op : prob.getOperations()) {
-    auto opr = prob.getLinkedOperatorType(op);
-    if (opr.has_value()) {
-      modProb.setLinkedOperatorType(op, opr.value());
-      auto latency = prob.getLatency(opr.value());
-      if (latency.has_value())
-        modProb.setLatency(opr.value(), latency.value());
-    }
-    modProb.insertOperation(op);
-  }
-
-  for (auto *op : prob.getOperations()) {
-    for (auto dep : prob.getDependences(op)) {
-      if (dep.isAuxiliary())
-        assert(modProb.insertDependence(dep).succeeded());
-      auto distance = prob.getDistance(dep);
-      if (distance.has_value())
-        modProb.setDistance(dep, distance.value());
-    }
-  }
-
-  return modProb;
-}
-
-
-void AffineToPipeline::runOnOperation() {
-
-  // Collect loops to pipeline and work on them.
-  SmallVector<AffineForOp> loops;
-
-  auto hasPipelinedParent = [](Operation *op) {
-    Operation *currentOp = op;
-
-    while (!isa<ModuleOp>(currentOp->getParentOp())) {
-      if (currentOp->getParentOp()->hasAttr("hls.pipeline"))
-        return true;
-      currentOp = currentOp->getParentOp();
-    }
-
-    return false;
-  };
-  
-  getOperation()->walk<WalkOrder::PreOrder>([&](Operation *op) {
-    if (!isa<AffineForOp>(op) || !op->hasAttr("hls.pipeline"))
-      return;
-
-    if (hasPipelinedParent(op))
-      return;
-
-    loops.push_back(cast<AffineForOp>(op));
-  });
-
-  // Unroll loops within this loop to make pipelining possible
-  for (auto loop : llvm::make_early_inc_range(loops)) {
-    if (failed(unrollSubLoops(loop)))
-      return signalPassFailure();
-  }
-
-  // Get dependence analysis for the whole function.
-  auto dependenceAnalysis = getAnalysis<MemoryDependenceAnalysis>();
-
-  // After dependence analysis, materialize affine structures.
-  if (failed(lowerAffineStructures(dependenceAnalysis)))
-    return signalPassFailure();
-
-
-
-  // Get scheduling analysis for the whole function.
-  schedulingAnalysis = &getAnalysis<CyclicSchedulingAnalysis>();
-
-  for (auto loop : llvm::make_early_inc_range(loops)) {
-    // Populate the target operator types.
-    ModuloProblem moduloProblem =
-      getModuloProblem(schedulingAnalysis->getProblem(loop));
-
-    // Insert memory dependences into the problem.
-    loop.getBody()->walk([&](Operation *op) {
-
-      ArrayRef<MemoryDependence> dependences = dependenceAnalysis.getDependences(op);
-      if (dependences.empty())
-        return;
-
-      for (MemoryDependence memoryDep : dependences) {
-        // Don't insert a dependence into the problem if there is no dependence.
-        if (!hasDependence(memoryDep.dependenceType))
-          continue;
-
-        memoryDep.source->dump();
-        
-        // Insert a dependence into the problem.
-        Problem::Dependence dep(memoryDep.source, op);
-        auto depInserted = moduloProblem.insertDependence(dep);
-        assert(succeeded(depInserted));
-        (void)depInserted;
-
-        // Use the lower bound of the innermost loop for this dependence. This
-        // assumes outer loops execute sequentially, i.e. one iteration of the
-        // inner loop completes before the next iteration is initiated. With
-        // proper analysis and lowerings, this can be relaxed.
-        unsigned distance = memoryDep.dependenceComponents.back().lb.value();
-        if (distance > 0)
-          moduloProblem.setDistance(dep, distance);
-      }
-    });
-
-    if (failed(populateOperatorTypes(loop, moduloProblem)))
-      return signalPassFailure();
-
-    // Solve the scheduling problem computed by the analysis.
-    if (failed(solveSchedulingProblem(loop, moduloProblem)))
-      return signalPassFailure();
-
-    // Convert the IR.
-    if (failed(createPipelinePipeline(loop, moduloProblem)))
-      return signalPassFailure();
-  }
-}
-
 /// Populate the schedling problem operator types for the dialect we are
 /// targetting. Right now, we assume Calyx, which has a standard library with
 /// well-defined operator latencies. Ultimately, we should move this to a
@@ -386,10 +385,9 @@ AffineToPipeline::populateOperatorTypes(AffineForOp &loop,
           // Some known sequential ops. In certain cases, reads may be
           // combinational in Calyx, but taking advantage of that is left as
           // a future enhancement.
-          TypedValue<MemRefType> memRef =
-              isa<AffineStoreOp>(*memOp)
-                  ? cast<AffineStoreOp>(*memOp).getMemRef()
-                  : cast<memref::StoreOp>(*memOp).getMemRef();
+          Value memRef = isa<AffineStoreOp>(*memOp)
+                             ? cast<AffineStoreOp>(*memOp).getMemRef()
+                             : cast<memref::StoreOp>(*memOp).getMemRef();
           Problem::OperatorType memOpr = problem.getOrInsertOperatorType(
               "mem_" + std::to_string(hash_value(memRef)));
           problem.setLatency(memOpr, 1);
@@ -401,10 +399,9 @@ AffineToPipeline::populateOperatorTypes(AffineForOp &loop,
           // Some known sequential ops. In certain cases, reads may be
           // combinational in Calyx, but taking advantage of that is left as
           // a future enhancement.
-          TypedValue<MemRefType> memRef =
-              isa<AffineLoadOp>(*memOp)
-                  ? cast<AffineLoadOp>(*memOp).getMemRef()
-                  : cast<memref::LoadOp>(*memOp).getMemRef();
+          Value memRef = isa<AffineLoadOp>(*memOp)
+                             ? cast<AffineLoadOp>(*memOp).getMemRef()
+                             : cast<memref::LoadOp>(*memOp).getMemRef();
           Problem::OperatorType memOpr = problem.getOrInsertOperatorType(
               "mem_" + std::to_string(hash_value(memRef)));
           problem.setLatency(memOpr, 1);

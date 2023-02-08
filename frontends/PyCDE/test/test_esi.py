@@ -8,7 +8,7 @@ from pycde.common import Output
 from pycde.constructs import Wire
 from pycde.types import Channel
 from pycde.testing import unittestmodule
-from pycde.value import BitVectorSignal, ChannelValue
+from pycde.signals import BitVectorSignal, ChannelSignal
 
 
 @esi.ServiceDecl
@@ -94,6 +94,17 @@ class LoopbackInOutTop(Module):
     loopback.assign(data_chan)
 
 
+# CHECK-LABEL:  esi.pure_module @LoopbackInOutPure {
+# CHECK:          [[r0:%.+]] = esi.service.req.to_client <@HostComms::@from_host>(["loopback_in"]) : !esi.channel<i16>
+# CHECK:          esi.service.req.to_server [[r0]] -> <@HostComms::@to_host>(["loopback"]) : !esi.channel<i16>
+@unittestmodule(print=True)
+class LoopbackInOutPure(esi.PureModule):
+
+  @generator
+  def construct(self):
+    HostComms.to_host(HostComms.from_host("loopback_in", types.i16), "loopback")
+
+
 class MultiplexerService(esi.ServiceImplementation):
   clk = Clock()
   rst = Input(types.i1)
@@ -130,7 +141,7 @@ class MultiplexerService(esi.ServiceImplementation):
     return channel_type.wrap(sliced, ports.trunk_in_valid)
 
   @staticmethod
-  def unwrap_and_pad(ports, input_channel: ChannelValue):
+  def unwrap_and_pad(ports, input_channel: ChannelSignal):
     """
     Unwrap the input channel and pad it to 256 bits.
     """

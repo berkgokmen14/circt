@@ -18,6 +18,7 @@
 #include "circt/Conversion/CalyxToFSM.h"
 #include "circt/Conversion/CalyxToHW.h"
 #include "circt/Conversion/CombToLLVM.h"
+#include "circt/Conversion/ConvertToArcs.h"
 #include "circt/Conversion/ExportChiselInterface.h"
 #include "circt/Conversion/ExportVerilog.h"
 #include "circt/Conversion/FIRRTLToHW.h"

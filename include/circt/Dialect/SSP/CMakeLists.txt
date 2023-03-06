@@ -8,6 +8,13 @@ mlir_tablegen(SSPAttributes.cpp.inc -gen-attrdef-defs)
 add_public_tablegen_target(CIRCTSSPAttributesIncGen)
 add_dependencies(circt-headers CIRCTSSPAttributesIncGen)
 
+set(LLVM_TARGET_DEFINITIONS SSPInterfaces.td)
+
+mlir_tablegen(SSPInterfaces.h.inc -gen-op-interface-decls)
+mlir_tablegen(SSPInterfaces.cpp.inc -gen-op-interface-defs)
+add_public_tablegen_target(CIRCTSSPInterfacesIncGen)
+add_dependencies(circt-headers CIRCTSSPInterfacesIncGen)
+
 set(LLVM_TARGET_DEFINITIONS SSPPasses.td)
 
 mlir_tablegen(SSPPasses.h.inc -gen-pass-decls)

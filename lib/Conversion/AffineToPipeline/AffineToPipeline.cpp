@@ -1,4 +1,4 @@
-//===- AffineToStaticlogic.cpp --------------------------------------------===//
+//===- AffineToPipeline.cpp -----------------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -11,6 +11,7 @@
 #include "circt/Analysis/DependenceAnalysis.h"
 #include "circt/Analysis/SchedulingAnalysis.h"
 #include "circt/Dialect/Pipeline/Pipeline.h"
+#include "circt/Dialect/SSP/SSPInterfaces.h"
 #include "circt/Scheduling/Algorithms.h"
 #include "circt/Scheduling/Problems.h"
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
@@ -29,10 +30,12 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
+#include "mlir/IR/Visitors.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include <cassert>
 #include <limits>
@@ -275,6 +278,42 @@ private:
   MemoryDependenceAnalysis &dependenceAnalysis;
 };
 
+
+class SchedulableAffineInterfaceLowering : public mlir::RewritePattern {
+public:
+  SchedulableAffineInterfaceLowering(MLIRContext *context,
+                      MemoryDependenceAnalysis &dependenceAnalysis)
+      : RewritePattern(MatchAnyOpTypeTag(), 1, context), 
+        dependenceAnalysis(dependenceAnalysis) {}
+
+  LogicalResult
+  matchAndRewrite(Operation* op,
+                  PatternRewriter &rewriter) const override {
+    if (auto writeOp = dyn_cast<AffineWriteOpInterface>(*op)) {
+      // Expand affine map from 'affineWriteOpInterface'.
+      SmallVector<Value, 8> indices(writeOp.getMapOperands());
+      auto maybeExpandedMap =
+          expandAffineMap(rewriter, writeOp.getLoc(), writeOp.getAffineMap(), indices);
+      if (!maybeExpandedMap.has_value())
+        return failure();
+
+      if (auto schedulableOp = dyn_cast<ssp::SchedulableAffineInterface>(*op)) {
+        // Build memref.store valueToStore, memref[expandedMap.results].
+        auto *newOp = schedulableOp.replaceWithNonAffineOp(*maybeExpandedMap);
+
+        dependenceAnalysis.replaceOp(op, newOp);
+
+        return success();
+      }
+    }        
+    return failure();
+  }
+
+private:
+  MemoryDependenceAnalysis &dependenceAnalysis;
+};
+
+
 /// Helper to hoist computation out of scf::IfOp branches, turning it into a
 /// mux-like operation, and exposing potentially concurrent execution of its
 /// branches.
@@ -311,6 +350,11 @@ static bool yieldOpLegalityCallback(AffineYieldOp op) {
   return !op->getParentOfType<IfOp>();
 }
 
+static bool schedulableAffineInterfaceLegalityCallback(Operation *op) {
+  return isa<ssp::SchedulableAffineInterface>(*op) && 
+    (isa<AffineReadOpInterface>(*op) || isa<AffineWriteOpInterface>(*op));
+}
+
 /// After analyzing memory dependences, and before creating the schedule, we
 /// want to materialize affine operations with arithmetic, scf, and memref
 /// operations, which make the condition computation of addresses, etc.
@@ -327,6 +371,7 @@ LogicalResult AffineToPipeline::lowerAffineStructures(
   target.addLegalDialect<AffineDialect, ArithDialect, MemRefDialect,
                          SCFDialect>();
   target.addIllegalOp<AffineIfOp, AffineLoadOp, AffineStoreOp, AffineApplyOp>();
+  target.markUnknownOpDynamicallyLegal(schedulableAffineInterfaceLegalityCallback);
   target.addDynamicallyLegalOp<IfOp>(ifOpLegalityCallback);
   target.addDynamicallyLegalOp<AffineYieldOp>(yieldOpLegalityCallback);
 
@@ -407,6 +452,34 @@ AffineToPipeline::populateOperatorTypes(AffineForOp &loop,
           problem.setLatency(memOpr, 1);
           problem.setLimit(memOpr, 1);
           problem.setLinkedOperatorType(memOp, memOpr);
+          return WalkResult::advance();
+        })
+        .Case<ssp::LoadInterface>([&](Operation *op) {
+          auto loadOp = cast<ssp::LoadInterface>(*op);
+          auto latencyOpt = loadOp.getLatency();
+          auto limitOpt = loadOp.getLimit();
+          assert(latencyOpt.has_value() && "Load op must have latency");
+          Problem::OperatorType portOpr = problem.getOrInsertOperatorType(
+            loadOp.getUnqiueId());
+          problem.setLatency(portOpr, latencyOpt.value());
+          if (limitOpt.has_value())
+            problem.setLimit(portOpr, limitOpt.value());
+          problem.setLinkedOperatorType(op, portOpr);
+          
+          return WalkResult::advance();
+        })
+        .Case<ssp::StoreInterface>([&](Operation *op) {
+          auto storeOp = cast<ssp::StoreInterface>(*op);
+          auto latencyOpt = storeOp.getLatency();
+          auto limitOpt = storeOp.getLimit();
+          assert(latencyOpt.has_value() && "Store op must have latency");
+          Problem::OperatorType portOpr = problem.getOrInsertOperatorType(
+            storeOp.getUnqiueId());
+          problem.setLatency(portOpr, latencyOpt.value());
+          if (limitOpt.has_value())
+            problem.setLimit(portOpr, limitOpt.value());
+          problem.setLinkedOperatorType(op, portOpr);
+
           return WalkResult::advance();
         })
         .Case<MulIOp>([&](Operation *mcOp) {

@@ -279,9 +279,44 @@ private:
 };
 
 
-class SchedulableAffineInterfaceLowering : public mlir::RewritePattern {
+class SchedulableAffineReadInterfaceLowering : public mlir::RewritePattern {
 public:
-  SchedulableAffineInterfaceLowering(MLIRContext *context,
+  SchedulableAffineReadInterfaceLowering(MLIRContext *context,
+                      MemoryDependenceAnalysis &dependenceAnalysis)
+      : RewritePattern(MatchAnyOpTypeTag(), 1, context), 
+        dependenceAnalysis(dependenceAnalysis) {}
+
+  LogicalResult
+  matchAndRewrite(Operation* op,
+                  PatternRewriter &rewriter) const override {
+    if (auto readOp = dyn_cast<AffineReadOpInterface>(*op)) {
+      // Expand affine map from 'affineWriteOpInterface'.
+      SmallVector<Value, 8> indices(readOp.getMapOperands());
+      auto maybeExpandedMap =
+          expandAffineMap(rewriter, readOp.getLoc(), readOp.getAffineMap(), indices);
+      if (!maybeExpandedMap.has_value())
+        return failure();
+
+      if (auto schedulableOp = dyn_cast<ssp::SchedulableAffineInterface>(*op)) {
+        // Build memref.store valueToStore, memref[expandedMap.results].
+        auto *newOp = schedulableOp.createNonAffineOp(rewriter, *maybeExpandedMap);
+        rewriter.replaceOp(op, newOp->getResults());
+
+        dependenceAnalysis.replaceOp(op, newOp);
+
+        return success();
+      }
+    }        
+    return failure();
+  }
+
+private:
+  MemoryDependenceAnalysis &dependenceAnalysis;
+};
+
+class SchedulableAffineWriteInterfaceLowering : public mlir::RewritePattern {
+public:
+  SchedulableAffineWriteInterfaceLowering(MLIRContext *context,
                       MemoryDependenceAnalysis &dependenceAnalysis)
       : RewritePattern(MatchAnyOpTypeTag(), 1, context), 
         dependenceAnalysis(dependenceAnalysis) {}
@@ -352,8 +387,8 @@ static bool yieldOpLegalityCallback(AffineYieldOp op) {
 }
 
 static bool schedulableAffineInterfaceLegalityCallback(Operation *op) {
-  return isa<ssp::SchedulableAffineInterface>(*op) && 
-    (isa<AffineReadOpInterface>(*op) || isa<AffineWriteOpInterface>(*op));
+  return !(isa<ssp::SchedulableAffineInterface>(*op) && 
+    (isa<AffineReadOpInterface>(*op) || isa<AffineWriteOpInterface>(*op)));
 }
 
 /// After analyzing memory dependences, and before creating the schedule, we
@@ -381,6 +416,8 @@ LogicalResult AffineToPipeline::lowerAffineStructures(
   patterns.add<AffineLoadLowering>(context, dependenceAnalysis);
   patterns.add<AffineStoreLowering>(context, dependenceAnalysis);
   patterns.add<IfOpHoisting>(context);
+  patterns.add<SchedulableAffineReadInterfaceLowering>(context, dependenceAnalysis);
+  patterns.add<SchedulableAffineWriteInterfaceLowering>(context, dependenceAnalysis);
 
   if (failed(applyPartialConversion(op, target, std::move(patterns))))
     return failure();
@@ -463,10 +500,11 @@ AffineToPipeline::populateOperatorTypes(AffineForOp &loop,
           Problem::OperatorType portOpr = problem.getOrInsertOperatorType(
             loadOp.getUnqiueId());
           problem.setLatency(portOpr, latencyOpt.value());
-          if (limitOpt.has_value())
-            problem.setLimit(portOpr, limitOpt.value());
+          problem.setLimit(portOpr, 1);
+          // if (limitOpt.has_value())
+          //   problem.setLimit(portOpr, limitOpt.value());
           problem.setLinkedOperatorType(op, portOpr);
-          
+
           return WalkResult::advance();
         })
         .Case<ssp::StoreInterface>([&](Operation *op) {
@@ -477,8 +515,9 @@ AffineToPipeline::populateOperatorTypes(AffineForOp &loop,
           Problem::OperatorType portOpr = problem.getOrInsertOperatorType(
             storeOp.getUnqiueId());
           problem.setLatency(portOpr, latencyOpt.value());
-          if (limitOpt.has_value())
-            problem.setLimit(portOpr, limitOpt.value());
+          problem.setLimit(portOpr, 1);
+          // if (limitOpt.has_value())
+          //   problem.setLimit(portOpr, limitOpt.value());
           problem.setLinkedOperatorType(op, portOpr);
 
           return WalkResult::advance();
@@ -513,6 +552,7 @@ AffineToPipeline::solveSchedulingProblem(AffineForOp &loop,
     auto opr = problem.getLinkedOperatorType(op);
     llvm::dbgs() << "\n  opr = " << opr;
     llvm::dbgs() << "\n  latency = " << problem.getLatency(*opr);
+    llvm::dbgs() << "\n  limit = " << problem.getLimit(*opr);
     for (auto dep : problem.getDependences(op))
       if (dep.isAuxiliary())
         llvm::dbgs() << "\n  dep = { distance = " << problem.getDistance(dep)

@@ -83,7 +83,6 @@ def SchedulableAffineOpInterface : OpInterface<"SchedulableAffineInterface"> {
       "Creates a new non-affine op equivalent to the original Op",
       "Operation*",
       "createNonAffineOp",
-      (ins "mlir::ValueRange":$indices)>
+      (ins "mlir::OpBuilder":$builder, "mlir::ValueRange":$indices)>
   ];
-  /* let verify = [{ return verifyGroupInterface(op); }]; */
 }

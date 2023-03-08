@@ -299,7 +299,8 @@ public:
 
       if (auto schedulableOp = dyn_cast<ssp::SchedulableAffineInterface>(*op)) {
         // Build memref.store valueToStore, memref[expandedMap.results].
-        auto *newOp = schedulableOp.replaceWithNonAffineOp(*maybeExpandedMap);
+        auto *newOp = schedulableOp.createNonAffineOp(*maybeExpandedMap);
+        rewriter.replaceOp(op, newOp->getResults());
 
         dependenceAnalysis.replaceOp(op, newOp);
 

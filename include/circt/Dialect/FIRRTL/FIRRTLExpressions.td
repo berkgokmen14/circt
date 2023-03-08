@@ -270,7 +270,7 @@ def SubindexOp : FIRRTLExprOp<"subindex", [
     ```
     }];
 
-  let arguments = (ins FIRRTLBaseType:$input, I32Attr:$index);
+  let arguments = (ins FVectorType:$input, I32Attr:$index);
   let results = (outs FIRRTLBaseType:$result);
   let hasFolder = 1;
   let hasCanonicalizer = 1;
@@ -281,8 +281,7 @@ def SubindexOp : FIRRTLExprOp<"subindex", [
   let firrtlExtraClassDeclaration = [{
     /// Return a `FieldRef` to the accessed field.
     FieldRef getAccessedField() {
-      return FieldRef(getInput(), getInput().getType().cast<FVectorType>()
-                                            .getFieldID(getIndex()));
+      return FieldRef(getInput(), getInput().getType().getFieldID(getIndex()));
     }
   }];
 }
@@ -300,7 +299,7 @@ def SubaccessOp : FIRRTLExprOp<"subaccess", [
     ```
     }];
 
-  let arguments = (ins FIRRTLBaseType:$input, UIntType:$index);
+  let arguments = (ins FVectorType:$input, UIntType:$index);
   let results = (outs FIRRTLBaseType:$result);
 
   let assemblyFormat =
@@ -808,6 +807,7 @@ def RefResolveOp: FIRRTLExprOp<"ref.resolve",
   let results = (outs FIRRTLBaseType:$result);
 
   let assemblyFormat = "$ref attr-dict `:` qualified(type($ref))";
+  let hasCanonicalizer = true;
 }
 
 def RefSendOp: FIRRTLExprOp<"ref.send", [RefResultTypeConstraint<"base", "result">]> {
@@ -840,6 +840,7 @@ def RefSubOp : FIRRTLExprOp<"ref.sub"> {
 
   let assemblyFormat =
      "$input `[` $index `]` attr-dict `:` qualified(type($input))";
+  let hasCanonicalizer = true;
 }
 
 #endif // CIRCT_DIALECT_FIRRTL_FIRRTLEXPRESSIONS_TD

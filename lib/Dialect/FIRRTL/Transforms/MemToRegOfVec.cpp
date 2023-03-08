@@ -52,6 +52,9 @@ struct MemToRegOfVecPass : public MemToRegOfVecBase<MemToRegOfVecPass> {
       llvm::for_each(llvm::depth_first(node), [&](hw::InstanceGraphNode *node) {
         dutModuleSet.insert(node->getModule());
       });
+    } else {
+      auto mods = circtOp.getOps<FModuleOp>();
+      dutModuleSet.insert(mods.begin(), mods.end());
     }
 
     mlir::parallelForEach(circtOp.getContext(), dutModuleSet,
@@ -123,7 +126,7 @@ struct MemToRegOfVecPass : public MemToRegOfVecBase<MemToRegOfVecPass> {
   }
 
   Value getMask(ImplicitLocOpBuilder &builder, Value bundle) {
-    auto bType = bundle.getType().cast<FIRRTLType>().cast<BundleType>();
+    auto bType = cast<BundleType>(bundle.getType());
     if (bType.getElement("mask"))
       return builder.create<SubfieldOp>(bundle, "mask");
     return builder.create<SubfieldOp>(bundle, "wmask");
@@ -131,7 +134,7 @@ struct MemToRegOfVecPass : public MemToRegOfVecBase<MemToRegOfVecPass> {
 
   Value getData(ImplicitLocOpBuilder &builder, Value bundle,
                 bool getWdata = false) {
-    auto bType = bundle.getType().cast<FIRRTLType>().cast<BundleType>();
+    auto bType = cast<BundleType>(bundle.getType());
     if (bType.getElement("data"))
       return builder.create<SubfieldOp>(bundle, "data");
     if (bType.getElement("rdata") && !getWdata)
@@ -188,7 +191,7 @@ struct MemToRegOfVecPass : public MemToRegOfVecBase<MemToRegOfVecPass> {
     wdataIn = addPipelineStages(builder, numStages, clock, wdataIn, "wdata");
     maskBits = addPipelineStages(builder, numStages, clock, maskBits, "wmask");
     // Create the register access.
-    auto rdata = builder.create<SubaccessOp>(regOfVec, addr);
+    FIRRTLBaseValue rdata = builder.create<SubaccessOp>(regOfVec, addr);
 
     // The tuple for the access to individual fields of an aggregate data type.
     // Tuple::<register, data, mask>
@@ -386,7 +389,7 @@ struct MemToRegOfVecPass : public MemToRegOfVecBase<MemToRegOfVecPass> {
     for (size_t index = 0, rend = memOp.getNumResults(); index < rend;
          ++index) {
       auto result = memOp.getResult(index);
-      if (result.getType().cast<FIRRTLType>().isa<RefType>()) {
+      if (isa<RefType>(result.getType())) {
         debugPorts.push_back(result);
         continue;
       }

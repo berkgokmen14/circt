@@ -155,9 +155,17 @@ static bool isDuplicatableExpression(Operation *op) {
   if (isa<comb::ExtractOp, hw::StructExtractOp>(op))
     return true;
 
-  // We only inline array_get with a constant index.
-  if (auto array = dyn_cast<hw::ArrayGetOp>(op))
-    return array.getIndex().getDefiningOp<ConstantOp>();
+  // We only inline array_get with a constant or wire index.
+  if (auto array = dyn_cast<hw::ArrayGetOp>(op)) {
+    auto *indexOp = array.getIndex().getDefiningOp();
+    if (isa<ConstantOp>(indexOp))
+      return true;
+    if (auto read = dyn_cast<ReadInOutOp>(indexOp)) {
+      auto *op = read.getInput().getDefiningOp();
+      return isa<WireOp, LogicOp>(op);
+    }
+    return false;
+  }
 
   return false;
 }

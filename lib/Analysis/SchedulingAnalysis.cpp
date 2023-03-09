@@ -13,6 +13,7 @@
 #include "circt/Analysis/SchedulingAnalysis.h"
 #include "circt/Analysis/DependenceAnalysis.h"
 #include "circt/Dialect/Pipeline/Pipeline.h"
+#include "circt/Dialect/SSP/SSPInterfaces.h"
 #include "circt/Dialect/STG/STG.h"
 #include "circt/Scheduling/Problems.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -118,7 +119,8 @@ void circt::analysis::CyclicSchedulingAnalysis::analyzeForOp(
   // terminator to ensure the problem schedules them before the terminator.
   auto *anchor = forOp.getBody()->getTerminator();
   forOp.getBody()->walk([&](Operation *op) {
-    if (!isa<mlir::AffineStoreOp, memref::StoreOp>(op))
+    if (!isa<mlir::AffineStoreOp, memref::StoreOp,
+        ssp::StoreInterface, ssp::LoadInterface>(op))
       return;
     Problem::Dependence dep(op, anchor);
     auto depInserted = problem.insertDependence(dep);

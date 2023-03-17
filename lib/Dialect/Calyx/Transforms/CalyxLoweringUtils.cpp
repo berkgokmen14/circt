@@ -19,6 +19,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Matchers.h"
 
+#include <cassert>
 #include <variant>
 
 using namespace llvm;
@@ -189,28 +190,95 @@ Value MemoryInterface::readData() {
   if (auto *memOp = std::get_if<calyx::MemoryOp>(&impl); memOp) {
     return memOp->readData();
   }
-  return std::get<MemoryPortsImpl>(impl).readData;
+  auto readData = std::get<MemoryPortsImpl>(impl).readData;
+  assert(readData.has_value());
+  return readData.value();
 }
 
-Value MemoryInterface::done() {
+Value MemoryInterface::readEn() {
   if (auto *memOp = std::get_if<calyx::MemoryOp>(&impl); memOp) {
-    return memOp->done();
+    assert(false && "calyx::MemoryOp does not have a readEn signal");
   }
-  return std::get<MemoryPortsImpl>(impl).done;
+  auto readEn = std::get<MemoryPortsImpl>(impl).readEn;
+  assert(readEn.has_value());
+  return readEn.value();
+}
+
+Value MemoryInterface::readDone() {
+  if (auto *memOp = std::get_if<calyx::MemoryOp>(&impl); memOp) {
+    assert(false && "calyx::MemoryOp does not have a readDone signal");
+  }
+  auto readDone = std::get<MemoryPortsImpl>(impl).readDone;
+  assert(readDone.has_value());
+  return readDone.value();
 }
 
 Value MemoryInterface::writeData() {
   if (auto *memOp = std::get_if<calyx::MemoryOp>(&impl); memOp) {
     return memOp->writeData();
   }
-  return std::get<MemoryPortsImpl>(impl).writeData;
+  auto writeData = std::get<MemoryPortsImpl>(impl).writeData;
+  assert(writeData.has_value());
+  return writeData.value();
 }
 
 Value MemoryInterface::writeEn() {
   if (auto *memOp = std::get_if<calyx::MemoryOp>(&impl); memOp) {
     return memOp->writeEn();
   }
+  auto writeEn = std::get<MemoryPortsImpl>(impl).writeEn;
+  assert(writeEn.has_value());
+  return writeEn.value();
+}
+
+Value MemoryInterface::writeDone() {
+  if (auto *memOp = std::get_if<calyx::MemoryOp>(&impl); memOp) {
+    return memOp->done();
+  }
+  auto writeDone = std::get<MemoryPortsImpl>(impl).writeDone;
+  assert(writeDone.has_value());
+  return writeDone.value();
+}
+
+std::optional<Value> MemoryInterface::readDataOpt() {
+  if (auto *memOp = std::get_if<calyx::MemoryOp>(&impl); memOp) {
+    return memOp->readData();
+  }
+  return std::get<MemoryPortsImpl>(impl).readData;
+}
+
+std::optional<Value> MemoryInterface::readEnOpt() {
+  if (auto *memOp = std::get_if<calyx::MemoryOp>(&impl); memOp) {
+    return std::nullopt;
+  }
+  return std::get<MemoryPortsImpl>(impl).readEn;
+}
+
+std::optional<Value> MemoryInterface::readDoneOpt() {
+  if (auto *memOp = std::get_if<calyx::MemoryOp>(&impl); memOp) {
+    return std::nullopt;
+  }
+  return std::get<MemoryPortsImpl>(impl).readDone;
+}
+std::optional<Value> MemoryInterface::writeDataOpt() {
+  if (auto *memOp = std::get_if<calyx::MemoryOp>(&impl); memOp) {
+    return memOp->writeData();
+  }
+  return std::get<MemoryPortsImpl>(impl).writeData;
+}
+
+std::optional<Value> MemoryInterface::writeEnOpt() {
+  if (auto *memOp = std::get_if<calyx::MemoryOp>(&impl); memOp) {
+    return memOp->writeEn();
+  }
   return std::get<MemoryPortsImpl>(impl).writeEn;
+}
+
+std::optional<Value> MemoryInterface::writeDoneOpt() {
+  if (auto *memOp = std::get_if<calyx::MemoryOp>(&impl); memOp) {
+    return memOp->done();
+  }
+  return std::get<MemoryPortsImpl>(impl).writeDone;
 }
 
 ValueRange MemoryInterface::addrPorts() {
@@ -265,6 +333,7 @@ ComponentLoweringStateInterface::getBlockArgGroups(Block *from, Block *to) {
 
 std::string ComponentLoweringStateInterface::getUniqueName(StringRef prefix) {
   std::string prefixStr = prefix.str();
+  // llvm::errs() << prefixStr << "\n";
   unsigned idx = prefixIdMap[prefixStr];
   ++prefixIdMap[prefixStr];
   return (prefix + "_" + std::to_string(idx)).str();
@@ -302,7 +371,7 @@ calyx::RegisterOp ComponentLoweringStateInterface::getReturnReg(unsigned idx) {
 
 void ComponentLoweringStateInterface::registerMemoryInterface(
     Value memref, const calyx::MemoryInterface &memoryInterface) {
-  assert(memref.getType().isa<MemRefType>());
+  // assert(memref.getType().isa<MemRefType>());
   assert(memories.find(memref) == memories.end() &&
          "Memory already registered for memref");
   memories[memref] = memoryInterface;
@@ -310,7 +379,7 @@ void ComponentLoweringStateInterface::registerMemoryInterface(
 
 calyx::MemoryInterface
 ComponentLoweringStateInterface::getMemoryInterface(Value memref) {
-  assert(memref.getType().isa<MemRefType>());
+  // assert(memref.getType().isa<MemRefType>());
   auto it = memories.find(memref);
   assert(it != memories.end() && "No memory registered for memref");
   return it->second;
@@ -320,7 +389,8 @@ std::optional<calyx::MemoryInterface>
 ComponentLoweringStateInterface::isInputPortOfMemory(Value v) {
   for (auto &memIf : memories) {
     auto &mem = memIf.getSecond();
-    if (mem.writeEn() == v || mem.writeData() == v ||
+    if (mem.writeEnOpt() == v || mem.writeDataOpt() == v || 
+        mem.readEnOpt() == v ||
         llvm::any_of(mem.addrPorts(), [=](Value port) { return port == v; }))
       return {mem};
   }
@@ -574,10 +644,10 @@ void InlineCombGroups::recurseInlineCombGroups(
     //   been rewritten to their register outputs, see comment in
     //   LateSSAReplacement)
     if (src.isa<BlockArgument>() ||
-        isa<calyx::RegisterOp, calyx::MemoryOp, hw::ConstantOp,
+        isa<calyx::RegisterOp, calyx::MemoryOp, hw::ConstantOp, 
             mlir::arith::ConstantOp, calyx::MultPipeLibOp, calyx::DivUPipeLibOp,
             calyx::DivSPipeLibOp, calyx::RemSPipeLibOp, calyx::RemUPipeLibOp,
-            mlir::scf::WhileOp>(src.getDefiningOp()))
+            mlir::scf::WhileOp, calyx::SequentialInterface>(src.getDefiningOp()))
       continue;
 
     auto srcCombGroup = dyn_cast<calyx::CombGroupOp>(
@@ -606,8 +676,13 @@ RewriteMemoryAccesses::partiallyLower(calyx::AssignOp assignOp,
     return success();
 
   Value src = assignOp.getSrc();
+  // llvm::errs() << "--------\n";
+  // dest.dump();
+  // src.dump();
+  // assignOp.dump();
   unsigned srcBits = src.getType().getIntOrFloatBitWidth();
   unsigned dstBits = dest.getType().getIntOrFloatBitWidth();
+  // llvm::errs() << "src: " << srcBits << " dst: " << dstBits << "\n";
   if (srcBits == dstBits)
     return success();
 
@@ -626,9 +701,13 @@ RewriteMemoryAccesses::partiallyLower(calyx::AssignOp assignOp,
 
   rewriter.setInsertionPoint(assignOp->getBlock(),
                              assignOp->getBlock()->begin());
+  // llvm::errs() << "Create new assign" << "\n";
+  // newOp->getResult(0).dump();
+  // newOp->getResult(1).dump();
   rewriter.create<calyx::AssignOp>(assignOp->getLoc(), newOp->getResult(0),
                                    src);
   assignOp.setOperand(1, newOp->getResult(1));
+  // assignOp.dump();
 
   return success();
 }
@@ -690,3 +769,5 @@ BuildReturnRegs::partiallyLowerFuncToComp(mlir::func::FuncOp funcOp,
 
 } // namespace calyx
 } // namespace circt
+
+#include "circt/Dialect/Calyx/CalyxLoweringInterfaces.cpp.inc"

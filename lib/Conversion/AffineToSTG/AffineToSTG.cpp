@@ -11,6 +11,7 @@
 #include "circt/Analysis/DependenceAnalysis.h"
 #include "circt/Analysis/SchedulingAnalysis.h"
 #include "circt/Dialect/Pipeline/Pipeline.h"
+#include "circt/Dialect/SSP/SSPInterfaces.h"
 #include "circt/Dialect/STG/STG.h"
 #include "circt/Scheduling/Algorithms.h"
 #include "circt/Scheduling/Problems.h"
@@ -26,9 +27,9 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/Dominance.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Visitors.h"
@@ -326,7 +327,7 @@ LogicalResult AffineToSTG::populateOperatorTypes(
     return TypeSwitch<Operation *, WalkResult>(op)
         .Case<AffineYieldOp, arith::ConstantOp, IndexCastOp, 
               memref::AllocaOp, YieldOp, ConditionOp,
-              memref::AllocOp, func::ReturnOp>([&](Operation *combOp) {
+              memref::AllocOp, func::ReturnOp, ssp::AllocInterface>([&](Operation *combOp) {
           // Some known combinational ops.
           problem.setLinkedOperatorType(combOp, combOpr);
           return WalkResult::advance();
@@ -362,6 +363,36 @@ LogicalResult AffineToSTG::populateOperatorTypes(
           }
 
           problem.setLinkedOperatorType(memOp, memOpr);
+          return WalkResult::advance();
+        })
+        .Case<ssp::LoadInterface>([&](Operation *op) {
+          auto loadOp = cast<ssp::LoadInterface>(*op);
+          auto latencyOpt = loadOp.getLatency();
+          auto limitOpt = loadOp.getLimit();
+          assert(latencyOpt.has_value() && "Load op must have latency");
+          Problem::OperatorType portOpr = problem.getOrInsertOperatorType(
+            loadOp.getUnqiueId());
+          problem.setLatency(portOpr, latencyOpt.value());
+          problem.setLimit(portOpr, limitOpt.value());
+          // if (limitOpt.has_value())
+          //   problem.setLimit(portOpr, limitOpt.value());
+          problem.setLinkedOperatorType(op, portOpr);
+
+          return WalkResult::advance();
+        })
+        .Case<ssp::StoreInterface>([&](Operation *op) {
+          auto storeOp = cast<ssp::StoreInterface>(*op);
+          auto latencyOpt = storeOp.getLatency();
+          auto limitOpt = storeOp.getLimit();
+          assert(latencyOpt.has_value() && "Store op must have latency");
+          Problem::OperatorType portOpr = problem.getOrInsertOperatorType(
+            storeOp.getUnqiueId());
+          problem.setLatency(portOpr, latencyOpt.value());
+          problem.setLimit(portOpr, limitOpt.value());
+          // if (limitOpt.has_value())
+          //   problem.setLimit(portOpr, limitOpt.value());
+          problem.setLinkedOperatorType(op, portOpr);
+
           return WalkResult::advance();
         })
         .Case<MulIOp>([&](Operation *mcOp) {

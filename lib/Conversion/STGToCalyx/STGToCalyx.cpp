@@ -26,6 +26,8 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/IR/PatternMatch.h"
+#include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -346,6 +348,9 @@ class ComponentLoweringState
 public:
   ComponentLoweringState(calyx::ComponentOp component)
       : calyx::ComponentLoweringStateInterface(component) {}
+
+  ComponentLoweringState (const ComponentLoweringState&) = delete;
+  ComponentLoweringState& operator= (const ComponentLoweringState&) = delete;
 };
 
 //===----------------------------------------------------------------------===//
@@ -370,6 +375,9 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
                              /// memref
                              memref::AllocOp, memref::AllocaOp, memref::LoadOp,
                              memref::StoreOp,
+                             /// memory interface
+                             calyx::StoreLoweringInterface, calyx::LoadLoweringInterface,
+                             calyx::AllocLoweringInterface,
                              /// standard arithmetic
                              AddIOp, SubIOp, CmpIOp, ShLIOp, ShRUIOp, ShRSIOp,
                              AndIOp, XOrIOp, OrIOp, ExtUIOp, TruncIOp, MulIOp,
@@ -389,8 +397,8 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
                 /// Skip: these special cases will be handled separately.
                 return true;
               })
-              .Default([&](auto op) {
-                op->emitError() << "Unhandled operation during BuildOpGroups()";
+              .Default([&](Operation* op) {
+                op->emitError() << "Unhandled operation during BuildOpGroups() " << op->getName();
                 return false;
               });
 
@@ -427,6 +435,9 @@ private:
   LogicalResult buildOp(PatternRewriter &rewriter, memref::AllocaOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, memref::LoadOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, memref::StoreOp op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter, calyx::LoadLoweringInterface op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter, calyx::StoreLoweringInterface op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter, calyx::AllocLoweringInterface op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, scf::IfOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter,
                         stg::STGTerminatorOp term) const;
@@ -622,10 +633,67 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   rewriter.create<calyx::AssignOp>(
       storeOp.getLoc(), memoryInterface.writeEn(),
       createConstant(storeOp.getLoc(), rewriter, getComponent(), 1, 1));
-  rewriter.create<calyx::GroupDoneOp>(storeOp.getLoc(), memoryInterface.done());
+  rewriter.create<calyx::GroupDoneOp>(storeOp.getLoc(), memoryInterface.writeDone());
 
   getState<ComponentLoweringState>().registerSinkOperations(storeOp,
                                                                    group);
+
+  return success();
+}
+
+LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                                     calyx::LoadLoweringInterface loadOp) const {
+  Value val = loadOp.getMemoryValue();
+  // if (noStoresToMemory(port) && singleLoadFromMemory(port)) {
+  //   loadOp.dump();
+  //   // Single load from memory; we do not need to write the
+  //   auto group = createGroupForOp<calyx::GroupOp>(rewriter, loadOp);
+  //   assignAddressPorts(rewriter, loadOp.getLoc(), group, memoryInterface,
+  //                      loadOp.getIndices());
+
+  //   rewriter.setInsertionPointToEnd(group.getBodyBlock());
+  //   rewriter.create<calyx::AssignOp>(
+  //       loadOp.getLoc(), memoryInterface.readEn().value(),
+  //       createConstant(loadOp.getLoc(), rewriter, getComponent(), 1, 1));
+
+  //   rewriter.create<calyx::GroupDoneOp>(loadOp.getLoc(),
+  //                                       memoryInterface.readDone().value());
+  //   loadOp.getResult().replaceAllUsesWith(memoryInterface.readData().value());
+  //   getState<ComponentLoweringState>().addBlockScheduleable(loadOp->getBlock(),
+  //                                                           group);
+
+  //   getState<ComponentLoweringState>().registerEvaluatingGroup(memoryInterface.readData().value(), group);
+  // } else {
+  // assert(calyx::singleLoadFromMemory(val) && "Only single loads per port supported for now");
+
+  auto group = createGroupForOp<calyx::GroupOp>(rewriter, loadOp);
+  rewriter.setInsertionPointToEnd(group.getBodyBlock());
+  auto &state = getState<ComponentLoweringState>();
+  auto blockOpt = loadOp.connectToMemInterface(rewriter, group, getComponent(), state);
+
+  if (blockOpt.has_value()) {
+    state.addBlockScheduleable(blockOpt.value(), group);
+  }
+
+  return success();
+}
+
+LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                                     calyx::StoreLoweringInterface storeOp) const {
+  auto memoryInterface =
+      getState<ComponentLoweringState>().getMemoryInterface(storeOp.getMemoryValue());
+  auto group = createGroupForOp<calyx::GroupOp>(rewriter, storeOp);
+
+  rewriter.setInsertionPointToEnd(group.getBodyBlock());
+  auto &state = getState<ComponentLoweringState>();
+  auto blockOpt = storeOp.connectToMemInterface(rewriter, group, getComponent(), state);
+
+  if (blockOpt.has_value()) {
+    state.addBlockScheduleable(blockOpt.value(), group);
+  }
+
+  // By definition, StoreOps must be sink operations
+  state.registerSinkOperations(storeOp, group);
 
   return success();
 }
@@ -702,6 +770,15 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      memref::AllocaOp allocOp) const {
   return buildAllocOp(getState<ComponentLoweringState>(), rewriter, allocOp);
 }
+
+LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                                     calyx::AllocLoweringInterface allocOp) const {
+  rewriter.setInsertionPointToStart(getComponent().getBodyBlock());
+  allocOp.insertMemory(rewriter, getState<ComponentLoweringState>());
+
+  return success();
+}
+
 LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      scf::IfOp ifOp) const {
 
@@ -1001,7 +1078,7 @@ struct FuncOpConversion : public calyx::FuncOpPartialLoweringPattern {
       unsigned outPortsIt = extMemPortIndices.getSecond().second +
                             compOp.getInputPortInfo().size();
       extMemPorts.readData = compOp.getArgument(inPortsIt++);
-      extMemPorts.done = compOp.getArgument(inPortsIt);
+      extMemPorts.writeDone = compOp.getArgument(inPortsIt);
       extMemPorts.writeData = compOp.getArgument(outPortsIt++);
       unsigned nAddresses = extMemPortIndices.getFirst()
                                 .getType()
@@ -1966,6 +2043,18 @@ class LateSSAReplacement : public calyx::FuncOpPartialLoweringPattern {
                 .readData());
       }
     });
+    funcOp.walk([&](calyx::LoadLoweringInterface loadOp) {
+      if (calyx::singleLoadFromMemoryInBlock(loadOp.getResult(), loadOp->getBlock())) {
+        /// In buildOpGroups we did not replace loadOp's results, to ensure a
+        /// link between evaluating groups (which fix the input addresses of a
+        /// memory op) and a readData result. Now, we may replace these SSA
+        /// values with their memoryOp readData output.
+        loadOp.getResult().replaceAllUsesWith(
+            getState<ComponentLoweringState>()
+                .getMemoryInterface(loadOp.getMemoryValue())
+                .readData());
+      }
+    });
 
     return success();
   }
@@ -2102,13 +2191,18 @@ public:
     GreedyRewriteConfig config;
     config.enableRegionSimplification = false;
     if (runOnce)
-      config.maxIterations = 0;
+      config.maxIterations = 1;
 
+    auto debugName = pattern.getNativePatterns()[0].get()->getDebugName().str();
     /// Can't return applyPatternsAndFoldGreedily. Root isn't
     /// necessarily erased so it will always return failed(). Instead,
     /// forward the 'succeeded' value from PartialLoweringPatternBase.
     (void)applyPatternsAndFoldGreedily(getOperation(), std::move(pattern),
                                        config);
+    if (failed(partialPatternRes)) {
+      llvm::errs() << "Failed to run partial pattern " 
+        << debugName << "\n";
+    }
     return partialPatternRes;
   }
 
@@ -2235,14 +2329,14 @@ void STGToCalyxPass::runOnOperation() {
   //===----------------------------------------------------------------------===//
   // Cleanup patterns
   //===----------------------------------------------------------------------===//
-  RewritePatternSet cleanupPatterns(&getContext());
-  cleanupPatterns.add<calyx::MultipleGroupDonePattern,
-                      calyx::NonTerminatingGroupDonePattern>(&getContext());
-  if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                          std::move(cleanupPatterns)))) {
-    signalPassFailure();
-    return;
-  }
+  // RewritePatternSet cleanupPatterns(&getContext());
+  // cleanupPatterns.add<calyx::MultipleGroupDonePattern,
+  //                     calyx::NonTerminatingGroupDonePattern>(&getContext());
+  // if (failed(applyPatternsAndFoldGreedily(getOperation(),
+  //                                         std::move(cleanupPatterns)))) {
+  //   signalPassFailure();
+  //   return;
+  // }
 
   if (ciderSourceLocationMetadata) {
     // Debugging information for the Cider debugger.

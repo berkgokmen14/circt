@@ -500,7 +500,7 @@ AffineToPipeline::populateOperatorTypes(AffineForOp &loop,
           Problem::OperatorType portOpr = problem.getOrInsertOperatorType(
             loadOp.getUnqiueId());
           problem.setLatency(portOpr, latencyOpt.value());
-          problem.setLimit(portOpr, 1);
+          problem.setLimit(portOpr, limitOpt.value());
           // if (limitOpt.has_value())
           //   problem.setLimit(portOpr, limitOpt.value());
           problem.setLinkedOperatorType(op, portOpr);
@@ -515,7 +515,7 @@ AffineToPipeline::populateOperatorTypes(AffineForOp &loop,
           Problem::OperatorType portOpr = problem.getOrInsertOperatorType(
             storeOp.getUnqiueId());
           problem.setLatency(portOpr, latencyOpt.value());
-          problem.setLimit(portOpr, 1);
+          problem.setLimit(portOpr, limitOpt.value());
           // if (limitOpt.has_value())
           //   problem.setLimit(portOpr, limitOpt.value());
           problem.setLinkedOperatorType(op, portOpr);

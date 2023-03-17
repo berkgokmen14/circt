@@ -14,6 +14,15 @@ include "mlir/IR/EnumAttr.td"
 include "mlir/IR/OpBase.td"
 include "mlir/Dialect/Affine/IR/AffineMemoryOpInterfaces.td"
 
+// Op interface for allocations.
+def AllocOpInterface : OpInterface<"AllocInterface"> {
+  let cppNamespace = "::circt::ssp";
+
+  let description = [{
+    This is an op interface for alloc ops to be lowered.
+  }];
+}
+
 // Op interface for loads.
 def LoadOpInterface : OpInterface<"LoadInterface"> {
   let cppNamespace = "::circt::ssp";
@@ -38,6 +47,26 @@ def LoadOpInterface : OpInterface<"LoadInterface"> {
       "std::string",
       "getUnqiueId",
       (ins)>
+    /* InterfaceMethod< */
+    /*   "This returns the value of the associated memory", */
+    /*   "mlir::Value", */
+    /*   "getMemoryValue", */
+    /*   (ins)>, */
+    /* InterfaceMethod< */
+    /*   "This returns the value of the associated memory", */
+    /*   "mlir::Operation::operand_range", */
+    /*   "getIndices", */
+    /*   (ins)>, */
+    /* InterfaceMethod< */
+    /*   "This returns the value of the associated memory", */
+    /*   "mlir::Value", */
+    /*   "getResult", */
+    /*   (ins)>, */
+    /* InterfaceMethod< */
+    /*   "This returns the value of the associated memory", */
+    /*   "mlir::Value", */
+    /*   "connectToMemInterface", */
+    /*   (ins "mlir::OpBuilder":$rewriter, "calyx::ComponentLoweringStateInterface":$state)> */
   ];
   /* let verify = [{ return verifyGroupInterface(op); }]; */
 }
@@ -66,6 +95,21 @@ def StoreOpInterface : OpInterface<"StoreInterface"> {
       "std::string",
       "getUnqiueId",
       (ins)>
+    /* InterfaceMethod< */
+    /*   "This returns the value of the associated memory", */
+    /*   "mlir::Value", */
+    /*   "getMemoryValue", */
+    /*   (ins)>, */
+    /* InterfaceMethod< */
+    /*   "This returns the value of the associated memory", */
+    /*   "mlir::Operation::operand_range", */
+    /*   "getIndices", */
+    /*   (ins)>, */
+    /* InterfaceMethod< */
+    /*   "This returns the value of the associated memory", */
+    /*   "mlir::Value", */
+    /*   "connectToMemInterface", */
+    /*   (ins "mlir::OpBuilder":$rewriter, "calyx::ComponentLoweringStateInterface":$state)> */
   ];
   /* let verify = [{ return verifyGroupInterface(op); }]; */
 }

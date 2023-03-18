@@ -17,6 +17,7 @@
 #include "circt/Dialect/Calyx/CalyxOps.h"
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/HW/HWOps.h"
+#include "circt/Dialect/Pipeline/Pipeline.h"
 #include "circt/Dialect/STG/STG.h"
 #include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
@@ -1111,71 +1112,137 @@ class BuildWhileGroups : public calyx::FuncOpPartialLoweringPattern {
                            PatternRewriter &rewriter) const override {
     LogicalResult res = success();
     funcOp.walk([&](Operation *op) {
-      if (!isa<stg::STGWhileOp>(op))
-        return WalkResult::advance();
+      if (isa<stg::STGWhileOp>(op)) {
+        STGWhileOpInterface whileOp(cast<stg::STGWhileOp>(op));
 
-      STGWhileOpInterface whileOp(cast<stg::STGWhileOp>(op));
+        getState<ComponentLoweringState>().setUniqueName(whileOp.getOperation(),
+                                                         "while");
 
-      getState<ComponentLoweringState>().setUniqueName(whileOp.getOperation(),
-                                                       "while");
+        /// Create iteration argument registers.
+        /// The iteration argument registers will be referenced:
+        /// - In the "before" part of the while loop, calculating the conditional,
+        /// - In the "after" part of the while loop,
+        /// - Outside the while loop, rewriting the while loop return values.
+        for (const auto& arg : enumerate(whileOp.getBodyArgs())) {
+          std::string name = getState<ComponentLoweringState>()
+                                 .getUniqueName(whileOp.getOperation())
+                                 .str() +
+                             "_arg" + std::to_string(arg.index());
+          auto reg =
+              createRegister(arg.value().getLoc(), rewriter, getComponent(),
+                             arg.value().getType().getIntOrFloatBitWidth(), name);
+          getState<ComponentLoweringState>()
+            .calyx::LoopLoweringStateInterface<STGWhileOpInterface>::addLoopIterReg(whileOp, reg,
+                                                            arg.index());
+          arg.value().replaceAllUsesWith(reg.getOut());
 
-      /// Create iteration argument registers.
-      /// The iteration argument registers will be referenced:
-      /// - In the "before" part of the while loop, calculating the conditional,
-      /// - In the "after" part of the while loop,
-      /// - Outside the while loop, rewriting the while loop return values.
-      for (const auto& arg : enumerate(whileOp.getBodyArgs())) {
-        std::string name = getState<ComponentLoweringState>()
-                               .getUniqueName(whileOp.getOperation())
-                               .str() +
-                           "_arg" + std::to_string(arg.index());
-        auto reg =
-            createRegister(arg.value().getLoc(), rewriter, getComponent(),
-                           arg.value().getType().getIntOrFloatBitWidth(), name);
-        getState<ComponentLoweringState>()
-          .calyx::LoopLoweringStateInterface<STGWhileOpInterface>::addLoopIterReg(whileOp, reg,
-                                                          arg.index());
-        arg.value().replaceAllUsesWith(reg.getOut());
+          Block *block = op->getBlock();
+          auto groupName = getState<ComponentLoweringState>().getUniqueName(
+              loweringState().blockName(block));
+          auto group = calyx::createGroup<calyx::CombGroupOp>(
+              rewriter, getState<ComponentLoweringState>().getComponentOp(),
+              op->getLoc(), groupName);
 
-        Block *block = op->getBlock();
-        auto groupName = getState<ComponentLoweringState>().getUniqueName(
-            loweringState().blockName(block));
-        auto group = calyx::createGroup<calyx::CombGroupOp>(
-            rewriter, getState<ComponentLoweringState>().getComponentOp(),
-            op->getLoc(), groupName);
+          // Register the values for the stg.
+          getState<ComponentLoweringState>().registerEvaluatingGroup(reg.getOut(), group);
 
-        // Register the values for the stg.
-        getState<ComponentLoweringState>().registerEvaluatingGroup(reg.getOut(), group);
+          /// Also replace uses in the "before" region of the while loop
+          whileOp.getConditionBlock()
+              ->getArgument(arg.index())
+              .replaceAllUsesWith(reg.getOut());
+        }
 
-        /// Also replace uses in the "before" region of the while loop
-        whileOp.getConditionBlock()
-            ->getArgument(arg.index())
-            .replaceAllUsesWith(reg.getOut());
+        /// Create iter args initial value assignment group(s), one per register.
+        SmallVector<calyx::GroupOp> initGroups;
+        auto numOperands = whileOp.getOperation()->getNumOperands();
+        for (size_t i = 0; i < numOperands; ++i) {
+          auto initGroupOp =
+              getState<ComponentLoweringState>().calyx::LoopLoweringStateInterface<STGWhileOpInterface>
+                ::buildLoopIterArgAssignments(
+                  rewriter, whileOp,
+                  getState<ComponentLoweringState>().getComponentOp(),
+                  getState<ComponentLoweringState>().getUniqueName(
+                      whileOp.getOperation()) +
+                      "_init_" + std::to_string(i),
+                  whileOp.getOperation()->getOpOperand(i));
+          initGroups.push_back(initGroupOp);
+        }
+
+        /// Add the while op to the list of scheduleable things in the current
+        /// block.
+        getState<ComponentLoweringState>().addBlockScheduleable(
+            whileOp.getOperation()->getBlock(), STGScheduleable{
+                                                    whileOp,
+                                                    initGroups,
+                                                });
+      } else if (isa<PipelineWhileOp>(op)) {
+        PipelineWhileOpInterface whileOp(cast<pipeline::PipelineWhileOp>(op));
+
+        getState<ComponentLoweringState>().setUniqueName(whileOp.getOperation(),
+                                                         "while");
+
+        getState<ComponentLoweringState>().setPipelineLatency(whileOp.getOperation(), 
+                                                              whileOp.getOperation().getLatency());
+
+        /// Create iteration argument registers.
+        /// The iteration argument registers will be referenced:
+        /// - In the "before" part of the while loop, calculating the conditional,
+        /// - In the "after" part of the while loop,
+        /// - Outside the while loop, rewriting the while loop return values.
+        for (const auto& arg : enumerate(whileOp.getBodyArgs())) {
+          std::string name = getState<ComponentLoweringState>()
+                                 .getUniqueName(whileOp.getOperation())
+                                 .str() +
+                             "_arg" + std::to_string(arg.index());
+          auto reg =
+              createRegister(arg.value().getLoc(), rewriter, getComponent(),
+                             arg.value().getType().getIntOrFloatBitWidth(), name);
+          getState<ComponentLoweringState>()
+            .calyx::LoopLoweringStateInterface<PipelineWhileOpInterface>::addLoopIterReg(whileOp, reg,
+                                                            arg.index());
+          arg.value().replaceAllUsesWith(reg.getOut());
+
+          Block *block = op->getBlock();
+          auto groupName = getState<ComponentLoweringState>().getUniqueName(
+              loweringState().blockName(block));
+          auto group = calyx::createGroup<calyx::CombGroupOp>(
+              rewriter, getState<ComponentLoweringState>().getComponentOp(),
+              op->getLoc(), groupName);
+
+          // Register the values for the pipeline.
+          getState<ComponentLoweringState>().registerEvaluatingGroup(reg.getOut(), group);
+
+          /// Also replace uses in the "before" region of the while loop
+          whileOp.getConditionBlock()
+              ->getArgument(arg.index())
+              .replaceAllUsesWith(reg.getOut());
+        }
+
+        /// Create iter args initial value assignment group(s), one per register.
+        SmallVector<calyx::GroupOp> initGroups;
+        auto numOperands = whileOp.getOperation()->getNumOperands();
+        for (size_t i = 0; i < numOperands; ++i) {
+          auto initGroupOp =
+              getState<ComponentLoweringState>().calyx::LoopLoweringStateInterface<PipelineWhileOpInterface>
+                ::buildLoopIterArgAssignments(
+                  rewriter, whileOp,
+                  getState<ComponentLoweringState>().getComponentOp(),
+                  getState<ComponentLoweringState>().getUniqueName(
+                      whileOp.getOperation()) +
+                      "_init_" + std::to_string(i),
+                  whileOp.getOperation()->getOpOperand(i));
+          initGroups.push_back(initGroupOp);
+        }
+
+        /// Add the while op to the list of scheduleable things in the current
+        /// block.
+        getState<ComponentLoweringState>().addBlockScheduleable(
+            whileOp.getOperation()->getBlock(), PipelineScheduleable{
+                                                    whileOp,
+                                                    initGroups,
+                                                });
+
       }
-
-      /// Create iter args initial value assignment group(s), one per register.
-      SmallVector<calyx::GroupOp> initGroups;
-      auto numOperands = whileOp.getOperation()->getNumOperands();
-      for (size_t i = 0; i < numOperands; ++i) {
-        auto initGroupOp =
-            getState<ComponentLoweringState>().calyx::LoopLoweringStateInterface<STGWhileOpInterface>
-              ::buildLoopIterArgAssignments(
-                rewriter, whileOp,
-                getState<ComponentLoweringState>().getComponentOp(),
-                getState<ComponentLoweringState>().getUniqueName(
-                    whileOp.getOperation()) +
-                    "_init_" + std::to_string(i),
-                whileOp.getOperation()->getOpOperand(i));
-        initGroups.push_back(initGroupOp);
-      }
-
-      /// Add the while op to the list of scheduleable things in the current
-      /// block.
-      getState<ComponentLoweringState>().addBlockScheduleable(
-          whileOp.getOperation()->getBlock(), STGScheduleable{
-                                                  whileOp,
-                                                  initGroups,
-                                              });
       return WalkResult::advance();
     });
     return res;
@@ -2258,7 +2325,7 @@ void STGToCalyxPass::runOnOperation() {
                                          *loweringState);
 
   /// This pattern creates iteration registers for pipeline while ops
-  addOncePattern<BuildPipelineWhileGroups>(loweringPatterns, patternState, funcMap, *loweringState);
+  // addOncePattern<BuildPipelineWhileGroups>(loweringPatterns, patternState, funcMap, *loweringState);
 
   /// This pattern creates registers for iteration arguments of scf.while
   /// operations. Additionally, creates a group for assigning the initial

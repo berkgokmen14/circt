@@ -474,7 +474,7 @@ public:
   std::string irName(ValueOrBlock &v) {
     std::string s;
     llvm::raw_string_ostream os(s);
-    mlir::AsmState asmState(module);
+    // mlir::AsmState asmState(module);
     v.printAsOperand(os, asmState);
     return s;
   }
@@ -484,6 +484,10 @@ private:
   StringRef topLevelFunction;
   /// The program associated with this state.
   mlir::ModuleOp module;
+  // ASM State
+  mlir::AsmState asmState;
+  // Mapping from Blocks to Names
+  DenseMap<Block *, std::string> blockNameMap;
   /// Mapping from ComponentOp to component lowering state.
   DenseMap<Operation *, std::unique_ptr<ComponentLoweringStateInterface>>
       componentStates;

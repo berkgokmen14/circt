@@ -1783,6 +1783,7 @@ class BuildControl : public calyx::FuncOpPartialLoweringPattern {
         getComponent().getControlOp().getBodyBlock());
     auto topLevelSeqOp = rewriter.create<calyx::SeqOp>(funcOp.getLoc());
     DenseSet<Block *> path;
+    funcOp.dump();
     return buildCFGControl(path, rewriter, topLevelSeqOp.getBodyBlock(),
                            nullptr, entryBlock);
   }
@@ -1802,7 +1803,6 @@ private:
       auto seqOp = rewriter.create<calyx::SeqOp>(loc);
       parentCtrlBlock = seqOp.getBodyBlock();
     }
-    // llvm::errs() << "\n";
     for (auto &group : compBlockScheduleables) {
       rewriter.setInsertionPointToEnd(parentCtrlBlock);
       if (auto *groupPtr = std::get_if<calyx::GroupOp>(&group); groupPtr) {

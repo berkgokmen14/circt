@@ -417,7 +417,7 @@ unsigned ComponentLoweringStateInterface::getFuncOpResultMapping(
 
 CalyxLoweringState::CalyxLoweringState(mlir::ModuleOp module,
                                        StringRef topLevelFunction)
-    : topLevelFunction(topLevelFunction), module(module) {}
+    : topLevelFunction(topLevelFunction), module(module), asmState(module) {}
 
 mlir::ModuleOp CalyxLoweringState::getModule() {
   assert(module.getOperation() != nullptr);
@@ -429,9 +429,15 @@ StringRef CalyxLoweringState::getTopLevelFunction() const {
 }
 
 std::string CalyxLoweringState::blockName(Block *b) {
+  auto it = blockNameMap.find(b);
+  if (it != blockNameMap.end()) {
+    return it->getSecond();
+  }
+
   std::string blockName = irName(*b);
   blockName.erase(std::remove(blockName.begin(), blockName.end(), '^'),
                   blockName.end());
+  blockNameMap.insert(std::pair(b, blockName));
   return blockName;
 }
 

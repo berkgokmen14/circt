@@ -112,17 +112,20 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
     funcOp.walk([&](Operation *_op) {
       opBuiltSuccessfully &=
           TypeSwitch<mlir::Operation *, bool>(_op)
-              .template Case<arith::ConstantOp, ReturnOp, BranchOpInterface,
-                             /// SCF
-                             scf::YieldOp,
-                             /// memref
-                             memref::AllocOp, memref::AllocaOp, memref::LoadOp,
-                             memref::StoreOp,
-                             /// standard arithmetic
-                             AddIOp, SubIOp, CmpIOp, ShLIOp, ShRUIOp, ShRSIOp,
-                             AndIOp, XOrIOp, OrIOp, ExtUIOp, ExtSIOp, TruncIOp,
-                             MulIOp, DivUIOp, DivSIOp, RemUIOp, RemSIOp,
-                             IndexCastOp>(
+              .template Case<
+                  arith::ConstantOp, ReturnOp, BranchOpInterface,
+                  /// SCF
+                  scf::YieldOp,
+                  /// memref
+                  memref::AllocOp, memref::AllocaOp, memref::LoadOp,
+                  memref::StoreOp,
+                  /// memory interface
+                  calyx::StoreLoweringInterface, calyx::LoadLoweringInterface,
+                  calyx::AllocLoweringInterface,
+                  /// standard arithmetic
+                  AddIOp, SubIOp, CmpIOp, ShLIOp, ShRUIOp, ShRSIOp, AndIOp,
+                  XOrIOp, OrIOp, ExtUIOp, ExtSIOp, TruncIOp, MulIOp, DivUIOp,
+                  DivSIOp, RemUIOp, RemSIOp, IndexCastOp>(
                   [&](auto op) { return buildOp(rewriter, op).succeeded(); })
               .template Case<scf::WhileOp, FuncOp, scf::ConditionOp>([&](auto) {
                 /// Skip: these special cases will be handled separately.
@@ -170,6 +173,12 @@ private:
   LogicalResult buildOp(PatternRewriter &rewriter, memref::AllocaOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, memref::LoadOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, memref::StoreOp op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter,
+                        calyx::LoadLoweringInterface op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter,
+                        calyx::StoreLoweringInterface op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter,
+                        calyx::AllocLoweringInterface op) const;
 
   /// buildLibraryOp will build a TCalyxLibOp inside a TGroupOp based on the
   /// source operation TSrcOp.
@@ -293,6 +302,75 @@ private:
   }
 };
 
+LogicalResult
+BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                       calyx::LoadLoweringInterface loadOp) const {
+  Value val = loadOp.getMemoryValue();
+  // if (noStoresToMemory(port) && singleLoadFromMemory(port)) {
+  //   loadOp.dump();
+  //   // Single load from memory; we do not need to write the
+  //   auto group = createGroupForOp<calyx::GroupOp>(rewriter, loadOp);
+  //   assignAddressPorts(rewriter, loadOp.getLoc(), group, memoryInterface,
+  //                      loadOp.getIndices());
+
+  //   rewriter.setInsertionPointToEnd(group.getBodyBlock());
+  //   rewriter.create<calyx::AssignOp>(
+  //       loadOp.getLoc(), memoryInterface.readEn().value(),
+  //       createConstant(loadOp.getLoc(), rewriter, getComponent(), 1, 1));
+
+  //   rewriter.create<calyx::GroupDoneOp>(loadOp.getLoc(),
+  //                                       memoryInterface.readDone().value());
+  //   loadOp.getResult().replaceAllUsesWith(memoryInterface.readData().value());
+  //   getState<ComponentLoweringState>().addBlockScheduleable(loadOp->getBlock(),
+  //                                                           group);
+
+  //   getState<ComponentLoweringState>().registerEvaluatingGroup(memoryInterface.readData().value(),
+  //   group);
+  // } else {
+  // assert(calyx::singleLoadFromMemory(val) && "Only single loads per port
+  // supported for now");
+
+  auto group = createGroupForOp<calyx::GroupOp>(rewriter, loadOp);
+  rewriter.setInsertionPointToEnd(group.getBodyBlock());
+  auto &state = getState<ComponentLoweringState>();
+  auto blockOpt =
+      loadOp.connectToMemInterface(rewriter, group, getComponent(), state);
+
+  if (blockOpt.has_value()) {
+    state.addBlockScheduleable(blockOpt.value(), group);
+  }
+
+  return success();
+}
+
+LogicalResult
+BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                       calyx::StoreLoweringInterface storeOp) const {
+  auto memoryInterface = getState<ComponentLoweringState>().getMemoryInterface(
+      storeOp.getMemoryValue());
+  auto group = createGroupForOp<calyx::GroupOp>(rewriter, storeOp);
+
+  rewriter.setInsertionPointToEnd(group.getBodyBlock());
+  auto &state = getState<ComponentLoweringState>();
+  auto blockOpt =
+      storeOp.connectToMemInterface(rewriter, group, getComponent(), state);
+
+  if (blockOpt.has_value()) {
+    state.addBlockScheduleable(blockOpt.value(), group);
+  }
+
+  return success();
+}
+
+LogicalResult
+BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                       calyx::AllocLoweringInterface allocOp) const {
+  rewriter.setInsertionPointToStart(getComponent().getBodyBlock());
+  allocOp.insertMemory(rewriter, getState<ComponentLoweringState>());
+
+  return success();
+}
+
 LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      memref::LoadOp loadOp) const {
   Value memref = loadOp.getMemref();
@@ -365,7 +443,8 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   rewriter.create<calyx::AssignOp>(
       storeOp.getLoc(), memoryInterface.writeEn(),
       createConstant(storeOp.getLoc(), rewriter, getComponent(), 1, 1));
-  rewriter.create<calyx::GroupDoneOp>(storeOp.getLoc(), memoryInterface.writeDone());
+  rewriter.create<calyx::GroupDoneOp>(storeOp.getLoc(),
+                                      memoryInterface.writeDone());
 
   return success();
 }

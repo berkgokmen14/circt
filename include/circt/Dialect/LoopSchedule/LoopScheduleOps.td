@@ -39,7 +39,7 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", []> {
     The pipeline may accept an optional `iter_args`, similar to the SCF dialect,
     for representing loop-carried values like induction variables or reductions.
     When the pipeline starts execution, the registers indicated as `iter_args`
-    by `pipeline.terminator` should be initialized to the initial
+    by `loopschedule.terminator` should be initialized to the initial
     values specified in the `iter_args` section here. The `iter_args` relate to
     the initiation interval of the loop. The maximum distance in stages between
     where an `iter_arg` is used and where that `iter_arg` is registered must be
@@ -148,6 +148,124 @@ def LoopSchedulePipelineStageOp : LoopScheduleOp<"pipeline.stage",
   let extraClassDeclaration = [{
     Block &getBodyBlock() { return getBody().front(); }
     unsigned getStageNumber();
+  }];
+}
+
+def LoopScheduleSequentialOp : LoopScheduleOp<"sequential"> {
+  let summary = "LoopSchedule dialect sequential while-loop.";
+  let description = [{
+    The `loopschedule.sequential` operation represents a statically scheduled
+    sequential loop that executes while a condition is true.
+
+    A sequential loop captures the result of scheduling, and is not generally 
+    safe to transform, besides lowering to hardware dialects. For more 
+    discussion about relaxing this, see:
+    https://github.com/llvm/circt/issues/2204.
+
+    This is the top-level operation representing a sequential loop. It is
+    not isolated from above, but could be if this is helpful. A sequential
+    loop contains two regions: `condition` and `stages`.
+
+    The sequential loop may accept an optional `iter_args`, similar to the SCF 
+    dialect, for representing loop-carried values like induction variables or 
+    reductions. When the sequential loop starts execution, the registers 
+    indicated as `iter_args` by `loopschedule.terminator` should be initialized 
+    to the initial values specified in the `iter_args` section here.
+
+    The single-block `condition` region dictates the condition under which the
+    sequential loop should execute. It has a `register` terminator, and the
+    loop initiates new iterations while the registered value is `true : i1`.
+    It may access SSA values dominating the loop, as well as `iter_args`,
+    which are block arguments.
+
+    The single-block `steps` region wraps `loopschedule.step`
+    operations. It has a `loopschedule.terminator` terminator, which can
+    both return results from the loop and register `iter_args`. Steps may
+    access SSA values dominating the loop, as well as `iter_args`, which are
+    block arguments.
+
+    In contrast to the `loopschedule.pipeline` op, sequential loops guarantee
+    that only one iteration is in-flight at a time. `loopschedule.sequential`
+    ops are also allowed to nest other sequential or pipeline loops within
+    to represent nested loops.
+  }];
+
+  let arguments = (ins
+    OptionalAttr<I64Attr>:$tripCount,
+    Variadic<AnyType>:$iterArgs
+  );
+
+  let results = (outs
+    Variadic<AnyType>:$results
+  );
+
+  let regions = (region
+    SizedRegion<1>:$condition,
+    SizedRegion<1>:$schedule
+  );
+
+  let hasCustomAssemblyFormat = 1;
+
+  let hasVerifier = 1;
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::TypeRange":$resultTypes,
+                   "llvm::Optional<IntegerAttr>": $tripCount,
+                   "mlir::ValueRange":$iterArgs)>
+  ];
+
+  let extraClassDeclaration = [{
+    Block &getCondBlock() { return getCondition().front(); }
+    Block &getScheduleBlock() { return getSchedule().front(); }
+    /* LoopScheduleTerminatorOp getTerminator() { */
+    /*   return llvm::cast<LoopScheduleTerminatorOp>(getScheduleBlock().getTerminator()); */    
+    /* } */
+  }];
+}
+
+def LoopScheduleStepOp : LoopScheduleOp<"step",
+    [ParentOneOf<["LoopScheduleSequentialOp", "mlir::func::FuncOp"]>]> {
+  let summary = "LoopSchedule dialect schedule step.";
+  let description = [{
+    This operation has a single-block region which dictates the operations that
+    must start concurrently.
+
+    It may have an optional `when` predicate, which supports conditional
+    execution for each step. A step with a `when` predicate should only 
+    execute when the predicate is `true : i1`, and continue onto the next
+    step otherwise.
+
+    It has a `register` terminator, which passes the concurrently
+    computed values forward to a future step.
+  }];
+
+  let arguments = (ins
+    Optional<I1>:$when
+  );
+
+  let results = (outs
+    Variadic<AnyType>:$results
+  );
+
+  let regions = (region
+    SizedRegion<1>:$body
+  );
+
+  let assemblyFormat = [{
+    (`when` $when^)? $body (`:` qualified(type($results))^)? attr-dict
+  }];
+
+  let hasVerifier = 1;
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::TypeRange":$resultTypes)>
+  ];
+
+  let extraClassDeclaration = [{
+    Block &getBodyBlock() { return getBody().front(); }
+    unsigned getStepNumber();
   }];
 }
 

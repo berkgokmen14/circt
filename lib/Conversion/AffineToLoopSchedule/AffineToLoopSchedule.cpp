@@ -59,9 +59,9 @@ private:
   LogicalResult
   lowerAffineStructures(MemoryDependenceAnalysis &dependenceAnalysis);
   LogicalResult populateOperatorTypes(SmallVectorImpl<AffineForOp> &loopNest,
-                                      ModuloProblem &problem);
+                                      SharedOperatorsProblem &problem);
   LogicalResult solveSchedulingProblem(SmallVectorImpl<AffineForOp> &loopNest,
-                                       ModuloProblem &problem);
+                                       SharedOperatorsProblem &problem);
   LogicalResult
   createLoopSchedulePipeline(SmallVectorImpl<AffineForOp> &loopNest,
                              ModuloProblem &problem);
@@ -278,7 +278,7 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures(
 /// well-defined operator latencies. Ultimately, we should move this to a
 /// dialect interface in the Scheduling dialect.
 LogicalResult AffineToLoopSchedule::populateOperatorTypes(
-    SmallVectorImpl<AffineForOp> &loopNest, ModuloProblem &problem) {
+    SmallVectorImpl<AffineForOp> &loopNest, SharedOperatorsProblem &problem) {
   // Scheduling analyis only considers the innermost loop nest for now.
   auto forOp = loopNest.back();
 

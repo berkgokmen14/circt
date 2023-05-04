@@ -10,6 +10,7 @@
 #define CIRCT_DIALECT_LOOPSCHEDULE_LOOPSCHEDULEOPS_H
 
 #include "circt/Support/LLVM.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"

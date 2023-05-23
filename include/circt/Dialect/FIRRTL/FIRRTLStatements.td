@@ -27,6 +27,7 @@ def AttachOp : FIRRTLOp<"attach"> {
 
   let assemblyFormat = "$attached attr-dict `:` qualified(type($attached))";
 
+  let hasVerifier = 1;
   let hasCanonicalizeMethod = true;
 }
 
@@ -58,8 +59,8 @@ def StrictConnectOp : FIRRTLOp<"strictconnect", [SameTypeOperands, FConnectLike]
     ```
     }];
 
-  let arguments = (ins SizedBaseOrRefTypeOrForeignType:$dest,
-                       SizedBaseOrRefTypeOrForeignType:$src);
+  let arguments = (ins StrictConnectableType:$dest,
+                       StrictConnectableType:$src);
   let results = (outs);
   let hasCanonicalizeMethod = true;
 
@@ -68,6 +69,37 @@ def StrictConnectOp : FIRRTLOp<"strictconnect", [SameTypeOperands, FConnectLike]
   let assemblyFormat =
     "$dest `,` $src  attr-dict `:` qualified(type($dest))";
 }
+
+def RefDefineOp : FIRRTLOp<"ref.define", [SameTypeOperands, FConnectLike]> {
+  let summary = "FIRRTL Define References";
+  let description = [{
+    Define a target reference to the source reference:
+    ```
+      firrtl.ref.define %dest, %src : ref<t1>
+    ```
+    Used to statically route reference from source to destination
+    through the design, one module at a time.
+
+    Similar to "connect" but cannot have multiple define's to same
+    destination and the define is never conditional even if under
+    a "when".
+
+    Source and destination must resolve statically.
+  }];
+  let arguments = (ins RefType:$dest, RefType:$src);
+
+  let hasVerifier = 1;
+
+  let assemblyFormat =
+    "$dest `,` $src  attr-dict `:` qualified(type($dest))";
+
+  let extraClassDeclaration = [{
+    static ConnectBehaviorKind getConnectBehaviorKind() {
+      return ConnectBehaviorKind::StaticSingleConnect;
+    }
+  }];
+}
+
 
 def PrintFOp : FIRRTLOp<"printf"> {
   let summary = "Formatted Print Statement";
@@ -78,7 +110,7 @@ def PrintFOp : FIRRTLOp<"printf"> {
 
   let assemblyFormat = [{
     $clock `,` $cond `,` $formatString `` custom<PrintfAttrs>(attr-dict) ` `
-    (`(` $substitutions^ `)` `:` qualified(type($substitutions)))?
+    (`(` $substitutions^ `)`)? `:` type($clock) `,` type($cond) (`,` qualified(type($substitutions))^)?
   }];
 }
 
@@ -106,7 +138,7 @@ def StopOp : FIRRTLOp<"stop"> {
                        StrAttr:$name);
   let results = (outs);
 
-  let assemblyFormat = "$clock `,` $cond `,` $exitCode `` custom<StopAttrs>(attr-dict)";
+  let assemblyFormat = "$clock `,` $cond `,` $exitCode `` custom<StopAttrs>(attr-dict) `:` type($clock) `,` type($cond)";
 }
 
 class VerifOp<string mnemonic, list<Trait> traits = []> :
@@ -126,7 +158,7 @@ class VerifOp<string mnemonic, list<Trait> traits = []> :
 
   let assemblyFormat = [{
     $clock `,` $predicate `,` $enable `,`
-    $message (`(` $substitutions^ `)` `:` qualified(type($substitutions)))?
+    $message (`(` $substitutions^ `)`)? `:` type($clock) `,` type($predicate) `,` type($enable) (`,` qualified(type($substitutions))^)?
     custom<VerifAttrs>(attr-dict)
   }];
 }
@@ -164,7 +196,7 @@ def WhenOp : FIRRTLOp<"when", [SingleBlock, NoTerminator, NoRegionArguments,
   ];
 
   let assemblyFormat =
-    "$condition $thenRegion (`else` $elseRegion^)? attr-dict-with-keyword";
+    "$condition `:` type($condition) $thenRegion (`else` $elseRegion^)? attr-dict-with-keyword";
 
   let extraClassDeclaration = [{
 
@@ -196,6 +228,50 @@ def WhenOp : FIRRTLOp<"when", [SingleBlock, NoTerminator, NoRegionArguments,
   }];
 }
 
+def MatchOp : FIRRTLOp<"match", [SingleBlock, NoTerminator,
+    RecursiveMemoryEffects, RecursivelySpeculatable]> {
+  let summary = "Match Statement";
+  let description = [{
+    The "firrtl.match" operation represents a pattern matching statement on a
+    enumeration. This operation does not return a value and cannot be used as an
+    expression. Last connect semantics work similarly to a when statement.
+
+    Example:
+    ```mlir
+      firrtl.match %in : !firrtl.enum<Some: uint<1>, None: uint<0>> {
+        case Some(%arg0) {
+          !firrtl.strictconnect %w, %arg0 : !firrtl.uint<1>
+        }
+        case None(%arg0) {
+          !firrt.strictconnect %w, %c1 : !firrtl.uint<1>
+        }
+      }
+    ```
+  }];
+  let arguments = (ins FEnumType:$input, I32ArrayAttr:$tags);
+  let results = (outs);
+  let regions = (region VariadicRegion<SizedRegion<1>>:$regions);
+  let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "::mlir::Value":$input,
+                   "::mlir::ArrayAttr":$tags,
+                   "::llvm::MutableArrayRef<std::unique_ptr<Region>>":$regions)>
+  ];
+
+  let extraClassDeclaration = [{
+    IntegerAttr getFieldIndexAttr(size_t caseIndex) {
+      return getTags()[caseIndex].cast<IntegerAttr>();
+    }
+
+    uint32_t getFieldIndex(size_t caseIndex) {
+      return getFieldIndexAttr(caseIndex).getUInt();
+    }
+  }];
+}
+
 def ForceOp : FIRRTLOp<"force", [SameTypeOperands]> {
   let summary = "Force procedural statement";
   let description = "Maps to the corresponding `sv.force` operation.";
@@ -214,6 +290,41 @@ def ProbeOp : FIRRTLOp<"probe"> {
   let results = (outs);
 
   let assemblyFormat = "$inner_sym attr-dict ( `,` $captured^  `:` qualified(type($captured)))?";
+}
+
+//===- Reference force/release --------------------------------------------===//
+
+class ForceRefTypeConstraint<string ref, string base>
+  : TypesMatchWith<"reference type of " # ref # " should be RWProbe of " # base,
+                   base, ref,
+                   "RefType::get($_self.cast<FIRRTLBaseType>(), true)">;
+
+def RefForceOp : FIRRTLOp<"ref.force",[ForceRefTypeConstraint<"dest", "src">]> {
+  let summary = "FIRRTL force statement";
+  let description = "Force a RWProbe to the specified value using the specified clock and predicate.";
+  let arguments = (ins ClockType:$clock, UInt1Type:$predicate, RWProbe:$dest, FIRRTLBaseType:$src);
+  let assemblyFormat =
+    "$clock `,` $predicate `,` $dest `,` $src attr-dict `:` type($clock) `,` type($predicate) `,` qualified(type($src))";
+}
+def RefForceInitialOp : FIRRTLOp<"ref.force_initial",[ForceRefTypeConstraint<"dest", "src">]> {
+  let summary = "FIRRTL force_initial statement";
+  let description = "Force a RWProbe to the specified value continuously.";
+  let arguments = (ins UInt1Type:$predicate, RWProbe:$dest, FIRRTLBaseType:$src);
+  let assemblyFormat =
+    "$predicate `,` $dest `,` $src attr-dict `:` type($predicate) `,` qualified(type($src))";
+}
+def RefReleaseOp : FIRRTLOp<"ref.release"> {
+  let summary = "FIRRTL release statement";
+  let description = "Release the target RWProbe using the specified clock and predicate.";
+  let arguments = (ins ClockType:$clock, UInt1Type:$predicate, RWProbe:$dest);
+  let assemblyFormat =
+    "$clock `,` $predicate `,` $dest attr-dict `:` type($clock) `,` type($predicate) `,` qualified(type($dest))";
+}
+def RefReleaseInitialOp : FIRRTLOp<"ref.release_initial"> {
+  let summary = "FIRRTL release_initial statement";
+  let description = "Release the target RWProbe.";
+  let arguments = (ins UInt1Type:$predicate, RWProbe:$dest);
+  let assemblyFormat = "$predicate `,` $dest attr-dict `:` type($predicate) `,` qualified(type($dest))";
 }
 
 #endif // CIRCT_DIALECT_FIRRTL_FIRRTLSTATEMENTS_TD

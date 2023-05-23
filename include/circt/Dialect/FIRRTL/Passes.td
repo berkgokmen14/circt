@@ -60,9 +60,6 @@ def LowerFIRRTLTypes : Pass<"firrtl-lower-types", "firrtl::CircuitOp"> {
   let options = [
     Option<"flattenAggregateMemData", "flatten-mem", "bool", "false",
            "Concat all elements of the aggregate data into a single element.">,
-    Option<"preservePublicTypes", "preserve-public-types", "bool",
-           "true", "Force to lower ports of toplevel and external modules even"
-           "when aggregate preservation mode.">,
     Option<"preserveAggregate", "preserve-aggregate", "PreserveAggregate::PreserveMode",
           "PreserveAggregate::None",
           "Specify aggregate preservation mode",
@@ -95,6 +92,16 @@ def IMConstProp : Pass<"firrtl-imconstprop", "firrtl::CircuitOp"> {
     Statistic<"numFoldedOp", "num-folded-op", "Number of operations folded">,
     Statistic<"numErasedOp", "num-erased-op", "Number of operations erased">
   ];
+}
+
+def RegisterOptimizer : Pass<"firrtl-register-optimizer", "firrtl::FModuleOp"> {
+  let summary = "Optimizer Registers";
+  let description = [{
+    This pass applies classic FIRRTL register optimizations.  These 
+    optimizations are isolated to this pass as they can change the visible 
+    behavior of the register, especially before reset.
+  }];
+  let constructor = "circt::firrtl::createRegisterOptimizerPass()";
 }
 
 def RemoveUnusedPorts : Pass<"firrtl-remove-unused-ports", "firrtl::CircuitOp"> {
@@ -248,6 +255,15 @@ def EmitOMIR : Pass<"firrtl-emit-omir", "firrtl::CircuitOp"> {
   let options = [Option<"outputFilename", "file", "std::string", "",
       "Output file for the JSON-serialized OMIR data">];
   let dependentDialects = ["sv::SVDialect", "hw::HWDialect"];
+}
+
+def LowerMatches : Pass<"firrtl-lower-matches", "firrtl::FModuleOp"> {
+  let summary = "Remove all matchs conditional blocks";
+  let description = [{
+    Lowers FIRRTL match statements in to when statements, which can later be
+    lowered with ExpandWhens.
+  }];
+  let constructor = "circt::firrtl::createLowerMatchesPass()";
 }
 
 def ExpandWhens : Pass<"firrtl-expand-whens", "firrtl::FModuleOp"> {
@@ -487,6 +503,11 @@ def MergeConnections : Pass<"merge-connections", "firrtl::FModuleOp"> {
   ];
 }
 
+def Vectorization : Pass<"vectorization", "firrtl::FModuleOp"> {
+  let summary = "Transform firrtl primitive operations into vector operations";
+  let constructor = "circt::firrtl::createVectorizationPass()";
+}
+
 def InferReadWrite : Pass<"firrtl-infer-rw", "firrtl::FModuleOp"> {
   let summary = "Infer the read-write memory port";
   let description = [{
@@ -601,7 +622,7 @@ def RandomizeRegisterInit :
   let constructor = "circt::firrtl::createRandomizeRegisterInitPass()";
 }
 
-def LowerXMR : Pass<"firrtl-lower-xmr", "firrtl::CircuitOp"> {
+def LowerXMR : Pass<"firrtl-lower-xmr", "mlir::ModuleOp"> {
   let summary = "Lower ref ports to XMR";
   let description = [{
     This pass lowers RefType ops and ports to verbatim encoded XMRs.
@@ -617,6 +638,15 @@ def LowerIntrinsics : Pass<"firrtl-lower-intrinsics", "firrtl::CircuitOp"> {
     intmodule to their implementation or op.
   }];
   let constructor = "circt::firrtl::createLowerIntrinsicsPass()";
+}
+
+def LowerOpenAggs : Pass<"firrtl-lower-open-aggs", "firrtl::CircuitOp"> {
+  let summary = "Lower 'Open' aggregates by splitting out non-hardware elements";
+  let description = [{
+     This pass lowers aggregates of the more open varieties into their equivalents
+     using only hardware types, by pulling out non-hardware to other locations.
+  }];
+  let constructor = "circt::firrtl::createLowerOpenAggsPass()";
 }
 
 def ResolveTraces : Pass<"firrtl-resolve-traces", "firrtl::CircuitOp"> {
@@ -646,8 +676,9 @@ def InnerSymbolDCE : Pass<"firrtl-inner-symbol-dce", "mlir::ModuleOp"> {
   }];
   let constructor = "circt::firrtl::createInnerSymbolDCEPass()";
   let statistics = [
-    Statistic<"numSymbolsFound", "num-sym-found", "Number of symbols found">,
-    Statistic<"numSymbolsRemoved", "num-sym-removed", "Number of symbols removed">
+    Statistic<"numInnerRefsFound", "num-inner-refs-found", "Number of inner-refs found">,
+    Statistic<"numInnerSymbolsFound", "num-inner-sym-found", "Number of inner symbols found">,
+    Statistic<"numInnerSymbolsRemoved", "num-inner-sym-removed", "Number of inner symbols removed">
   ];
 }
 
@@ -658,6 +689,17 @@ def VBToBV : Pass<"firrtl-vb-to-bv", "firrtl::CircuitOp"> {
     vectors.
   }];
   let constructor = "circt::firrtl::createVBToBVPass()";
+}
+
+def FinalizeIR : Pass<"firrtl-finalize-ir", "mlir::ModuleOp"> {
+  let summary = "Perform final IR mutations after ExportVerilog";
+  let description = [{
+    This pass finalizes the IR after it has been exported with ExportVerilog,
+    and before firtool emits the final IR. This includes mutations like dropping
+    verbatim ops that represent sideband files and are not required in the IR.
+  }];
+  let constructor = "circt::firrtl::createFinalizeIRPass()";
+  let dependentDialects = ["hw::HWDialect", "sv::SVDialect"];
 }
 
 #endif // CIRCT_DIALECT_FIRRTL_PASSES_TD

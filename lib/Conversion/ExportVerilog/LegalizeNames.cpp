@@ -23,17 +23,6 @@ using namespace sv;
 using namespace hw;
 using namespace ExportVerilog;
 
-StringAttr ExportVerilog::getDeclarationName(Operation *op) {
-  if (auto attr = op->getAttrOfType<StringAttr>("name"))
-    return attr;
-  if (auto attr = op->getAttrOfType<StringAttr>("instanceName"))
-    return attr;
-  if (auto attr =
-          op->getAttrOfType<StringAttr>(SymbolTable::getSymbolAttrName()))
-    return attr;
-  return {};
-}
-
 //===----------------------------------------------------------------------===//
 // NameCollisionResolver
 //===----------------------------------------------------------------------===//
@@ -169,11 +158,14 @@ static void legalizeModuleLocalNames(HWModuleOp module,
       if (auto name = op->getAttrOfType<StringAttr>(verilogNameAttr)) {
         nameResolver.insertUsedName(
             op->getAttrOfType<StringAttr>(verilogNameAttr));
-      } else if (isa<WireOp, RegOp, LogicOp, LocalParamOp, hw::InstanceOp,
-                     sv::InterfaceInstanceOp, sv::GenerateOp>(op)) {
+      } else if (isa<sv::WireOp, hw::WireOp, RegOp, LogicOp, LocalParamOp,
+                     hw::InstanceOp, sv::InterfaceInstanceOp, sv::GenerateOp>(
+                     op)) {
         // Otherwise, get a verilog name via `getSymOpName`.
         nameEntries.emplace_back(
             op, StringAttr::get(op->getContext(), getSymOpName(op)));
+      } else if (auto forOp = dyn_cast<ForOp>(op)) {
+        nameEntries.emplace_back(op, forOp.getInductionVarNameAttr());
       } else if (isa<AssertOp, AssumeOp, CoverOp, AssertConcurrentOp,
                      AssumeConcurrentOp, CoverConcurrentOp>(op)) {
         // Notice and renamify the labels on verification statements.

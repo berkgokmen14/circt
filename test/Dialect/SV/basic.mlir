@@ -1,13 +1,16 @@
 // RUN: circt-opt %s | FileCheck %s
 // RUN: circt-opt %s | circt-opt | FileCheck %s
 
+sv.macro.decl @RANDOM
+sv.macro.decl @PRINTF_COND_
+
 // CHECK-LABEL: hw.module @test1(%arg0: i1, %arg1: i1, %arg8: i8) {
 hw.module @test1(%arg0: i1, %arg1: i1, %arg8: i8) {
   // CHECK: [[FD:%.*]] = hw.constant -2147483646 : i32
   %fd = hw.constant 0x80000002 : i32
 
-  // CHECK: %param_x = sv.localparam : i42 {value = 11 : i42}
-  %param_x = sv.localparam : i42 {value = 11 : i42}
+  // CHECK: %param_x = sv.localparam {value = 11 : i42} : i42
+  %param_x = sv.localparam {value = 11 : i42} : i42
 
 
   // This corresponds to this block of system verilog code:
@@ -20,7 +23,7 @@ hw.module @test1(%arg0: i1, %arg1: i1, %arg8: i8) {
   sv.always posedge  %arg0 {
     sv.ifdef.procedural "SYNTHESIS" {
     } else {
-      %tmp = sv.macro.ref< "PRINTF_COND_" > : i1
+      %tmp = sv.macro.ref @PRINTF_COND_() : () -> i1
       %tmpx = sv.constantX : i1
       %tmpz = sv.constantZ : i1
       %tmp2 = comb.and %tmp, %tmpx, %tmpz, %arg1 : i1
@@ -39,7 +42,7 @@ hw.module @test1(%arg0: i1, %arg1: i1, %arg8: i8) {
   // CHECK-NEXT: sv.always posedge %arg0 {
   // CHECK-NEXT:   sv.ifdef.procedural "SYNTHESIS" {
   // CHECK-NEXT:   } else {
-  // CHECK-NEXT:     %PRINTF_COND_ = sv.macro.ref< "PRINTF_COND_"> : i1
+  // CHECK-NEXT:     %PRINTF_COND_ = sv.macro.ref @PRINTF_COND
   // CHECK-NEXT:     %x_i1 = sv.constantX : i1
   // CHECK-NEXT:     %z_i1 = sv.constantZ : i1
   // CHECK-NEXT:     [[COND:%.*]] = comb.and %PRINTF_COND_, %x_i1, %z_i1, %arg1 : i1

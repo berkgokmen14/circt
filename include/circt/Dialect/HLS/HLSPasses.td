@@ -20,7 +20,7 @@ def UnrollMarkedLoops : Pass<"hls-unroll-loops", "mlir::func::FuncOp"> {
   let summary = "Unrolls loops with an `hls.unroll` attribute by a given factor.";
   let description = [{
   }];
-  let dependentDialects = ["mlir::scf::SCFDialect,mlir::AffineDialect"];
+  let dependentDialects = ["mlir::scf::SCFDialect,mlir::affine::AffineDialect"];
   let constructor = "circt::hls::createUnrollMarkedLoopsPass()";
 }
 

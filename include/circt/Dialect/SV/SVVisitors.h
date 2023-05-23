@@ -43,7 +43,7 @@ public:
             // Type declarations.
             InterfaceOp, InterfaceSignalOp, InterfaceModportOp,
             InterfaceInstanceOp, GetModportOp, AssignInterfaceSignalOp,
-            ReadInterfaceSignalOp,
+            ReadInterfaceSignalOp, MacroDeclOp, MacroDefOp,
             // Verification statements.
             AssertOp, AssumeOp, CoverOp, AssertConcurrentOp, AssumeConcurrentOp,
             CoverConcurrentOp,
@@ -57,6 +57,8 @@ public:
             ReadMemOp,
             // Generate statements
             GenerateOp, GenerateCaseOp,
+            // For statements
+            ForOp,
             // Sampled value functiions
             SampledOp>([&](auto expr) -> ResultType {
           return thisCast->visitSV(expr, args...);
@@ -135,6 +137,8 @@ public:
   HANDLE(GetModportOp, Unhandled);
   HANDLE(AssignInterfaceSignalOp, Unhandled);
   HANDLE(ReadInterfaceSignalOp, Unhandled);
+  HANDLE(MacroDefOp, Unhandled);
+  HANDLE(MacroDeclOp, Unhandled);
 
   // Verification statements.
   HANDLE(AssertOp, Unhandled);
@@ -164,6 +168,9 @@ public:
   // Generate statements
   HANDLE(GenerateOp, Unhandled);
   HANDLE(GenerateCaseOp, Unhandled);
+
+  // For loop.
+  HANDLE(ForOp, Unhandled);
 
   // Sampled Value Functions
   HANDLE(SampledOp, Unhandled);

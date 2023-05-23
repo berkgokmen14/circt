@@ -24,7 +24,7 @@ sv.interface @IValidReady_Struct  {
 // CHECK-NEXT:          _GEN_0,
 // CHECK-NEXT:          _GEN_0})};{{.*}}
 hw.module @structs(%clk: i1, %rstn: i1) {
-  %0 = sv.interface.instance {name = "iface"} : !sv.interface<@IValidReady_Struct>
+  %0 = sv.interface.instance name "iface" : !sv.interface<@IValidReady_Struct>
   sv.interface.signal.assign %0(@IValidReady_Struct::@data) = %s : !hw.struct<foo: !hw.array<72xi1>, bar: !hw.array<128xi1>, baz: !hw.array<224xi1>>
   %c0 = hw.constant 0 : i8
   %c64 = hw.constant 100000 : i64
@@ -233,4 +233,51 @@ hw.module @svattrs() {
       #sv.attribute<"foo6"="bar6", emitAsComment>,
       #sv.attribute<"end">
    ]} : !hw.inout<i10>
+}
+
+// -----
+
+sv.macro.decl @RANDOM
+
+// CHECK-LABEL:module ForStatement{{.*}}
+hw.module @ForStatement(%aaaaaaaaaaa: i5, %xxxxxxxxxxxxxxx : i2, %yyyyyyyyyyyyyyy : i2, %zzzzzzzzzzzzzzz : i2) -> () {
+  %_RANDOM = sv.logic : !hw.inout<uarray<3xi32>>
+  sv.initial {
+    %x_and_y = comb.and %xxxxxxxxxxxxxxx, %yyyyyyyyyyyyyyy : i2
+    %x_or_y = comb.or %xxxxxxxxxxxxxxx, %yyyyyyyyyyyyyyy : i2
+    %lowerBound = comb.sub %x_and_y, %x_or_y : i2
+    %upperBound = comb.and %x_or_y, %x_and_y : i2
+    %eq = comb.icmp eq %xxxxxxxxxxxxxxx, %yyyyyyyyyyyyyyy : i2
+    %step = comb.mux %eq, %x_and_y, %x_or_y : i2
+    //      CHECK:    for (logic [1:0] iiiiiiiiiiiiiiiiiiiiiiiii = _GEN - _GEN_0;
+    // CHECK-NEXT:         iiiiiiiiiiiiiiiiiiiiiiiii < _GEN_0 & _GEN;
+    // CHECK-NEXT:         iiiiiiiiiiiiiiiiiiiiiiiii +=
+    // CHECK-NEXT:           xxxxxxxxxxxxxxx == yyyyyyyyyyyyyyy ? _GEN : _GEN_0) begin
+    // CHECK-NEXT:      _RANDOM[iiiiiiiiiiiiiiiiiiiiiiiii] = `RANDOM;{{.*}}
+    // CHECK-NEXT:    end{{.*}}
+    sv.for %iiiiiiiiiiiiiiiiiiiiiiiii = %lowerBound to %upperBound step %step : i2 {
+      %RANDOM = sv.macro.ref.se @RANDOM() : () -> i32
+      %index = sv.array_index_inout %_RANDOM[%iiiiiiiiiiiiiiiiiiiiiiiii] : !hw.inout<uarray<3xi32>>, i2
+      sv.bpassign %index, %RANDOM : i32
+    }
+  }
+}
+
+// -----
+
+sv.macro.decl @TEST_COND
+
+// CHECK-LABEL:module TestCond{{.*}}
+// CHECK-NEXT:  `ifdef TEST_COND_{{.*}}
+// CHECK-NEXT:    `define TEST_COND TEST_COND_
+// CHECK-NEXT:  `else  // TEST_COND_
+// CHECK-NEXT:    `define TEST_COND 1
+// CHECK-NEXT:  `endif // TEST_COND_
+hw.module @TestCond() {
+  sv.ifdef "TEST_COND_" {
+   sv.macro.def @TEST_COND "TEST_COND_"
+  } else {
+   sv.macro.def @TEST_COND "1"
+  }
+  hw.output
 }

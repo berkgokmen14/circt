@@ -59,9 +59,9 @@ firrtl.circuit "unprocessedAnnotations" {
     // expected-warning @+1 {{unprocessed annotation:'firrtl.transforms.RemainingAnnotation2'}}
     %2 = firrtl.node %1 {annotations = [{class = "firrtl.transforms.RemainingAnnotation2"}]} : !firrtl.uint<1>
     // expected-warning @+1 {{unprocessed annotation:'firrtl.transforms.RemainingAnnotation3'}}
-    %3 = firrtl.reg %clock {annotations = [{class = "firrtl.transforms.RemainingAnnotation3"}]} : !firrtl.uint<1>
+    %3 = firrtl.reg %clock {annotations = [{class = "firrtl.transforms.RemainingAnnotation3"}]} : !firrtl.clock, !firrtl.uint<1>
     // expected-warning @+1 {{unprocessed annotation:'firrtl.transforms.RemainingAnnotation4'}}
-    %4 = firrtl.regreset %clock, %reset, %1 {annotations = [{class = "firrtl.transforms.RemainingAnnotation4"}]} : !firrtl.uint<1>, !firrtl.uint<1>, !firrtl.uint<1>
+    %4 = firrtl.regreset %clock, %reset, %1 {annotations = [{class = "firrtl.transforms.RemainingAnnotation4"}]} : !firrtl.clock, !firrtl.uint<1>, !firrtl.uint<1>, !firrtl.uint<1>
     // expected-warning @+1 {{unprocessed annotation:'firrtl.transforms.RemainingAnnotation5'}}
     %_M_read, %_M_rw, %_M_write = firrtl.mem Undefined {depth = 12 : i64, name = "_M", portNames = ["read", "rw",
     "write"], readLatency = 0 : i32, writeLatency = 1 : i32, annotations = [{class =
@@ -138,5 +138,41 @@ firrtl.circuit "DTArgZero" {
 firrtl.circuit "ArgWithFieldSym" {
   // expected-error @below {{cannot lower aggregate port "foo" with field sensitive symbols, HW dialect does not support per field symbols yet}}
   firrtl.module @ArgWithFieldSym(in %foo :!firrtl.vector<uint<1>,2> sym [<@x,1,public>]) {
+  }
+}
+
+// -----
+
+firrtl.circuit "ConnectDestSubfield" {
+  firrtl.module @ConnectDestSubfield(in %clock: !firrtl.clock, in %value: !firrtl.uint<1>) {
+    %0 = firrtl.reg %clock : !firrtl.clock, !firrtl.bundle<a: uint<1>>
+    // expected-error @below {{'hw.struct_extract' op used as connect destination}}
+    %1 = firrtl.subfield %0[a] : !firrtl.bundle<a: uint<1>>
+    // expected-error @below {{'firrtl.strictconnect' op LowerToHW couldn't handle this operation}}
+    firrtl.strictconnect %1, %value : !firrtl.uint<1>
+  }
+}
+
+// -----
+
+firrtl.circuit "ConnectDestSubindex" {
+  firrtl.module @ConnectDestSubindex(in %clock: !firrtl.clock, in %value: !firrtl.uint<1>) {
+    %0 = firrtl.reg %clock : !firrtl.clock, !firrtl.vector<uint<1>, 1>
+    // expected-error @below {{'hw.array_get' op used as connect destination}}
+    %1 = firrtl.subindex %0[0] : !firrtl.vector<uint<1>, 1>
+    // expected-error @below {{'firrtl.strictconnect' op LowerToHW couldn't handle this operation}}
+    firrtl.strictconnect %1, %value : !firrtl.uint<1>
+  }
+}
+
+// -----
+
+firrtl.circuit "ConnectDestSubaccess" {
+  firrtl.module @ConnectDestSubaccess(in %clock: !firrtl.clock, in %index: !firrtl.uint<1>, in %value: !firrtl.uint<1>) {
+    %0 = firrtl.reg %clock : !firrtl.clock, !firrtl.vector<uint<1>, 1>
+    // expected-error @below {{'hw.array_get' op used as connect destination}}
+    %1 = firrtl.subaccess %0[%index] : !firrtl.vector<uint<1>, 1>, !firrtl.uint<1>
+    // expected-error @below {{'firrtl.strictconnect' op LowerToHW couldn't handle this operation}}
+    firrtl.strictconnect %1, %value : !firrtl.uint<1>
   }
 }

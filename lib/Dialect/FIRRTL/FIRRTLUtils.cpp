@@ -33,19 +33,20 @@ void circt::firrtl::emitConnect(ImplicitLocOpBuilder &builder, Value dst,
   auto dstType = dstFType.dyn_cast<FIRRTLBaseType>();
   auto srcType = srcFType.dyn_cast<FIRRTLBaseType>();
 
-  // If the types are the exact same we can just connect them.
-  if (dstFType == srcFType) {
-    // Strict connect does not allow uninferred widths.
-    if (dstType && dstType.hasUninferredWidth())
+  // Special Connects (non-base, foreign):
+  if (!dstType) {
+    // References use ref.define.  Types should match, leave to verifier if not.
+    if (isa<RefType>(dstFType))
+      builder.create<RefDefineOp>(dst, src);
+    else // Other types, give up and leave a connect
       builder.create<ConnectOp>(dst, src);
-    else
-      builder.create<StrictConnectOp>(dst, src);
     return;
   }
 
-  // Non-base types don't need special handling.
-  if (!srcType || !dstType) {
-    builder.create<ConnectOp>(dst, src);
+  // If the types are the exact same we can just connect them.
+  if (dstType == srcType && dstType.isPassive() &&
+      !dstType.hasUninferredWidth()) {
+    builder.create<StrictConnectOp>(dst, src);
     return;
   }
 
@@ -87,15 +88,22 @@ void circt::firrtl::emitConnect(ImplicitLocOpBuilder &builder, Value dst,
     return;
   }
 
+  if ((dstType.hasUninferredReset() || srcType.hasUninferredReset()) &&
+      dstType != srcType) {
+    src = builder.create<UninferredResetCastOp>(dstType, src);
+    srcType = dstType;
+  }
+
+  // Be sure uint, uint -> uint, (uir uint) since we are changing extneding
+  // connect to identity.
+  if (dstType.hasUninferredWidth() || srcType.hasUninferredWidth()) {
+    src = builder.create<UninferredWidthCastOp>(dstType, src);
+    srcType = dstType;
+  }
+
   // Handle ground types with possibly uninferred widths.
   auto dstWidth = dstType.getBitWidthOrSentinel();
   auto srcWidth = srcType.getBitWidthOrSentinel();
-  if (dstWidth < 0 || srcWidth < 0) {
-    // If one of these types has an uninferred width, we connect them with a
-    // regular connect operation.
-    builder.create<ConnectOp>(dst, src);
-    return;
-  }
 
   // The source must be extended or truncated.
   if (dstWidth < srcWidth) {
@@ -114,10 +122,8 @@ void circt::firrtl::emitConnect(ImplicitLocOpBuilder &builder, Value dst,
 
   // Strict connect requires the types to be completely equal, including
   // connecting uint<1> to abstract reset types.
-  if (dstType == src.getType())
-    builder.create<StrictConnectOp>(dst, src);
-  else
-    builder.create<ConnectOp>(dst, src);
+  assert("Connect Types are equal" && dstType == src.getType());
+  builder.create<StrictConnectOp>(dst, src);
 }
 
 IntegerAttr circt::firrtl::getIntAttr(Type type, const APInt &value) {
@@ -440,19 +446,27 @@ FieldRef circt::firrtl::getFieldRefFromValue(Value value) {
     if (!op)
       break;
 
-    if (auto subfieldOp = dyn_cast<SubfieldOp>(op)) {
-      value = subfieldOp.getInput();
-      auto bundleType = subfieldOp.getInput().getType();
-      // Rebase the current index on the parent field's index.
-      id += bundleType.getFieldID(subfieldOp.getFieldIndex());
-    } else if (auto subindexOp = dyn_cast<SubindexOp>(op)) {
-      value = subindexOp.getInput();
-      auto vecType = subindexOp.getInput().getType();
-      // Rebase the current index on the parent field's index.
-      id += vecType.getFieldID(subindexOp.getIndex());
-    } else {
+    auto handled = TypeSwitch<Operation *, bool>(op)
+                       .Case<SubfieldOp, OpenSubfieldOp>([&](auto subfieldOp) {
+                         value = subfieldOp.getInput();
+                         auto bundleType = subfieldOp.getInput().getType();
+                         // Rebase the current index on the parent field's
+                         // index.
+                         id +=
+                             bundleType.getFieldID(subfieldOp.getFieldIndex());
+                         return true;
+                       })
+                       .Case<SubindexOp, OpenSubindexOp>([&](auto subindexOp) {
+                         value = subindexOp.getInput();
+                         auto vecType = subindexOp.getInput().getType();
+                         // Rebase the current index on the parent field's
+                         // index.
+                         id += vecType.getFieldID(subindexOp.getIndex());
+                         return true;
+                       })
+                       .Default(false);
+    if (!handled)
       break;
-    }
   }
   return {value, id};
 }
@@ -483,8 +497,22 @@ static void getDeclName(Value value, SmallString<64> &string, bool nameSafe) {
           value = nullptr;
         })
         .Case<mlir::UnrealizedConversionCastOp>(
-            [&](auto cast) { value = cast.getInputs()[0]; })
-        .Default([&](auto) { value = nullptr; });
+            [&](mlir::UnrealizedConversionCastOp cast) {
+              // Forward through 1:1 conversion cast ops.
+              if (cast.getNumResults() == 1 && cast.getNumOperands() == 1 &&
+                  cast.getResult(0).getType() == cast.getOperand(0).getType()) {
+                value = cast.getInputs()[0];
+              } else {
+                // Can't name this.
+                string.clear();
+                value = nullptr;
+              }
+            })
+        .Default([&](auto) {
+          // Can't name this.
+          string.clear();
+          value = nullptr;
+        });
   }
 }
 
@@ -554,6 +582,47 @@ Value circt::firrtl::getValueByFieldID(ImplicitLocOpBuilder builder,
     }
   }
   return value;
+}
+
+/// Walk leaf ground types in the `firrtlType` and apply the function `fn`.
+/// The first argument of `fn` is field ID, and the second argument is a
+/// leaf ground type.
+void circt::firrtl::walkGroundTypes(
+    FIRRTLType firrtlType,
+    llvm::function_ref<void(uint64_t, FIRRTLBaseType)> fn) {
+  auto type = getBaseType(firrtlType);
+  // If this is a ground type, don't call recursive functions.
+  if (type.isGround())
+    return fn(0, type);
+
+  uint64_t fieldID = 0;
+  auto recurse = [&](auto &&f, FIRRTLBaseType type) -> void {
+    TypeSwitch<FIRRTLBaseType>(type)
+        .Case<BundleType>([&](BundleType bundle) {
+          for (size_t i = 0, e = bundle.getNumElements(); i < e; ++i) {
+            fieldID++;
+            f(f, bundle.getElementType(i));
+          }
+        })
+        .template Case<FVectorType>([&](FVectorType vector) {
+          for (size_t i = 0, e = vector.getNumElements(); i < e; ++i) {
+            fieldID++;
+            f(f, vector.getElementType());
+          }
+        })
+        .template Case<FEnumType>([&](FEnumType fenum) {
+          for (size_t i = 0, e = fenum.getNumElements(); i < e; ++i) {
+            fieldID++;
+            f(f, fenum.getElementType(i));
+          }
+        })
+        .Default([&](FIRRTLBaseType groundType) {
+          assert(groundType.isGround() &&
+                 "only ground types are expected here");
+          fn(fieldID, groundType);
+        });
+  };
+  recurse(recurse, type);
 }
 
 /// Returns an operation's `inner_sym`, adding one if necessary.
@@ -750,7 +819,7 @@ Type circt::firrtl::lowerType(Type type) {
   // Ignore flip types.
   firType = firType.getPassiveType();
 
-  if (BundleType bundle = firType.dyn_cast<BundleType>()) {
+  if (auto bundle = firType.dyn_cast<BundleType>()) {
     mlir::SmallVector<hw::StructType::FieldInfo, 8> hwfields;
     for (auto element : bundle) {
       Type etype = lowerType(element.type);
@@ -760,11 +829,35 @@ Type circt::firrtl::lowerType(Type type) {
     }
     return hw::StructType::get(type.getContext(), hwfields);
   }
-  if (FVectorType vec = firType.dyn_cast<FVectorType>()) {
+  if (auto vec = firType.dyn_cast<FVectorType>()) {
     auto elemTy = lowerType(vec.getElementType());
     if (!elemTy)
       return {};
     return hw::ArrayType::get(elemTy, vec.getNumElements());
+  }
+  if (auto fenum = firType.dyn_cast<FEnumType>()) {
+    mlir::SmallVector<hw::UnionType::FieldInfo, 8> hwfields;
+    SmallVector<Attribute> names;
+    bool simple = true;
+    for (auto element : fenum) {
+      Type etype = lowerType(element.type);
+      if (!etype)
+        return {};
+      hwfields.push_back(hw::UnionType::FieldInfo{element.name, etype, 0});
+      names.push_back(element.name);
+      if (!element.type.isa<UIntType>() ||
+          element.type.getBitWidthOrSentinel() != 0)
+        simple = false;
+    }
+    auto tagTy = hw::EnumType::get(type.getContext(),
+                                   ArrayAttr::get(type.getContext(), names));
+    if (simple)
+      return tagTy;
+    auto bodyTy = hw::UnionType::get(type.getContext(), hwfields);
+    hw::StructType::FieldInfo fields[2] = {
+        {StringAttr::get(type.getContext(), "tag"), tagTy},
+        {StringAttr::get(type.getContext(), "body"), bodyTy}};
+    return hw::StructType::get(type.getContext(), fields);
   }
 
   auto width = firType.getBitWidthOrSentinel();

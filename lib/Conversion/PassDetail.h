@@ -52,6 +52,10 @@ namespace arc {
 class ArcDialect;
 } // namespace arc
 
+namespace dc {
+class DCDialect;
+} // namespace dc
+
 namespace fsm {
 class FSMDialect;
 } // namespace fsm
@@ -83,6 +87,10 @@ class MooreDialect;
 namespace llhd {
 class LLHDDialect;
 } // namespace llhd
+
+namespace loopschedule {
+class LoopScheduleDialect;
+} // namespace loopschedule
 
 namespace comb {
 class CombDialect;

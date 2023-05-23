@@ -17,6 +17,16 @@ include "FIRRTLDialect.td"
 include "mlir/IR/EnumAttr.td"
 
 //===----------------------------------------------------------------------===//
+// Value Phase Tracking
+//===----------------------------------------------------------------------===//
+
+def Phase : I32EnumAttr<"Phase", "value phase", [
+                        I32EnumAttrCase<"Hardware",  0, "hardware">,
+                        I32EnumAttrCase<"Property",  1, "property">]> {
+  let genSpecializedAttr = 0;
+}
+
+//===----------------------------------------------------------------------===//
 // Name Kinds
 //===----------------------------------------------------------------------===//
 
@@ -32,6 +42,18 @@ def NameKindEnumImpl: I32EnumAttr<"NameKindEnum", "name kind",
 }
 
 def NameKindAttr: EnumAttr<FIRRTLDialect, NameKindEnumImpl, "name_kind">;
+
+//===----------------------------------------------------------------------===//
+// Module Instantiation Conventions
+//===----------------------------------------------------------------------===//
+
+def Convention : I32EnumAttr<"Convention", "lowering convention", [
+                           I32EnumAttrCase<"Internal", 0, "internal">,
+                           I32EnumAttrCase<"Scalarized", 1, "scalarized">]> {
+  let genSpecializedAttr = 0;
+}
+
+def ConventionAttr : EnumAttr<FIRRTLDialect, Convention, "convention">;
 
 //===----------------------------------------------------------------------===//
 // Read Under Write Behaviour

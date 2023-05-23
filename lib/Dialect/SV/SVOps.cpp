@@ -20,6 +20,7 @@
 #include "circt/Support/CustomDirectiveImpl.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
@@ -91,22 +92,6 @@ static Operation *lookupSymbolInNested(Operation *symbolTableOp,
 }
 
 //===----------------------------------------------------------------------===//
-// ImplicitSSAName Custom Directive
-//===----------------------------------------------------------------------===//
-
-static ParseResult parseSVImplicitSSAName(OpAsmParser &parser,
-                                          NamedAttrList &resultAttrs) {
-  return parseImplicitSSAName(parser, resultAttrs);
-}
-
-static void printSVImplicitSSAName(OpAsmPrinter &printer, Operation *op,
-                                   DictionaryAttr attrs) {
-  printImplicitSSAName(printer, op, attrs,
-                       {SymbolTable::getSymbolAttrName(),
-                        hw::InnerName::getInnerNameAttrName(), "svAttributes"});
-}
-
-//===----------------------------------------------------------------------===//
 // VerbatimExprOp
 //===----------------------------------------------------------------------===//
 
@@ -143,12 +128,67 @@ void VerbatimExprSEOp::getAsmResultNames(
 
 void MacroRefExprOp::getAsmResultNames(
     function_ref<void(Value, StringRef)> setNameFn) {
-  setNameFn(getResult(), getIdent().getName());
+  setNameFn(getResult(), getMacroName());
 }
 
 void MacroRefExprSEOp::getAsmResultNames(
     function_ref<void(Value, StringRef)> setNameFn) {
-  setNameFn(getResult(), getIdent().getName());
+  setNameFn(getResult(), getMacroName());
+}
+
+static MacroDeclOp getReferencedMacro(const hw::HWSymbolCache *cache,
+                                      Operation *op,
+                                      FlatSymbolRefAttr macroName) {
+  if (cache)
+    if (auto *result = cache->getDefinition(macroName.getAttr()))
+      return cast<MacroDeclOp>(result);
+
+  auto topLevelModuleOp = op->getParentOfType<ModuleOp>();
+  return topLevelModuleOp.lookupSymbol<MacroDeclOp>(macroName.getValue());
+}
+
+/// Lookup the module or extmodule for the symbol.  This returns null on
+/// invalid IR.
+MacroDeclOp MacroRefExprOp::getReferencedMacro(const hw::HWSymbolCache *cache) {
+  return ::getReferencedMacro(cache, *this, getMacroNameAttr());
+}
+
+MacroDeclOp
+MacroRefExprSEOp::getReferencedMacro(const hw::HWSymbolCache *cache) {
+  return ::getReferencedMacro(cache, *this, getMacroNameAttr());
+}
+
+MacroDeclOp MacroDefOp::getReferencedMacro(const hw::HWSymbolCache *cache) {
+  return ::getReferencedMacro(cache, *this, getMacroNameAttr());
+}
+
+/// Ensure that the symbol being instantiated exists and is a MacroDeclOp.
+static LogicalResult verifyMacroSymbolUse(Operation *op, StringAttr name,
+                                          SymbolTableCollection &symbolTable) {
+  auto module = op->getParentOfType<mlir::ModuleOp>();
+  auto macro =
+      dyn_cast_or_null<MacroDeclOp>(symbolTable.lookupSymbolIn(module, name));
+  if (!macro)
+    return op->emitError("Referenced macro doesn't exist ") << name;
+
+  return success();
+}
+
+/// Ensure that the symbol being instantiated exists and is a MacroDefOp.
+LogicalResult
+MacroRefExprOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  return verifyMacroSymbolUse(*this, getMacroNameAttr().getAttr(), symbolTable);
+}
+
+/// Ensure that the symbol being instantiated exists and is a MacroDefOp.
+LogicalResult
+MacroRefExprSEOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  return verifyMacroSymbolUse(*this, getMacroNameAttr().getAttr(), symbolTable);
+}
+
+/// Ensure that the symbol being instantiated exists and is a MacroDefOp.
+LogicalResult MacroDefOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  return verifyMacroSymbolUse(*this, getMacroNameAttr().getAttr(), symbolTable);
 }
 
 //===----------------------------------------------------------------------===//
@@ -413,7 +453,7 @@ LogicalResult IfOp::canonicalize(IfOp op, PatternRewriter &rewriter) {
 
   if (auto constant = op.getCond().getDefiningOp<hw::ConstantOp>()) {
 
-    if (constant.getValue().isAllOnesValue())
+    if (constant.getValue().isAllOnes())
       replaceOpWithRegion(rewriter, op, op.getThenRegion());
     else if (!op.getElseRegion().empty())
       replaceOpWithRegion(rewriter, op, op.getElseRegion());
@@ -993,6 +1033,111 @@ void OrderedOutputOp::build(OpBuilder &builder, OperationState &result,
 }
 
 //===----------------------------------------------------------------------===//
+// ForOp
+//===----------------------------------------------------------------------===//
+
+void ForOp::build(OpBuilder &builder, OperationState &result,
+                  int64_t lowerBound, int64_t upperBound, int64_t step,
+                  IntegerType type, StringRef name,
+                  llvm::function_ref<void(BlockArgument)> body) {
+  auto lb = builder.create<hw::ConstantOp>(result.location, type, lowerBound);
+  auto ub = builder.create<hw::ConstantOp>(result.location, type, upperBound);
+  auto st = builder.create<hw::ConstantOp>(result.location, type, step);
+  build(builder, result, lb, ub, st, name, body);
+}
+void ForOp::build(OpBuilder &builder, OperationState &result, Value lowerBound,
+                  Value upperBound, Value step, StringRef name,
+                  llvm::function_ref<void(BlockArgument)> body) {
+  OpBuilder::InsertionGuard guard(builder);
+  build(builder, result, lowerBound, upperBound, step, name);
+  auto *region = result.regions.front().get();
+  builder.createBlock(region);
+  BlockArgument blockArgument =
+      region->addArgument(lowerBound.getType(), result.location);
+
+  if (body)
+    body(blockArgument);
+}
+
+void ForOp::getAsmBlockArgumentNames(mlir::Region &region,
+                                     mlir::OpAsmSetValueNameFn setNameFn) {
+  auto *block = &region.front();
+  setNameFn(block->getArgument(0), getInductionVarNameAttr());
+}
+
+ParseResult ForOp::parse(OpAsmParser &parser, OperationState &result) {
+  auto &builder = parser.getBuilder();
+  Type type;
+
+  OpAsmParser::Argument inductionVariable;
+  OpAsmParser::UnresolvedOperand lb, ub, step;
+  // Parse the optional initial iteration arguments.
+  SmallVector<OpAsmParser::Argument, 4> regionArgs;
+
+  // Parse the induction variable followed by '='.
+  if (parser.parseOperand(inductionVariable.ssaName) || parser.parseEqual() ||
+      // Parse loop bounds.
+      parser.parseOperand(lb) || parser.parseKeyword("to") ||
+      parser.parseOperand(ub) || parser.parseKeyword("step") ||
+      parser.parseOperand(step) || parser.parseColon() ||
+      parser.parseType(type))
+    return failure();
+
+  regionArgs.push_back(inductionVariable);
+
+  // Resolve input operands.
+  regionArgs.front().type = type;
+  if (parser.resolveOperand(lb, type, result.operands) ||
+      parser.resolveOperand(ub, type, result.operands) ||
+      parser.resolveOperand(step, type, result.operands))
+    return failure();
+
+  // Parse the body region.
+  Region *body = result.addRegion();
+  if (parser.parseRegion(*body, regionArgs))
+    return failure();
+
+  // Parse the optional attribute list.
+  if (parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+
+  if (!inductionVariable.ssaName.name.empty()) {
+    if (!isdigit(inductionVariable.ssaName.name[1]))
+      // Retrive from its SSA name.
+      result.attributes.append(
+          {builder.getStringAttr("inductionVarName"),
+           builder.getStringAttr(inductionVariable.ssaName.name.drop_front())});
+  }
+
+  return success();
+}
+
+void ForOp::print(OpAsmPrinter &p) {
+  p << " " << getInductionVar() << " = " << getLowerBound() << " to "
+    << getUpperBound() << " step " << getStep();
+  p << " : " << getInductionVar().getType() << ' ';
+  p.printRegion(getRegion(),
+                /*printEntryBlockArgs=*/false,
+                /*printBlockTerminators=*/false);
+  p.printOptionalAttrDict((*this)->getAttrs(), {"inductionVarName"});
+}
+
+LogicalResult ForOp::canonicalize(ForOp op, PatternRewriter &rewriter) {
+  APInt lb, ub, step;
+  if (matchPattern(op.getLowerBound(), mlir::m_ConstantInt(&lb)) &&
+      matchPattern(op.getUpperBound(), mlir::m_ConstantInt(&ub)) &&
+      matchPattern(op.getStep(), mlir::m_ConstantInt(&step)) &&
+      lb + step == ub) {
+    // Unroll the loop if it's executed only once.
+    op.getInductionVar().replaceAllUsesWith(op.getLowerBound());
+    replaceOpWithRegion(rewriter, op, op.getBodyRegion());
+    rewriter.eraseOp(op);
+    return success();
+  }
+  return failure();
+}
+
+//===----------------------------------------------------------------------===//
 // Assignment statements
 //===----------------------------------------------------------------------===//
 
@@ -1484,8 +1629,8 @@ static Type getElementTypeOfWidth(Type type, int32_t width) {
 
 LogicalResult IndexedPartSelectInOutOp::inferReturnTypes(
     MLIRContext *context, std::optional<Location> loc, ValueRange operands,
-    DictionaryAttr attrs, mlir::RegionRange regions,
-    SmallVectorImpl<Type> &results) {
+    DictionaryAttr attrs, mlir::OpaqueProperties properties,
+    mlir::RegionRange regions, SmallVectorImpl<Type> &results) {
   auto width = attrs.get("width");
   if (!width)
     return failure();
@@ -1537,8 +1682,8 @@ OpFoldResult IndexedPartSelectInOutOp::fold(FoldAdaptor) {
 
 LogicalResult IndexedPartSelectOp::inferReturnTypes(
     MLIRContext *context, std::optional<Location> loc, ValueRange operands,
-    DictionaryAttr attrs, mlir::RegionRange regions,
-    SmallVectorImpl<Type> &results) {
+    DictionaryAttr attrs, mlir::OpaqueProperties properties,
+    mlir::RegionRange regions, SmallVectorImpl<Type> &results) {
   auto width = attrs.get("width");
   if (!width)
     return failure();
@@ -1567,8 +1712,8 @@ LogicalResult IndexedPartSelectOp::verify() {
 
 LogicalResult StructFieldInOutOp::inferReturnTypes(
     MLIRContext *context, std::optional<Location> loc, ValueRange operands,
-    DictionaryAttr attrs, mlir::RegionRange regions,
-    SmallVectorImpl<Type> &results) {
+    DictionaryAttr attrs, mlir::OpaqueProperties properties,
+    mlir::RegionRange regions, SmallVectorImpl<Type> &results) {
   auto field = attrs.get("field");
   if (!field)
     return failure();

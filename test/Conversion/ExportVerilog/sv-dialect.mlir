@@ -11,10 +11,10 @@ hw.module @M1<param1: i42>(%clock : i1, %cond : i1, %val : i8) {
 
   %c11_i42 = hw.constant 11: i42
   // CHECK: localparam [41:0]{{ *}} param_x = 42'd11;
-  %param_x = sv.localparam : i42 { value = 11: i42 }
+  %param_x = sv.localparam { value = 11 : i42 } : i42
 
   // CHECK: localparam [41:0]{{ *}} param_y = param1;
-  %param_y = sv.localparam : i42 { value = #hw.param.decl.ref<"param1">: i42 }
+  %param_y = sv.localparam { value = #hw.param.decl.ref<"param1"> : i42 } : i42
 
   // CHECK:        logic{{ *}} [7:0]{{ *}} logic_op = val;
   // CHECK-NEXT: struct packed {logic b; } logic_op_struct;
@@ -38,7 +38,7 @@ hw.module @M1<param1: i42>(%clock : i1, %cond : i1, %val : i8) {
     sv.ifdef.procedural "SYNTHESIS" {
     } else {
   // CHECK-NEXT:     if ((`PRINTF_COND_) & 1'bx & 1'bz & 1'bz & cond & forceWire)
-      %tmp = sv.macro.ref< "PRINTF_COND_"> : i1
+      %tmp = sv.macro.ref @PRINTF_COND_() : () -> i1
       %verb_tmp = sv.verbatim.expr "{{0}}" : () -> i1 {symbols = [#hw.innerNameRef<@M1::@wire1>] }
       %tmp1 = sv.constantX : i1
       %tmp2 = sv.constantZ : i1
@@ -984,88 +984,6 @@ hw.module @ConstantDefBeforeUse() {
   }
 }
 
-// Mixing !hw.enum types which alias in their fields - one anonymous enum
-// and two aliasing named enums.
-
-// CHECK: `ifndef _TYPESCOPE___AnFSMTypedecl
-// CHECK: `define _TYPESCOPE___AnFSMTypedecl
-// CHECK: typedef enum {_state1_A, _state1_B} _state1;
-// CHECK: typedef enum {_state2_A, _state2_B} _state2;
-// CHECK: `endif // _TYPESCOPE___AnFSMTypedecl
-// CHECK-LABEL: module AnFSM
-// CHECK:   enum {A, B} reg_0;
-// OLD:   _state1     reg_state1;
-// OLD:   _state2     reg_state2;
-// CHECK:   always @(posedge clock) begin
-// CHECK:     case (reg_0)
-// CHECK:       A:
-// CHECK:         reg_0 <= B;
-// CHECK:       default:
-// CHECK:         reg_0 <= A;
-// CHECK:     endcase
-// CHECK:   end
-// NEW:   _state1     reg_state1;
-// CHECK:   always @(posedge clock) begin
-// CHECK:     case (reg_state1)
-// CHECK:       _state1_A:
-// CHECK:         reg_state1 <= _state1_B;
-// CHECK:       default:
-// CHECK:         reg_state1 <= _state1_A;
-// CHECK:     endcase
-// CHECK:   end
-// NEW:   _state2     reg_state2;
-// CHECK:   always @(posedge clock) begin
-// CHECK:     case (reg_state2)
-// CHECK:       _state2_A:
-// CHECK:         reg_state2 <= _state2_B;
-// CHECK:       default:
-// CHECK:         reg_state2 <= _state2_A;
-// CHECK:     endcase
-// CHECK:   end
-// CHECK: endmodule
-
-hw.type_scope @__AnFSMTypedecl {
-  hw.typedecl @_state1 : !hw.enum<A, B>
-  hw.typedecl @_state2 : !hw.enum<A, B>
-}
-
-hw.module @AnFSM(%clock : i1) {
-  // Anonymous enum
-  %reg = sv.reg : !hw.inout<!hw.enum<A, B>>
-  %reg_read = sv.read_inout %reg : !hw.inout<!hw.enum<A, B>>
-  %A = hw.enum.constant A : !hw.enum<A, B>
-  %B = hw.enum.constant B : !hw.enum<A, B>
-  sv.always posedge %clock {
-    sv.case case %reg_read : !hw.enum<A, B>
-      case A : { sv.passign %reg, %B : !hw.enum<A, B> }
-      default : { sv.passign %reg, %A : !hw.enum<A, B> }
-  }
-
-  // typedecl'd # 1
-  %reg_state1 = sv.reg : !hw.inout<!hw.typealias<@__AnFSMTypedecl::@_state1,!hw.enum<A, B>>>
-  %reg_read_state1 = sv.read_inout %reg_state1 : !hw.inout<!hw.typealias<@__AnFSMTypedecl::@_state1,!hw.enum<A, B>>>
-
-  %A_state1 = hw.enum.constant A : !hw.typealias<@__AnFSMTypedecl::@_state1,!hw.enum<A, B>>
-  %B_state1 = hw.enum.constant B : !hw.typealias<@__AnFSMTypedecl::@_state1,!hw.enum<A, B>>
-  sv.always posedge %clock {
-    sv.case case %reg_read_state1 : !hw.typealias<@__AnFSMTypedecl::@_state1,!hw.enum<A, B>>
-      case A : { sv.passign %reg_state1, %B_state1 : !hw.typealias<@__AnFSMTypedecl::@_state1,!hw.enum<A, B>> }
-      default : { sv.passign %reg_state1, %A_state1 : !hw.typealias<@__AnFSMTypedecl::@_state1,!hw.enum<A, B>> }
-  }
-
-  // typedecl'd # 2
-  %reg_state2 = sv.reg : !hw.inout<!hw.typealias<@__AnFSMTypedecl::@_state2,!hw.enum<A, B>>>
-  %reg_read_state2 = sv.read_inout %reg_state2 : !hw.inout<!hw.typealias<@__AnFSMTypedecl::@_state2,!hw.enum<A, B>>>
-
-  %A_state2 = hw.enum.constant A : !hw.typealias<@__AnFSMTypedecl::@_state2,!hw.enum<A, B>>
-  %B_state2 = hw.enum.constant B : !hw.typealias<@__AnFSMTypedecl::@_state2,!hw.enum<A, B>>
-  sv.always posedge %clock {
-    sv.case case %reg_read_state2 : !hw.typealias<@__AnFSMTypedecl::@_state2,!hw.enum<A, B>>
-      case A : { sv.passign %reg_state2, %B_state2 : !hw.typealias<@__AnFSMTypedecl::@_state2,!hw.enum<A, B>> }
-      default : { sv.passign %reg_state2, %A_state2 : !hw.typealias<@__AnFSMTypedecl::@_state2,!hw.enum<A, B>> }
-  }
-}
-
 // Constants defined after use in non-procedural regions should be moved to the
 // top of the block.
 // CHECK-LABEL: module ConstantDefAfterUse
@@ -1696,6 +1614,16 @@ hw.module private @InlineReadInout() -> () {
   }
 }
 
+// CHECK-LABEL: module Dollar
+hw.module private @Dollar(%cond: i1) -> () {
+  sv.initial {
+    // CHECK:      _$a:
+    // CHECK-NEXT: a$:
+    sv.cover %cond, immediate label "$a"
+    sv.cover %cond, immediate label "a$"
+  }
+}
+
 // CHECK-LABEL: IndexPartSelectInoutArray
 hw.module @IndexPartSelectInoutArray(%a: !hw.array<2xi1>, %c: i1, %d: i1) {
   %c0_i2 = hw.constant 0 : i2
@@ -1706,6 +1634,16 @@ hw.module @IndexPartSelectInoutArray(%a: !hw.array<2xi1>, %c: i1, %d: i1) {
     sv.passign %1, %a : !hw.array<2xi1>
   }
   hw.output
+}
+
+hw.module @IndexPartSelect() -> (a : i3) {
+  // CHECK-LABEL: module IndexPartSelect(
+  // CHECK: wire [17:0] _GEN = 18'h3;
+  // CHECK-NEXT: assign a = _GEN[4'h3 +: 3];
+  %c3_i3 = hw.constant 3 : i4
+  %c3_i18 = hw.constant 3 : i18
+  %c = sv.indexed_part_select %c3_i18[%c3_i3 : 3] : i18,i4
+  hw.output %c : i3
 }
 
 // CHECK-LABEL: module ConditionalComments(
@@ -1722,6 +1660,27 @@ hw.module @ConditionalComments() {
   }                             // CHECK-NEXT: `endif // not def BAR
 }
 
+sv.macro.decl @RANDOM
+sv.macro.decl @PRINTF_COND_
+
+// CHECK-LABEL: module ForStatement
+hw.module @ForStatement(%a: i5) -> () {
+  %_RANDOM = sv.logic : !hw.inout<uarray<3xi32>>
+  sv.initial {
+    %c-2_i2 = hw.constant -2 : i2
+    %c1_i2 = hw.constant 1 : i2
+    %c-1_i2 = hw.constant -1 : i2
+    %c0_i2 = hw.constant 0 : i2
+    // CHECK:      for (logic [1:0] i = 2'h0; i < 2'h3; i += 2'h1) begin
+    // CHECK-NEXT:   _RANDOM[i] = `RANDOM;
+    // CHECK-NEXT: end
+    sv.for %i = %c0_i2 to %c-1_i2 step %c1_i2 : i2 {
+      %RANDOM = sv.macro.ref.se @RANDOM() : ()->i32
+      %index = sv.array_index_inout %_RANDOM[%i] : !hw.inout<uarray<3xi32>>, i2
+      sv.bpassign %index, %RANDOM : i32
+    }
+  }
+}
 
 // CHECK-LABEL: module intrinsic
 hw.module @intrinsic(%clk: i1) -> (io1: i1, io2: i1, io3: i1, io4: i5) {
@@ -1792,8 +1751,8 @@ hw.module @NastyPort(%.lots$of.dots: i1) -> (".more.dots": i1) {
 }
 sv.bind #hw.innerNameRef<@NastyPortParent::@foo>
 // CHECK-LABEL: bind NastyPortParent NastyPort foo (
-// CHECK-NEXT:    ._lots24of_dots (1'h0)
-// CHECK-NEXT:    ._more_dots     (_foo__more_dots)
+// CHECK-NEXT:    ._lots$of_dots (1'h0)
+// CHECK-NEXT:    ._more_dots     (/* unused */)
 // CHECK-NEXT:  );
 
 sv.bind #hw.innerNameRef<@InlineBind::@foo1>

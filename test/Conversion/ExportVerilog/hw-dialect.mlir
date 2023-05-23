@@ -1018,6 +1018,43 @@ hw.module @structExtractFromTemporary(%cond: i1, %a: !hw.struct<c: i1>, %b: !hw.
     hw.output %1 : i1
 }
 
+// CHECK-LABEL: module unionCreateNoPadding(
+// CHECK-NEXT:    input [1:0] in,
+// CHECK-NEXT:    output union packed { struct packed {logic a; logic [0:0] __post_padding_a;} a;logic [1:0] b;} out
+hw.module @unionCreateNoPadding(%in: i2) -> (out: !hw.union<a: i1, b: i2>) {
+  // CHECK: assign out = in + in;
+  %add = comb.add %in, %in : i2
+  %0 = hw.union_create "b", %add : !hw.union<a: i1, b: i2>
+  hw.output %0 : !hw.union<a: i1, b: i2>
+}
+
+// CHECK-LABEL: module unionCreatePadding(
+// CHECK-NEXT:    input in,
+// CHECK-NEXT:    output union packed { struct packed {logic a; logic [0:0] __post_padding_a;} a;logic [1:0] b;} out
+hw.module @unionCreatePadding(%in: i1) -> (out: !hw.union<a: i1, b: i2>) {
+  // CHECK: assign out = {in, 1'h0};
+  %0 = hw.union_create "a", %in : !hw.union<a: i1, b: i2>
+  hw.output %0 : !hw.union<a: i1, b: i2>
+}
+
+// CHECK-LABEL: module unionCreateZeroWidthElement(
+// CHECK-NEXT:    // input /*Zero Width*/ in,
+// CHECK-NEXT:    output union packed {/*a: Zero Width;*/ logic [1:0] b;} out
+hw.module @unionCreateZeroWidthElement(%in: i0) -> (out: !hw.union<a: i0, b: i2>) {
+  // CHECK: assign out = 2'h0;
+  %0 = hw.union_create "a", %in : !hw.union<a: i0, b: i2>
+  hw.output %0 : !hw.union<a: i0, b: i2>
+}
+
+// CHECK-LABEL: unionExtractFromTemporary
+hw.module @unionExtractFromTemporary(%cond: i1, %a: !hw.union<c: i1>, %b: !hw.union<c: i1>) -> (out: i1) {
+    %0 = comb.mux %cond, %a, %b : !hw.union<c: i1>
+    %1 = hw.union_extract %0["c"] : !hw.union<c: i1>
+    // CHECK: wire union packed {logic c;} _GEN = cond ? a : b;
+    // CHECK-NEXT: assign out = _GEN.c;
+    hw.output %1 : i1
+}
+
 // CHECK-LABEL: structExplodeLowering
 hw.module @structExplodeLowering(%a: !hw.struct<a: i1, b: i1>) -> (outA: i1, outB: i1) {
   // CHECK: assign outA = a.a;
@@ -1040,16 +1077,16 @@ hw.module @renameKeyword(%a: !hw.struct<repeat: i1, repeat_0: i1>) -> (r1: !hw.s
 // CHECK-NEXT:  inout  struct packed {logic repeat_0; logic repeat_0_0; } a,
 // CHECK-NEXT:  output                                                    r1,
 // CHECK-NEXT:                                                            r2,
-// CHECK-NEXT:  output struct packed {logic repeat_0; logic repeat_0_0; } r3
+// CHECK-NEXT:  output struct packed {logic repeat_0; logic repeat_0_0; } r3, 
+// CHECK-NEXT:                                                            r4
 // CHECK-NEXT:  );
-hw.module @useRenamedStruct(%a: !hw.inout<struct<repeat: i1, repeat_0: i1>>) -> (r1: i1, r2: i1, r3: !hw.struct<repeat: i1, repeat_0: i1>) {
-  // CHECK: wire struct packed {logic repeat_0; logic repeat_0_0; } _inst1_r1;
+hw.module @useRenamedStruct(%a: !hw.inout<struct<repeat: i1, repeat_0: i1>>) -> (r1: i1, r2: i1, r3: !hw.struct<repeat: i1, repeat_0: i1>, r4: !hw.struct<repeat: i1, repeat_0: i1>) {
   %read = sv.read_inout %a : !hw.inout<struct<repeat: i1, repeat_0: i1>>
 
   %i0 = hw.instance "inst1" @renameKeyword(a: %read: !hw.struct<repeat: i1, repeat_0: i1>) -> (r1: !hw.struct<repeat: i1, repeat_0: i1>)
   // CHECK:      renameKeyword inst1 (
   // CHECK-NEXT:   .a  (a),
-  // CHECK-NEXT:   .r1 (_inst1_r1)
+  // CHECK-NEXT:   .r1 (r4)
   // CHECK-NEXT: )
 
   %0 = sv.struct_field_inout %a["repeat"] : !hw.inout<struct<repeat: i1, repeat_0: i1>>
@@ -1060,7 +1097,7 @@ hw.module @useRenamedStruct(%a: !hw.inout<struct<repeat: i1, repeat_0: i1>>) -> 
   %true = hw.constant true
   %3 = hw.struct_inject %read["repeat_0"], %true : !hw.struct<repeat: i1, repeat_0: i1>
   // assign r3 = '{repeat_0: a.repeat_0, repeat_0_0: (1'h1)};
-  hw.output %1, %2, %3 : i1, i1, !hw.struct<repeat: i1, repeat_0: i1>
+  hw.output %1, %2, %3, %i0 : i1, i1, !hw.struct<repeat: i1, repeat_0: i1>, !hw.struct<repeat: i1, repeat_0: i1>
 }
 
 
@@ -1283,20 +1320,21 @@ hw.module @parameterizedArrays<param: i32, N: i32>
 // CHECK-LABEL: module UseParameterizedArrays(
 // CHECK-NEXT: input [41:0][11:0] a,
 // CHECK-NEXT: input [23:0][11:0] b
+// CHECK-NEXT: output [23:0][11:0] c
 // CHECK-NEXT: );
-hw.module @UseParameterizedArrays(%a: !hw.array<42xint<12>>, %b: !hw.array<24xint<12>>) {
-// CHECK:  wire [23:0][11:0] _inst_c;
+hw.module @UseParameterizedArrays(%a: !hw.array<42xint<12>>, %b: !hw.array<24xint<12>>) -> (c: !hw.array<24xint<12>>) {
 // CHECK:  parameterizedArrays #(
 // CHECK-NEXT:    .param(12),
 // CHECK-NEXT:    .N(24)
 // CHECK-NEXT:  ) inst (
 // CHECK-NEXT:    .a (a),
 // CHECK-NEXT:    .b (b),
-// CHECK-NEXT:    .c (_inst_c)
+// CHECK-NEXT:    .c (c)
 // CHECK-NEXT:  );
 // CHECK-NEXT: endmodule
   %c = hw.instance "inst" @parameterizedArrays<param: i32 = 12, N: i32 = 24>
     (a: %a : !hw.array<42xint<12>>, b: %b : !hw.array<24xint<12>>) -> (c: !hw.array<24xint<12>>) {}
+  hw.output %c: !hw.array<24xint<12>>
 }
 
 // CHECK-LABEL: module NoneTypeParam
@@ -1328,12 +1366,20 @@ hw.module @ParamsParensPrecedence<param: i32>() -> (a:i32, b:i32, c:i32) {
 }
 
 // CHECK-LABEL: module ArrayGetInline
-hw.module @ArrayGetInline(%a: !hw.array<4xstruct<a: i32>>) -> (out: i32) {
+hw.module @ArrayGetInline(%a: !hw.array<4xstruct<a: i32>>, %b: !hw.array<4xi1>, %idx: i2, %idx_port: !hw.inout<i2>)
+                          -> (out: i32, out2: i1, out3: i1, out4: i1, out5: i1) {
   %c0_i2 = hw.constant 0 : i2
   %x = hw.array_get %a[%c0_i2] : !hw.array<4xstruct<a: i32>>, i2
   %y = hw.struct_extract %x["a"] : !hw.struct<a: i32>
-  // CHECK: assign out = a[2'h0].a;
-  hw.output %y : i32
+  // CHECK:      assign out = a[2'h0].a;
+  // CHECK-NEXT: assign out2 = b[idx];
+  // CHECK-NEXT: assign out3 = b[idx];
+  // CHECK-NEXT: assign out4 = b[idx_port];
+  // CHECK-NEXT: assign out5 = b[idx_port];
+  %array_get_idx = hw.array_get %b[%idx] : !hw.array<4xi1>, i2
+  %read = sv.read_inout %idx_port : !hw.inout<i2>
+  %array_get_idx_port = hw.array_get %b[%read] : !hw.array<4xi1>, i2
+  hw.output %y, %array_get_idx, %array_get_idx, %array_get_idx_port, %array_get_idx_port : i32, i1, i1, i1, i1
 }
 
 // CHECK-LABEL: module UniformArrayCreate
@@ -1379,4 +1425,36 @@ hw.module @inline_bitcast_in_concat(%in1: i7, %in2: !hw.array<8xi4>) -> (out: i3
 hw.module @DontInlineAggregateConstantIntoPorts() -> () {
   %0 = hw.aggregate_constant [0 : i4, 1 : i4] : !hw.array<2xi4>
   hw.instance "i0" @Array(a: %0: !hw.array<2xi4>) -> ()
+}
+
+// CHECK-LABEL: module FooA(
+// CHECK-NEXT:    input union packed {logic [15:0] a; struct packed {logic [9:0] b; logic [5:0] __post_padding_b;} b;} test
+// CHECK-NEXT:    output [15:0] a,
+// CHECK-NEXT:    output [9:0] b
+// CHECK-NEXT:  );
+// CHECK-EMPTY:
+// CHECK-NEXT:    assign a = test.a;
+// CHECK-NEXT:    assign b = test.b.b;
+// CHECK-NEXT:  endmodule
+!unionA = !hw.union<a: i16, b: i10>
+hw.module @FooA(%test: !unionA) -> (a: i16, b: i10) {
+  %0 = hw.union_extract %test["a"] : !unionA
+  %1 = hw.union_extract %test["b"] : !unionA
+  hw.output %0, %1 : i16, i10
+}
+
+// CHECK-LABEL: module FooB(
+// CHECK-NEXT:    input union packed {logic [15:0] a; struct packed {logic [1:0] __pre_padding_b; logic [13:0] b;} b;} test,
+// CHECK-NEXT:    output [15:0] a,
+// CHECK-NEXT:    output [13:0] b
+// CHECK-NEXT:  );
+// CHECK-EMPTY:
+// CHECK-NEXT:    assign a = test.a;
+// CHECK-NEXT:    assign b = test.b.b;
+// CHECK-NEXT:  endmodule
+!unionB = !hw.union<a: i16, b: i14 offset 2>
+hw.module @FooB(%test: !unionB) -> (a: i16, b: i14) {
+  %0 = hw.union_extract %test["a"] : !unionB
+  %1 = hw.union_extract %test["b"] : !unionB
+  hw.output %0, %1 : i16, i14
 }

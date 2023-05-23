@@ -14,9 +14,10 @@
 #ifndef CIRCT_INITALLDIALECTS_H_
 #define CIRCT_INITALLDIALECTS_H_
 
-#include "circt/Dialect/Arc/Dialect.h"
+#include "circt/Dialect/Arc/ArcDialect.h"
 #include "circt/Dialect/Calyx/CalyxDialect.h"
 #include "circt/Dialect/Comb/CombDialect.h"
+#include "circt/Dialect/DC/DCDialect.h"
 #include "circt/Dialect/ESI/ESIDialect.h"
 #include "circt/Dialect/FIRRTL/CHIRRTLDialect.h"
 #include "circt/Dialect/FIRRTL/FIRRTLDialect.h"
@@ -27,8 +28,10 @@
 #include "circt/Dialect/Handshake/HandshakeDialect.h"
 #include "circt/Dialect/Interop/InteropDialect.h"
 #include "circt/Dialect/LLHD/IR/LLHDDialect.h"
+#include "circt/Dialect/LoopSchedule/LoopScheduleDialect.h"
 #include "circt/Dialect/MSFT/MSFTDialect.h"
 #include "circt/Dialect/Moore/MooreDialect.h"
+#include "circt/Dialect/OM/OMDialect.h"
 #include "circt/Dialect/Pipeline/Pipeline.h"
 #include "circt/Dialect/SSP/SSPDialect.h"
 #include "circt/Dialect/STG/STG.h"
@@ -47,17 +50,20 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
     calyx::CalyxDialect,
     chirrtl::CHIRRTLDialect,
     comb::CombDialect,
+    dc::DCDialect,
     esi::ESIDialect,
     firrtl::FIRRTLDialect,
     fsm::FSMDialect,
     handshake::HandshakeDialect,
     interop::InteropDialect,
     llhd::LLHDDialect,
+    loopschedule::LoopScheduleDialect,
     msft::MSFTDialect,
     moore::MooreDialect,
     hw::HWDialect,
     seq::SeqDialect,
     ssp::SSPDialect,
+    om::OMDialect,
     pipeline::PipelineDialect,
     stg::STGDialect,
     sv::SVDialect,

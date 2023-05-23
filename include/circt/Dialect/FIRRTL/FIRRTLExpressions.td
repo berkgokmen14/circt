@@ -24,11 +24,6 @@ def SameOperandsIntTypeKind : NativeOpTrait<"SameOperandsIntTypeKind"> {
   let cppNamespace = "::circt::firrtl";
 }
 
-class IndexConstraint<string value, string resultValue>
-  : TypesMatchWith<"type should be element of vector type",
-                   value, resultValue,
-                   "firrtl::getVectorElementType($_self)">;
-
 // A common base class for operations that implement type inference and parsed
 // argument validation.
 class FIRRTLExprOp<string mnemonic, list<Trait> traits = []> :
@@ -71,10 +66,11 @@ class FIRRTLExprOp<string mnemonic, list<Trait> traits = []> :
                                           std::optional<Location> loc,
                                           ValueRange operands,
                                           DictionaryAttr attrs,
+                                          mlir::OpaqueProperties properties,
                                           mlir::RegionRange regions,
                                           SmallVectorImpl<Type> &results) {
-      return impl::inferReturnTypes(context, loc, operands, attrs, regions,
-        results, &inferReturnType);
+      return impl::inferReturnTypes(context, loc, operands, attrs, properties,
+        regions, results, &inferReturnType);
     }
 
     /// Check that the parser has consumed the correct number of operands and
@@ -145,6 +141,10 @@ def AggregateConstantOp : FIRRTLOp<"aggregateconstant", [Pure, ConstantLike]> {
     ```
   }];
 
+  let extraClassDeclaration = [{
+    Attribute getAttributeFromFieldID(uint64_t fieldID);
+  }];
+
   let arguments = (ins ArrayAttr:$fields);
   let results = (outs AggregateType:$result);
 
@@ -191,6 +191,43 @@ def VectorCreateOp : FIRRTLOp<"vectorcreate"> {
   let hasFolder = 1;
 }
 
+def FEnumCreateOp : FIRRTLOp<"enumcreate"> {
+  let summary = "Produce a enum value";
+  let description = [{
+    Create an enum from tag and value.
+    ```mlir
+      %result = firrtl.enumcreate field-name(%input) : !firrtl.enum<None: uint<0>, Some: uint<8>>
+
+    ```
+  }];
+
+  let arguments = (ins I32Attr:$fieldIndex, FIRRTLBaseType:$input);
+  let results = (outs FEnumType:$result);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+
+  let builders = [
+    OpBuilder<(ins "FEnumType":$resultType, "StringRef":$fieldName, "Value":$input), [{
+      auto fieldIndex = resultType.getElementIndex(fieldName);
+      assert(fieldIndex.has_value() && "invalid type constructor");
+      return build($_builder, $_state, resultType, (uint32_t)*fieldIndex, input);
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    /// Return the name attribute of the accessed field.
+    StringAttr getFieldNameAttr() {
+      return getResult().getType().getElementNameAttr(getFieldIndex());
+    }
+
+    /// Return the name of the accessed field.
+    StringRef getFieldName() {
+      return getFieldNameAttr().getValue();
+    }
+  }];
+}
+
 
 def InvalidValueOp : FIRRTLOp<"invalidvalue",
       [MemoryEffects<[MemAlloc]>, HasCustomSSAName]> {
@@ -208,30 +245,29 @@ def InvalidValueOp : FIRRTLOp<"invalidvalue",
 
   let arguments = (ins);
   let results = (outs FIRRTLBaseType:$result);
+  let hasCanonicalizeMethod = 1;
 
   let assemblyFormat = "attr-dict `:` qualified(type($result))";
 }
 
-def SubfieldOp : FIRRTLExprOp<"subfield"> {
+class BaseSubfieldOp<string name, Type btype, Type rtype> : FIRRTLExprOp<name> {
   let summary = "Extract a subfield of another value";
   let description = [{
     The subfield expression refers to a subelement of an expression with a
     bundle type.
     ```
-      %result = firrtl.subfield %input[field-name] : !input-type
+      %result = firrtl.}] # name # [{ %input[field-name] : !input-type
     ```
     }];
 
-  let arguments = (ins BundleType:$input, I32Attr:$fieldIndex);
-  let results = (outs FIRRTLBaseType:$result);
-  let hasFolder = 1;
-  let hasCanonicalizer = 1;
+  let arguments = (ins btype:$input, I32Attr:$fieldIndex);
+  let results = (outs rtype:$result);
   let hasVerifier = 1;
   let hasCustomAssemblyFormat = 1;
 
   let builders = [
     OpBuilder<(ins "Value":$input, "StringRef":$fieldName), [{
-      auto bundleType = input.getType().cast<BundleType>();
+      auto bundleType = input.getType().cast<}] # btype # [{>();
       auto fieldIndex = bundleType.getElementIndex(fieldName);
       assert(fieldIndex.has_value() && "subfield operation to unknown field");
       return build($_builder, $_state, input, *fieldIndex);
@@ -239,26 +275,31 @@ def SubfieldOp : FIRRTLExprOp<"subfield"> {
   ];
 
   let firrtlExtraClassDeclaration = [{
+    using InputType = }] # btype # [{;
+
     /// Return true if the specified field is flipped.
     bool isFieldFlipped();
 
     /// Return a `FieldRef` to the accessed field.
     FieldRef getAccessedField() {
-      return FieldRef(getInput(), getInput().getType().cast<BundleType>()
+      return FieldRef(getInput(), getInput().getType()
                                             .getFieldID(getFieldIndex()));
     }
 
     /// Return the name of the accessed field.
     StringRef getFieldName() {
-      return getInput().getType().cast<BundleType>()
-        .getElementName(getFieldIndex());
+      return getInput().getType().getElementName(getFieldIndex());
     }
   }];
 }
 
-def SubindexOp : FIRRTLExprOp<"subindex", [
-    IndexConstraint<"input", "result">
-  ]> {
+def SubfieldOp : BaseSubfieldOp<"subfield", BundleType, FIRRTLBaseType> {
+  let hasFolder = 1;
+  let hasCanonicalizer = 1;
+}
+def OpenSubfieldOp : BaseSubfieldOp<"opensubfield", OpenBundleType, FIRRTLType>;
+
+def SubindexOp : FIRRTLExprOp<"subindex"> {
   let summary = "Extract an element of a vector value";
   let description = [{
     The subindex expression statically refers, by index, to a subelement
@@ -286,9 +327,33 @@ def SubindexOp : FIRRTLExprOp<"subindex", [
   }];
 }
 
-def SubaccessOp : FIRRTLExprOp<"subaccess", [
-    IndexConstraint<"input", "result">
-  ]> {
+def OpenSubindexOp : FIRRTLExprOp<"opensubindex"> {
+  let summary = "Extract an element of a vector value";
+  let description = [{
+    The subindex expression statically refers, by index, to a subelement
+    of an expression with a vector type. The index must be a non-negative
+    integer and cannot be equal to or exceed the length of the vector it
+    indexes.
+    ```
+      %result = firrtl.opensubindex %input[index] : t1
+    ```
+    }];
+
+  let arguments = (ins OpenVectorType:$input, I32Attr:$index);
+  let results = (outs FIRRTLType:$result);
+
+  let assemblyFormat =
+     "$input `[` $index `]` attr-dict `:` qualified(type($input))";
+
+  let firrtlExtraClassDeclaration = [{
+    /// Return a `FieldRef` to the accessed field.
+    FieldRef getAccessedField() {
+      return FieldRef(getInput(), getInput().getType().getFieldID(getIndex()));
+    }
+  }];
+}
+
+def SubaccessOp : FIRRTLExprOp<"subaccess"> {
   let summary = "Extract a dynamic element of a vector value";
   let description = [{
     The subaccess expression dynamically refers to a subelement of a
@@ -306,6 +371,110 @@ def SubaccessOp : FIRRTLExprOp<"subaccess", [
      "$input `[` $index `]` attr-dict `:` qualified(type($input)) `,` qualified(type($index))";
 
   let hasCanonicalizer = true;
+}
+
+def IsTagOp : FIRRTLExprOp<"istag"> {
+  let summary = "Test the active variant of an enumeration";
+  let description = [{
+    This operation is used to test the active variant of an enumeration. The
+    tag tested for must be one of the possible variants of the input type.  If
+    the tag is the currently active variant the result will be 1, otherwise the
+    result will be 0.
+
+    Example:
+    ```mlir
+      %0 = firrtl.istag A %v : !firrtl.enum<A: UInt<0>, B: UInt<0>>
+    ```
+  }];
+  let arguments = (ins FEnumType:$input, I32Attr:$fieldIndex);
+  let results = (outs UInt1Type:$result);
+  let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
+  let builders = [
+    OpBuilder<(ins "Value":$input, "StringRef":$fieldName), [{
+      auto enumType = input.getType().cast<FEnumType>();
+      auto fieldIndex = enumType.getElementIndex(fieldName);
+      assert(fieldIndex.has_value() && "subtag operation to unknown field");
+      return build($_builder, $_state, input, *fieldIndex);
+    }]>
+  ];
+
+  let firrtlExtraClassDeclaration = [{
+    /// Return a `FieldRef` to the accessed field.
+    FieldRef getAccessedField() {
+      return FieldRef(getInput(), getInput().getType().cast<FEnumType>()
+                                            .getFieldID(getFieldIndex()));
+    }
+
+    /// Return the name of the accessed field.
+    StringAttr getFieldNameAttr() {
+      return getInput().getType().cast<FEnumType>()
+        .getElementNameAttr(getFieldIndex());
+    }
+
+    /// Return the name of the accessed field.
+    StringRef getFieldName() {
+      return getFieldNameAttr().getValue();
+    }
+  }];
+}
+
+def SubtagOp : FIRRTLExprOp<"subtag"> {
+  let summary = "Extract an element of a enum value";
+  let description = [{
+    The subtag expression refers to a subelement of a
+    enum-typed expression.
+    ```
+      %result = firrtl.subtag %input[field-name] : !input-type
+    ```
+    }];
+
+  let arguments = (ins FEnumType:$input, I32Attr:$fieldIndex);
+  let results = (outs FIRRTLBaseType:$result);
+  let hasVerifier = 1;
+  let hasCustomAssemblyFormat = 1;
+
+  let builders = [
+    OpBuilder<(ins "Value":$input, "StringRef":$fieldName), [{
+      auto enumType = input.getType().cast<FEnumType>();
+      auto fieldIndex = enumType.getElementIndex(fieldName);
+      assert(fieldIndex.has_value() && "subtag operation to unknown field");
+      return build($_builder, $_state, input, *fieldIndex);
+    }]>
+  ];
+
+  let firrtlExtraClassDeclaration = [{
+    /// Return a `FieldRef` to the accessed field.
+    FieldRef getAccessedField() {
+      return FieldRef(getInput(), getInput().getType()
+                                            .getFieldID(getFieldIndex()));
+    }
+
+    /// Return the name of the accessed field.
+    StringAttr getFieldNameAttr() {
+      return getInput().getType().getElementNameAttr(getFieldIndex());
+    }
+
+    /// Return the name of the accessed field.
+    StringRef getFieldName() {
+      return getFieldNameAttr().getValue();
+    }
+  }];
+}
+
+def TagExtractOp : FIRRTLExprOp<"tagextract", [InferTypeOpInterface]> {
+  let summary = "Extract the tag from a value";
+  let description = [{
+    The tagextract expression returns the binary value of the current tag of an
+    enum value.
+    ```
+      %result = firrtl.tagextract %input : !input-type
+    ```
+    }];
+
+  let arguments = (ins FEnumType:$input);
+  let results = (outs UIntType:$result);
+  let assemblyFormat = "$input attr-dict `:` qualified(type($input))";
 }
 
 def MultibitMuxOp : FIRRTLExprOp<"multibit_mux"> {
@@ -411,6 +580,18 @@ let inferType = "impl::inferBitwiseResult" in {
   }
 }
 
+// Element-wise and/or/xor operations whose result and operands are 1d vectors with
+// a same type. Apply bitwise operation to each element.
+let inferType = "impl::inferElementwiseResult" in
+let hasFolder = 0 in {
+  def ElementwiseAndPrimOp : BinaryPrimOp<"elementwise_and", 1DVecIntType,
+                                1DVecIntType, 1DVecUIntType, [Commutative]>;
+  def ElementwiseOrPrimOp  : BinaryPrimOp<"elementwise_or", 1DVecIntType,
+                                1DVecIntType, 1DVecUIntType, [Commutative]>;
+  def ElementwiseXorPrimOp : BinaryPrimOp<"elementwise_xor", 1DVecUIntType,
+                                1DVecIntType, 1DVecUIntType, [Commutative]>;
+}
+
 // Comparison Operations
 let inferType = "impl::inferComparisonResult" in {
   let hasCanonicalizer = true in {
@@ -464,7 +645,7 @@ class UnaryPrimOp<string mnemonic, Type srcType, Type resultType,
   code inferType = "";
   let inferTypeDecl = !if(!empty(inferType), [{
     /// Infer the return type of this unary operation.
-    static FIRRTLType inferUnaryReturnType(FIRRTLType arg,
+    static FIRRTLType inferUnaryReturnType(FIRRTLType input,
                                            std::optional<Location> loc);
     }], "") # !subst("$_infer", !if(!empty(inferType), "inferUnaryReturnType",
       inferType), [{
@@ -488,6 +669,7 @@ def AsAsyncResetPrimOp
 def AsClockPrimOp : UnaryPrimOp<"asClock", OneBitCastableType, ClockType>;
 def CvtPrimOp : UnaryPrimOp<"cvt", IntType, SIntType>;
 def NegPrimOp : UnaryPrimOp<"neg", IntType, SIntType>;
+let hasCanonicalizer = true in
 def NotPrimOp : UnaryPrimOp<"not", IntType, UIntType>;
 
 let inferType = "impl::inferReductionResult" in {
@@ -547,7 +729,8 @@ def HeadPrimOp : PrimOp<"head"> {
 }
 
 def MuxPrimOp : PrimOp<"mux"> {
-  let arguments = (ins UInt1Type:$sel, PassiveType:$high, PassiveType:$low);
+  let arguments = (ins UInt1OrUnsizedType:$sel, PassiveType:$high,
+                       PassiveType:$low);
   let results = (outs PassiveType:$result);
 
   let assemblyFormat =
@@ -621,7 +804,8 @@ def TailPrimOp : PrimOp<"tail"> {
 // Verif and SV specific
 //===----------------------------------------------------------------------===//
 
-def IsXIntrinsicOp : FIRRTLExprOp<"int.isX"> {
+def IsXIntrinsicOp : FIRRTLOp<"int.isX",
+    [HasCustomSSAName, Pure]> {
   let summary = "Test for 'x";
   let description = [{
     The `int.isX` expression checks that the operand is not a verilog literal
@@ -631,25 +815,26 @@ def IsXIntrinsicOp : FIRRTLExprOp<"int.isX"> {
     }];
 
   let arguments = (ins FIRRTLBaseType:$arg);
-  let results = (outs UInt1Type:$result);
+  let results = (outs NonConstUInt1Type:$result);
   let hasFolder = 1;
   let assemblyFormat = "$arg attr-dict `:` type($arg)";
 }
 
-def PlusArgsTestIntrinsicOp : FIRRTLExprOp<"int.plusargs.test"> {
+def PlusArgsTestIntrinsicOp : FIRRTLOp<"int.plusargs.test",
+    [HasCustomSSAName, Pure]> {
   let summary = "SystemVerilog `$test$plusargs` call";
 
   let arguments = (ins StrAttr:$formatString);
-  let results = (outs UInt1Type:$found);
+  let results = (outs NonConstUInt1Type:$found);
   let assemblyFormat = "$formatString attr-dict";
 }
 
-def PlusArgsValueIntrinsicOp
-: FIRRTLOp<"int.plusargs.value", [HasCustomSSAName, Pure]> {
+def PlusArgsValueIntrinsicOp : FIRRTLOp<"int.plusargs.value",
+    [HasCustomSSAName, Pure]> {
   let summary = "SystemVerilog `$value$plusargs` call";
 
   let arguments = (ins StrAttr:$formatString);
-  let results = (outs UInt1Type:$found, AnyType:$result);
+  let results = (outs NonConstUInt1Type:$found, AnyType:$result);
   let assemblyFormat = "$formatString attr-dict `:` type($result)";
 }
 
@@ -725,6 +910,55 @@ def VerbatimWireOp : FIRRTLOp<"verbatim.wire",
 }
 
 //===----------------------------------------------------------------------===//
+// Special inference Operations
+//===----------------------------------------------------------------------===//
+
+// This assumes operands are ground types without explicitly checking
+class SameGroundTypeOperandConstness<string a, string b> 
+  : PredOpTrait<
+      "operand constness must match",
+      CPred<"isConst($" # a # ".getType()) == isConst($" # b # ".getType())">>;
+
+def UninferredResetCastOp : FIRRTLOp<"resetCast", [HasCustomSSAName, Pure, SameGroundTypeOperandConstness<"input", "result">]> {
+  let description = [{
+    Cast between reset types.  This is used to enable strictconnects early in
+    the pipeline by isolating all uninferred reset connections to a single op.
+  }];
+  let arguments = (ins AnyResetType:$input);
+  let results = (outs AnyResetType:$result);
+  let hasFolder = 1;
+  let assemblyFormat =
+    "$input attr-dict `:` functional-type($input, $result)";
+}
+
+def UninferredWidthCastOp : FIRRTLOp<"widthCast", [HasCustomSSAName, Pure, SameGroundTypeOperandConstness<"input", "result">]> {
+  let description = [{
+    Cast between sized and unsized integer types.  This is used to enable
+    strictconnects early in the pipeline by isolating all uninferred width
+    connections to a single op.
+  }];
+  let arguments = (ins IntType:$input);
+  let results = (outs IntType:$result);
+  let hasFolder = 1;
+  let assemblyFormat =
+    "$input attr-dict `:` functional-type($input, $result)";
+}
+
+def ConstCastOp : FIRRTLOp<"constCast", [HasCustomSSAName, Pure]> {
+  let description = [{
+    Cast from a 'const' to a non-'const' type.
+    ```
+    %result = firrtl.constCast %in : (!firrtl.const.t1) -> !firrtl.t1
+    ```
+  }];
+  let arguments = (ins PassiveType:$input);
+  let results = (outs PassiveType:$result);
+  let hasVerifier = 1;
+  let assemblyFormat =
+    "$input attr-dict `:` functional-type($input, $result)";
+}
+
+//===----------------------------------------------------------------------===//
 // Conversions to/from fixed-width signless integer types in standard dialect.
 //===----------------------------------------------------------------------===//
 
@@ -777,20 +1011,6 @@ def BitCastOp: FIRRTLOp<"bitcast", [Pure]> {
 //===----------------------------------------------------------------------===//
 
 //===----------------------------------------------------------------------===//
-// Constraints on RefOps
-//===----------------------------------------------------------------------===//
-
-class RefTypeConstraint<string ref, string base>
-  : TypesMatchWith<"reference base type should match",
-                   ref, base,
-                   "$_self.cast<RefType>().getType()">;
-
-class RefResultTypeConstraint<string base, string ref>
-  : TypesMatchWith<"reference base type should match",
-                   base, ref,
-                   "RefType::get($_self.cast<FIRRTLBaseType>())">;
-
-//===----------------------------------------------------------------------===//
 // RefOps
 //===----------------------------------------------------------------------===//
 
@@ -806,8 +1026,9 @@ def RefResolveOp: FIRRTLExprOp<"ref.resolve",
   let arguments = (ins RefType:$ref);
   let results = (outs FIRRTLBaseType:$result);
 
-  let assemblyFormat = "$ref attr-dict `:` qualified(type($ref))";
   let hasCanonicalizer = true;
+
+  let assemblyFormat = "$ref attr-dict `:` qualified(type($ref))";
 }
 
 def RefSendOp: FIRRTLExprOp<"ref.send", [RefResultTypeConstraint<"base", "result">]> {
@@ -840,7 +1061,6 @@ def RefSubOp : FIRRTLExprOp<"ref.sub"> {
 
   let assemblyFormat =
      "$input `[` $index `]` attr-dict `:` qualified(type($input))";
-  let hasCanonicalizer = true;
 }
 
 #endif // CIRCT_DIALECT_FIRRTL_FIRRTLEXPRESSIONS_TD

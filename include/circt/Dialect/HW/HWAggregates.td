@@ -211,7 +211,10 @@ def StructExtractOp : HWOp<"struct_extract",
 
   let builders = [
     OpBuilder<(ins "Value":$input, "StructType::FieldInfo":$field)>,
-    OpBuilder<(ins "Value":$input, "StringAttr":$field)>
+    OpBuilder<(ins "Value":$input, "StringAttr":$field)>,
+    OpBuilder<(ins "Value":$input, "StringRef":$field), [{
+      build(odsBuilder, odsState, input, odsBuilder.getStringAttr(field));
+    }]>
   ];
 
   let hasFolder = 1;
@@ -279,7 +282,9 @@ def UnionCreateOp : HWOp<"union_create", [Pure]> {
   let hasCustomAssemblyFormat = 1;
 }
 
-def UnionExtractOp : HWOp<"union_extract", [Pure]> {
+def UnionExtractOp : HWOp<"union_extract", [Pure, 
+    DeclareOpInterfaceMethods<InferTypeOpInterface, ["inferReturnTypes"]>,
+  ]> {
   let summary = "Get a union member.";
   let description = [{
     Get the value of a union, interpreting it as the type of the specified

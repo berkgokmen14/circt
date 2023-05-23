@@ -38,7 +38,8 @@ def WireOp : SVOp<"wire", [NonProceduralOp,
   ];
 
   let assemblyFormat = [{
-    (`sym` $inner_sym^)? `` custom<SVImplicitSSAName>(attr-dict) `:` qualified(type($result))
+    (`sym` $inner_sym^)? `` custom<ImplicitSSAName>($name) attr-dict
+    `:` qualified(type($result))
   }];
   let hasCanonicalizeMethod = true;
 
@@ -68,8 +69,8 @@ def RegOp : SVOp<"reg", [
 
   // We handle the name in a custom way, so we use a customer parser/printer.
   let assemblyFormat = [{
-    (`sym` $inner_sym^)? `` custom<SVImplicitSSAName>(attr-dict)
-     `:` qualified(type($result))
+    (`sym` $inner_sym^)? `` custom<ImplicitSSAName>($name) attr-dict
+    `:` qualified(type($result))
   }];
   let hasCanonicalizeMethod = true;
 
@@ -177,6 +178,7 @@ def IndexedPartSelectInOutOp : SVOp<"indexed_part_select_inout",
                                           std::optional<Location> loc,
                                           ValueRange operands,
                                           DictionaryAttr attrs,
+                                          mlir::OpaqueProperties properties,
                                           mlir::RegionRange regions,
                                           SmallVectorImpl<Type> &results);
   }];
@@ -207,6 +209,7 @@ def StructFieldInOutOp : SVOp<"struct_field_inout",
                                           std::optional<Location> loc,
                                           ValueRange operands,
                                           DictionaryAttr attrs,
+                                          mlir::OpaqueProperties properties,
                                           mlir::RegionRange regions,
                                           SmallVectorImpl<Type> &results);
   }];
@@ -236,8 +239,8 @@ def LogicOp : SVOp<"logic", [DeclareOpInterfaceMethods<OpAsmOpInterface,
   ];
 
   let assemblyFormat = [{
-    (`sym` $inner_sym^)? `` custom<SVImplicitSSAName>(attr-dict) `:`
-                                                qualified(type($result))
+    (`sym` $inner_sym^)? `` custom<ImplicitSSAName>($name) attr-dict
+    `:` qualified(type($result))
   }];
 
   let extraClassDeclaration = [{

@@ -28,6 +28,7 @@ constexpr const char *rawAnnotations = "rawAnnotations";
 // Annotation Class Names
 //===----------------------------------------------------------------------===//
 
+constexpr const char *conventionAnnoClass = "circt.ConventionAnnotation";
 constexpr const char *dontTouchAnnoClass =
     "firrtl.transforms.DontTouchAnnotation";
 constexpr const char *enumComponentAnnoClass =
@@ -91,6 +92,8 @@ constexpr const char *metadataDirectoryAttrName =
 constexpr const char *noDedupAnnoClass = "firrtl.transforms.NoDedupAnnotation";
 constexpr const char *dftTestModeEnableAnnoClass =
     "sifive.enterprise.firrtl.DFTTestModeEnableAnnotation";
+constexpr const char *dftClockDividerBypassAnnoClass =
+    "sifive.enterprise.firrtl.DFTClockDividerBypassAnnotation";
 
 // Grand Central Annotations
 constexpr const char *serializedViewAnnoClass =
@@ -208,6 +211,9 @@ constexpr const char *wiringSinkAnnoClass =
     "firrtl.passes.wiring.SinkAnnotation";
 constexpr const char *wiringSourceAnnoClass =
     "firrtl.passes.wiring.SourceAnnotation";
+
+// Attribute annotations.
+constexpr const char *attributeAnnoClass = "firrtl.AttributeAnnotation";
 
 } // namespace firrtl
 } // namespace circt

@@ -12,7 +12,7 @@
 
 #include "circt/Analysis/SchedulingAnalysis.h"
 #include "circt/Analysis/DependenceAnalysis.h"
-#include "circt/Dialect/Pipeline/Pipeline.h"
+#include "circt/Dialect/LoopSchedule/LoopScheduleOps.h"
 #include "circt/Dialect/SSP/SSPInterfaces.h"
 #include "circt/Dialect/STG/STG.h"
 #include "circt/Scheduling/Problems.h"
@@ -27,6 +27,7 @@
 
 using namespace mlir;
 using namespace circt::stg;
+using namespace mlir::affine;
 
 /// CyclicSchedulingAnalysis constructs a CyclicProblem for each AffineForOp by
 /// performing a memory dependence analysis and inserting dependences into the
@@ -39,9 +40,7 @@ circt::analysis::CyclicSchedulingAnalysis::CyclicSchedulingAnalysis(
   MemoryDependenceAnalysis &memoryAnalysis =
       am.getAnalysis<MemoryDependenceAnalysis>();
 
-  funcOp->walk([&](AffineForOp forOp) {
-    analyzeForOp(forOp, memoryAnalysis);
-  });
+  funcOp->walk([&](AffineForOp forOp) { analyzeForOp(forOp, memoryAnalysis); });
 }
 
 void circt::analysis::CyclicSchedulingAnalysis::analyzeForOp(
@@ -62,7 +61,7 @@ void circt::analysis::CyclicSchedulingAnalysis::analyzeForOp(
       // Don't insert a dependence into the problem if there is no dependence.
       if (!hasDependence(memoryDep.dependenceType))
         continue;
-      
+
       memoryDep.source->dump();
       // Insert a dependence into the problem.
       Problem::Dependence dep(memoryDep.source, op);
@@ -119,8 +118,8 @@ void circt::analysis::CyclicSchedulingAnalysis::analyzeForOp(
   // terminator to ensure the problem schedules them before the terminator.
   auto *anchor = forOp.getBody()->getTerminator();
   forOp.getBody()->walk([&](Operation *op) {
-    if (!isa<mlir::AffineStoreOp, memref::StoreOp,
-        ssp::StoreInterface, ssp::LoadInterface>(op))
+    if (!isa<AffineStoreOp, memref::StoreOp, ssp::StoreInterface,
+             ssp::LoadInterface>(op))
       return;
     Problem::Dependence dep(op, anchor);
     auto depInserted = problem.insertDependence(dep);
@@ -162,12 +161,13 @@ circt::analysis::CyclicSchedulingAnalysis::getProblem(AffineForOp forOp) {
   return problem->second;
 }
 
-/// SharedOperatorsSchedulingAnalysis constructs a SharedOperatorsProblem for each AffineForOp by
-/// performing a memory dependence analysis and inserting dependences into the
-/// problem. The client should retrieve the partially complete problem to add
-/// and associate operator types.
-circt::analysis::SharedOperatorsSchedulingAnalysis::SharedOperatorsSchedulingAnalysis(
-    Operation *op, AnalysisManager &am) : memoryAnalysis(am.getAnalysis<MemoryDependenceAnalysis>()){}
+/// SharedOperatorsSchedulingAnalysis constructs a SharedOperatorsProblem for
+/// each AffineForOp by performing a memory dependence analysis and inserting
+/// dependences into the problem. The client should retrieve the partially
+/// complete problem to add and associate operator types.
+circt::analysis::SharedOperatorsSchedulingAnalysis::
+    SharedOperatorsSchedulingAnalysis(Operation *op, AnalysisManager &am)
+    : memoryAnalysis(am.getAnalysis<MemoryDependenceAnalysis>()) {}
 
 void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
     WhileOp whileOp, MemoryDependenceAnalysis memoryAnalysis) {
@@ -176,8 +176,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
 
   // Insert memory dependences into the problem.
   whileOp.getAfter().walk([&](Operation *op) {
-    if (op->getParentOfType<STGWhileOp>() != nullptr 
-        || op->getParentOfType<pipeline::PipelineWhileOp>() != nullptr)
+    if (op->getParentOfType<STGWhileOp>() != nullptr ||
+        op->getParentOfType<loopschedule::LoopSchedulePipelineOp>() != nullptr)
       return;
 
     // Insert every operation into the problem.
@@ -187,7 +187,7 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
     if (dependences.empty())
       return;
 
-    for (const MemoryDependence& memoryDep : dependences) {
+    for (const MemoryDependence &memoryDep : dependences) {
       // Don't insert a dependence into the problem if there is no dependence.
       if (!hasDependence(memoryDep.dependenceType))
         continue;
@@ -217,8 +217,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
 
   // Insert conditional dependences into the problem.
   whileOp.getAfter().walk([&](Operation *op) {
-    if (op->getParentOfType<STGWhileOp>() != nullptr 
-        || op->getParentOfType<pipeline::PipelineWhileOp>() != nullptr)
+    if (op->getParentOfType<STGWhileOp>() != nullptr ||
+        op->getParentOfType<loopschedule::LoopSchedulePipelineOp>() != nullptr)
       return WalkResult::advance();
     Block *thenBlock = nullptr;
     Block *elseBlock = nullptr;
@@ -257,10 +257,10 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
   // terminator to ensure the problem schedules them before the terminator.
   auto *anchor = whileOp.getAfter().back().getTerminator();
   whileOp.getAfter().walk([&](Operation *op) {
-    if (op->getParentOfType<STGWhileOp>() != nullptr 
-        || op->getParentOfType<pipeline::PipelineWhileOp>() != nullptr)
+    if (op->getParentOfType<STGWhileOp>() != nullptr ||
+        op->getParentOfType<loopschedule::LoopSchedulePipelineOp>() != nullptr)
       return;
-    if (!isa<mlir::AffineStoreOp, memref::StoreOp>(op))
+    if (!isa<AffineStoreOp, memref::StoreOp>(op))
       return;
     Problem::Dependence dep(op, anchor);
     auto depInserted = problem.insertDependence(dep);
@@ -269,7 +269,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
   });
 
   // Store the partially complete problem.
-  problems.insert(std::pair<Operation *, SharedOperatorsProblem>(whileOp, problem));
+  problems.insert(
+      std::pair<Operation *, SharedOperatorsProblem>(whileOp, problem));
 }
 
 void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
@@ -279,8 +280,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
 
   // Insert memory dependences into the problem.
   funcOp.getBody().walk([&](Operation *op) {
-    if (op->getParentOfType<STGWhileOp>() != nullptr 
-        || op->getParentOfType<pipeline::PipelineWhileOp>() != nullptr)
+    if (op->getParentOfType<STGWhileOp>() != nullptr ||
+        op->getParentOfType<loopschedule::LoopSchedulePipelineOp>() != nullptr)
       return;
 
     // Insert every operation into the problem.
@@ -290,7 +291,7 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
     if (dependences.empty())
       return;
 
-    for (const MemoryDependence& memoryDep : dependences) {
+    for (const MemoryDependence &memoryDep : dependences) {
       // Don't insert a dependence into the problem if there is no dependence.
       if (!hasDependence(memoryDep.dependenceType))
         continue;
@@ -320,8 +321,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
 
   // Insert conditional dependences into the problem.
   funcOp.getBody().walk([&](Operation *op) {
-    if (op->getParentOfType<STGWhileOp>() != nullptr 
-        || op->getParentOfType<pipeline::PipelineWhileOp>() != nullptr)
+    if (op->getParentOfType<STGWhileOp>() != nullptr ||
+        op->getParentOfType<loopschedule::LoopSchedulePipelineOp>() != nullptr)
       return WalkResult::advance();
 
     Block *thenBlock = nullptr;
@@ -361,10 +362,10 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
   // terminator to ensure the problem schedules them before the terminator.
   auto *anchor = funcOp.getBody().back().getTerminator();
   funcOp.getBody().walk([&](Operation *op) {
-    if (op->getParentOfType<STGWhileOp>() != nullptr 
-        || op->getParentOfType<pipeline::PipelineWhileOp>() != nullptr)
+    if (op->getParentOfType<STGWhileOp>() != nullptr ||
+        op->getParentOfType<loopschedule::LoopSchedulePipelineOp>() != nullptr)
       return;
-    if (!isa<mlir::AffineStoreOp, memref::StoreOp>(op))
+    if (!isa<AffineStoreOp, memref::StoreOp>(op))
       return;
     Problem::Dependence dep(op, anchor);
     auto depInserted = problem.insertDependence(dep);
@@ -373,11 +374,12 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
   });
 
   // Store the partially complete problem.
-  problems.insert(std::pair<Operation *, SharedOperatorsProblem>(funcOp, problem));
+  problems.insert(
+      std::pair<Operation *, SharedOperatorsProblem>(funcOp, problem));
 }
 
 SharedOperatorsProblem &
-circt::analysis::SharedOperatorsSchedulingAnalysis::getProblem(Operation* op) {
+circt::analysis::SharedOperatorsSchedulingAnalysis::getProblem(Operation *op) {
   auto problem = problems.find(op);
   if (problem != problems.end()) {
     return problem->second;

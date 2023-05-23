@@ -21,11 +21,12 @@
 
 using namespace circt;
 using namespace hls;
-using namespace mlir;
+using namespace mlir::affine;
 
 namespace {
 
-struct UnrollMarkedLoopsPass : public UnrollMarkedLoopsBase<UnrollMarkedLoopsPass> {
+struct UnrollMarkedLoopsPass
+    : public UnrollMarkedLoopsBase<UnrollMarkedLoopsPass> {
   void runOnOperation() override;
 };
 
@@ -36,14 +37,13 @@ void UnrollMarkedLoopsPass::runOnOperation() {
     if (!loop->hasAttr("hls.unroll"))
       return WalkResult::advance();
 
-
     auto attr = loop->getAttr("hls.unroll");
     loop->removeAttr("hls.unroll");
     if (attr.isa<StringAttr>()) {
       auto val = attr.cast<StringAttr>().getValue();
       if (val != "full")
         return WalkResult::interrupt();
-      
+
       if (loopUnrollFull(loop).failed())
         return WalkResult::interrupt();
     } else if (attr.isa<IntegerAttr>()) {

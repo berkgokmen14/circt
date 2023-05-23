@@ -28,12 +28,12 @@ def HWModuleLike : OpInterface<"HWModuleLike"> {
     }]>,
 
     InterfaceMethod<"Get the module name",
-    "::llvm::StringRef", "moduleName", (ins),
+    "::llvm::StringRef", "getModuleName", (ins),
     /*methodBody=*/[{}],
     /*defaultImplementation=*/[{ return $_op.getName(); }]>,
 
     InterfaceMethod<"Get the module name",
-    "::mlir::StringAttr", "moduleNameAttr", (ins),
+    "::mlir::StringAttr", "getModuleNameAttr", (ins),
     /*methodBody=*/[{}],
     /*defaultImplementation=*/[{ return $_op.getNameAttr(); }]>,
 
@@ -159,29 +159,23 @@ def HWInstanceLike : OpInterface<"HWInstanceLike"> {
 
   let methods = [
     InterfaceMethod<"Get the name of the instance",
-    "::llvm::StringRef", "instanceName", (ins),
-    /*methodBody=*/[{}],
-    /*defaultImplementation=*/[{ return $_op.getInstanceName(); }]>,
+    "::llvm::StringRef", "getInstanceName", (ins)>,
 
     InterfaceMethod<"Get the name of the instance",
-    "::mlir::StringAttr", "instanceNameAttr", (ins),
-    /*methodBody=*/[{}],
-    /*defaultImplementation=*/[{ return $_op.getInstanceNameAttr(); }]>,
+    "::mlir::StringAttr", "getInstanceNameAttr", (ins)>,
 
     InterfaceMethod<"Get the name of the instantiated module",
-    "::llvm::StringRef", "referencedModuleName", (ins),
+    "::llvm::StringRef", "getReferencedModuleName", (ins),
     /*methodBody=*/[{}],
     /*defaultImplementation=*/[{ return $_op.getModuleName(); }]>,
 
     InterfaceMethod<"Get the name of the instantiated module",
-    "::mlir::StringAttr", "referencedModuleNameAttr", (ins),
+    "::mlir::StringAttr", "getReferencedModuleNameAttr", (ins),
     /*methodBody=*/[{}],
     /*defaultImplementation=*/[{ return $_op.getModuleNameAttr().getAttr(); }]>,
 
     InterfaceMethod<"Get the referenced module",
-    "::mlir::Operation *", "getReferencedModule", (ins),
-    /*methodBody=*/[{}],
-    /*defaultImplementation=*/[{}]>,
+    "::mlir::Operation *", "getReferencedModule", (ins)>,
   ];
 }
 
@@ -220,7 +214,7 @@ def InnerSymbol : OpInterface<"InnerSymbolOpInterface"> {
 
   let cppNamespace = "::circt::hw";
   let methods = [
-    InterfaceMethod<"Returns the name of this inner symbol.",
+    InterfaceMethod<"Returns the name of the top-level inner symbol defined by this operation, if present.",
       "::mlir::StringAttr", "getInnerNameAttr", (ins), [{}],
       /*defaultImplementation=*/[{
         if (auto attr =
@@ -230,21 +224,31 @@ def InnerSymbol : OpInterface<"InnerSymbolOpInterface"> {
         return {};
       }]
     >,
-    InterfaceMethod<"Returns the name of this inner symbol.",
+    InterfaceMethod<"Returns the name of the top-level inner symbol defined by this operation, if present.",
       "::std::optional<::mlir::StringRef>", "getInnerName", (ins), [{}],
       /*defaultImplementation=*/[{
         auto attr = this->getInnerNameAttr();
         return attr ? ::std::optional<StringRef>(attr.getValue()) : ::std::nullopt;
       }]
     >,
-    InterfaceMethod<"Sets the name of this inner symbol.",
+    InterfaceMethod<"Sets the name of the top-level inner symbol defined by this operation to the specified string, dropping any symbols on fields.",
       "void", "setInnerSymbol", (ins "::mlir::StringAttr":$name), [{}],
       /*defaultImplementation=*/[{
         this->getOperation()->setAttr(
             InnerSymbolTable::getInnerSymbolAttrName(), hw::InnerSymAttr::get(name));
       }]
     >,
-    InterfaceMethod<"Returns an InnerRef to this operation.  Must have inner symbol.",
+    InterfaceMethod<"Sets the inner symbols defined by this operation.",
+      "void", "setInnerSymbolAttr", (ins "::circt::hw::InnerSymAttr":$sym), [{}],
+      /*defaultImplementation=*/[{
+        if (sym && !sym.empty())
+          this->getOperation()->setAttr(
+              InnerSymbolTable::getInnerSymbolAttrName(), sym);
+        else
+          this->getOperation()->removeAttr(InnerSymbolTable::getInnerSymbolAttrName());
+      }]
+    >,
+    InterfaceMethod<"Returns an InnerRef to this operation's top-level inner symbol, which must be present.",
       "::circt::hw::InnerRefAttr", "getInnerRef", (ins), [{}],
       /*defaultImplementation=*/[{
         auto *op = this->getOperation();
@@ -254,17 +258,33 @@ def InnerSymbol : OpInterface<"InnerSymbolOpInterface"> {
             InnerSymbolTable::getInnerSymbol(op));
       }]
     >,
-    InterfaceMethod<"Returns the InnerSymAttr.",
+    InterfaceMethod<"Returns the InnerSymAttr representing all inner symbols defined by this operation.",
       "::circt::hw::InnerSymAttr", "getInnerSymAttr", (ins), [{}],
       /*defaultImplementation=*/[{
         return this->getOperation()->template getAttrOfType<hw::InnerSymAttr>(
               circt::hw::InnerSymbolTable::getInnerSymbolAttrName());
       }]
     >,
+    // Ask an operation if per-field symbols are allowed.
+    // Defaults to indicating they're allowed iff there's a defined target result,
+    // but let operations answer this differently if for some reason that makes sense.
+    StaticInterfaceMethod<"Returns whether per-field symbols are supported for this operation type.",
+      "bool", "supportsPerFieldSymbols", (ins), [{}], /*defaultImplementation=*/[{
+       return ConcreteOp::getTargetResultIndex().has_value();
+    }]>,
+    StaticInterfaceMethod<"Returns the index of the result the innner symbol targets, if applicable.  Per-field symbols are resolved into this.",
+      "std::optional<size_t>", "getTargetResultIndex">,
+    InterfaceMethod<"Returns the result the innner symbol targets, if applicable.  Per-field symbols are resolved into this.",
+      "OpResult", "getTargetResult", (ins), [{}], /*defaultImplementation=*/[{
+        auto idx = ConcreteOp::getTargetResultIndex();
+        if (!idx)
+          return {};
+        return $_op->getResult(*idx);
+      }]>,
   ];
 
   let verify = [{
-    return verifyInnerSymAttr(op);
+    return verifyInnerSymAttr(cast<circt::hw::InnerSymbolOpInterface>(op));
   }];
 }
 

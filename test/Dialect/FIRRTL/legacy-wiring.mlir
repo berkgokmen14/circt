@@ -73,21 +73,21 @@ firrtl.circuit "FooBar" attributes {
   firrtl.module @Foo(out %io: !firrtl.bundle<out: uint<1>>) {
     firrtl.skip
     // CHECK: %0 = firrtl.subfield %io[out] : !firrtl.bundle<out: uint<1>>
-    // CHECK: firrtl.connect %0, %io_out__bore : !firrtl.uint<1>, !firrtl.uint<1>
+    // CHECK: firrtl.strictconnect %0, %io_out__bore : !firrtl.uint<1>
   }
   // CHECK: firrtl.module @Foo_1
   // CHECK-SAME: in %io_out__bore: !firrtl.uint<1>
   firrtl.module @Foo_1(out %io: !firrtl.bundle<out: uint<1>>) {
     firrtl.skip
     // CHECK: %0 = firrtl.subfield %io[out] : !firrtl.bundle<out: uint<1>>
-    // CHECK: firrtl.connect %0, %io_out__bore : !firrtl.uint<1>, !firrtl.uint<1>
+    // CHECK: firrtl.strictconnect %0, %io_out__bore : !firrtl.uint<1>
   }
   // CHECK: firrtl.module @Bar
   // CHECK-SAME: in %io_out__bore: !firrtl.uint<1>
   firrtl.module @Bar(out %io: !firrtl.bundle<out: uint<1>>) {
     firrtl.skip
     // CHECK: %0 = firrtl.subfield %io[out] : !firrtl.bundle<out: uint<1>>
-    // CHECK: firrtl.connect %0, %io_out__bore : !firrtl.uint<1>, !firrtl.uint<1>
+    // CHECK: firrtl.strictconnect %0, %io_out__bore : !firrtl.uint<1>
   }
   // CHECK: firrtl.module @FooBar
   firrtl.module @FooBar(out %io: !firrtl.bundle<in flip: uint<1>, out_foo0: uint<1>, out_foo1: uint<1>, out_bar: uint<1>>) {
@@ -110,9 +110,9 @@ firrtl.circuit "FooBar" attributes {
     firrtl.strictconnect %2, %3 : !firrtl.uint<1>
     firrtl.strictconnect %1, %4 : !firrtl.uint<1>
     firrtl.strictconnect %0, %5 : !firrtl.uint<1>
-    // CHECK: firrtl.connect %foo0_io_out__bore, %0 : !firrtl.uint<1>, !firrtl.uint<1>
-    // CHECK: firrtl.connect %foo1_io_out__bore, %0 : !firrtl.uint<1>, !firrtl.uint<1>
-    // CHECK: firrtl.connect %bar_io_out__bore, %0 : !firrtl.uint<1>, !firrtl.uint<1>
+    // CHECK: firrtl.strictconnect %foo0_io_out__bore, %0 : !firrtl.uint<1>
+    // CHECK: firrtl.strictconnect %foo1_io_out__bore, %0 : !firrtl.uint<1>
+    // CHECK: firrtl.strictconnect %bar_io_out__bore, %0 : !firrtl.uint<1>
   }
 }
 
@@ -166,7 +166,8 @@ firrtl.circuit "ResetToI1" attributes {
   }
   // CHECK-LABEL module @ResetToI1
   firrtl.module @ResetToI1() {
-    // CHECK: firrtl.connect %x, %{{[^ ]*}} : !firrtl.uint<1>, !firrtl.reset
+    // CHECK: %[[r1:.+]] = firrtl.resetCast %{{[^ ]*}}
+    // CHECK-NEXT: firrtl.strictconnect %x, %[[r1]] : !firrtl.uint<1>
     firrtl.instance bar interesting_name @Bar()
     %x = firrtl.wire interesting_name : !firrtl.uint<1>
     %invalid_ui1 = firrtl.invalidvalue : !firrtl.uint<1>
@@ -198,10 +199,11 @@ firrtl.circuit "IntWidths" attributes {
   }
   // CHECK-LABEL module @IntWidths
   firrtl.module @IntWidths() {
-    // CHECK: firrtl.connect %x, %{{[^ ]*}} : !firrtl.uint, !firrtl.uint<4>
+    // CHECK:  firrtl.widthCast %bar_y__bore
+    // CHECK-NEXT: firrtl.strictconnect %x, %{{[^ ]*}} 
     firrtl.instance bar interesting_name @Bar()
     %x = firrtl.wire interesting_name : !firrtl.uint
     %invalid_ui1 = firrtl.invalidvalue : !firrtl.uint
-    firrtl.connect %x, %invalid_ui1 : !firrtl.uint, !firrtl.uint
+    firrtl.strictconnect %x, %invalid_ui1 : !firrtl.uint
   }
 }

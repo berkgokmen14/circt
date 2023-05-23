@@ -180,18 +180,28 @@ public:
           for (auto dfsFromVal : aliasingValues) {
 
             for (auto &use : dfsFromVal.getUses()) {
-              Operation *owner = use.getOwner();
-              if (isa<RegResetOp, RegOp>(owner))
-                continue;
-              Value childVal;
-              if (owner->getNumResults() == 1)
-                childVal = owner->getResult(0);
-              else if (auto connect = dyn_cast<FConnectLike>(owner))
-                if (use.getOperandNumber() == 1) {
-                  auto dst = connect.getDest();
-                  if (handleConnects(dst, inputArgFields).succeeded())
-                    childVal = dst;
-                }
+              auto childVal =
+                  TypeSwitch<Operation *, Value>(use.getOwner())
+                      // Registers stop walk for comb loops.
+                      .Case<RegOp, RegResetOp>([](auto _) { return Value(); })
+                      // For non-register declarations, look at data result.
+                      .Case<Forceable>([](auto op) { return op.getDataRaw(); })
+                      // Handle connect ops specially.
+                      .Case<FConnectLike>([&](FConnectLike connect) -> Value {
+                        if (use.getOperandNumber() == 1) {
+                          auto dst = connect.getDest();
+                          if (handleConnects(dst, inputArgFields).succeeded())
+                            return dst;
+                        }
+                        return {};
+                      })
+                      // For everything else (e.g., expressions), if has single
+                      // result use that.
+                      .Default([](auto op) -> Value {
+                        if (op->getNumResults() == 1)
+                          return op->getResult(0);
+                        return {};
+                      });
               if (childVal && childVal.getType().isa<FIRRTLBaseType>())
                 children.push_back(childVal);
             }
@@ -253,7 +263,8 @@ public:
           // Wire is added to the worklist
           .Case<WireOp>([&](WireOp wire) {
             worklist.push_back(wire.getResult());
-            if (!wire.getType().cast<FIRRTLBaseType>().isGround())
+            auto ty = wire.getResult().getType().dyn_cast<FIRRTLBaseType>();
+            if (ty && !ty.isGround())
               setValRefsTo(wire.getResult(), FieldRef(wire.getResult(), 0));
           })
           // All sub elements are added to the worklist.
@@ -398,27 +409,54 @@ public:
   }
 
   void reportLoopFound(Value childVal, VisitingSet visiting) {
-    auto getName = [&](FieldRef node) {
-      if (isa<SubfieldOp, SubindexOp, SubaccessOp>(node.getDefiningOp())) {
-        assert(!valRefersTo[node.getValue()].empty());
-        return getFieldName(*valRefersTo[node.getValue()].begin()).first;
+    // TODO: Work harder to provide best information possible to user,
+    // especially across instances or when we trace through aliasing values.
+    // We're about to exit, and can afford to do some slower work here.
+    auto getName = [&](Value v) {
+      if (isa_and_nonnull<SubfieldOp, SubindexOp, SubaccessOp>(
+              v.getDefiningOp())) {
+        assert(!valRefersTo[v].empty());
+        // Pick representative of the "alias set", not deterministic.
+        return getFieldName(*valRefersTo[v].begin()).first;
       }
-      return getFieldName(node).first;
+      return getFieldName(FieldRef(v, 0)).first;
     };
-    FieldRef childNode(childVal, 0);
-    auto lastSignalName = getName(childNode);
     auto errorDiag = mlir::emitError(
-        module.getLoc(),
-        "detected combinational cycle in a FIRRTL module, sample path: ");
-    if (!lastSignalName.empty())
-      errorDiag << module.getName() << "." << lastSignalName << " <- ";
-    visiting.popUntilVal(childVal, [&](Value visitingVal) {
-      auto signalName = getName(FieldRef(visitingVal, 0));
-      if (!signalName.empty())
-        errorDiag << module.getName() << "." << signalName << " <- ";
-    });
-    if (!lastSignalName.empty())
-      errorDiag << module.getName() << "." << lastSignalName;
+        module.getLoc(), "detected combinational cycle in a FIRRTL module");
+
+    SmallVector<Value, 16> path;
+    path.push_back(childVal);
+    visiting.popUntilVal(
+        childVal, [&](Value visitingVal) { path.push_back(visitingVal); });
+    assert(path.back() == childVal);
+    path.pop_back();
+
+    // Find a value we can name
+    auto *it =
+        llvm::find_if(path, [&](Value v) { return !getName(v).empty(); });
+    if (it == path.end()) {
+      errorDiag.append(", but unable to find names for any involved values.");
+      errorDiag.attachNote(childVal.getLoc()) << "cycle detected here";
+      return;
+    }
+    errorDiag.append(", sample path: ");
+
+    bool lastWasDots = false;
+    errorDiag << module.getName() << ".{" << getName(*it);
+    for (auto v :
+         llvm::concat<Value>(llvm::make_range(std::next(it), path.end()),
+                             llvm::make_range(path.begin(), std::next(it)))) {
+      auto name = getName(v);
+      if (!name.empty()) {
+        errorDiag << " <- " << name;
+        lastWasDots = false;
+      } else {
+        if (!lastWasDots)
+          errorDiag << " <- ...";
+        lastWasDots = true;
+      }
+    }
+    errorDiag << "}";
   }
 
   LogicalResult handleConnects(Value dst,

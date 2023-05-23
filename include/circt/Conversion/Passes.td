@@ -19,16 +19,16 @@ include "mlir/Pass/PassBase.td"
 // AffineToPipeline
 //===----------------------------------------------------------------------===//
 
-def AffineToPipeline : Pass<"convert-affine-to-pipeline", "mlir::func::FuncOp"> {
-  let summary = "Convert Affine dialect to Pipeline pipelines";
+def AffineToLoopSchedule : Pass<"convert-affine-to-loopschedule", "mlir::func::FuncOp"> {
+  let summary = "Convert Affine dialect to LoopSchedule scheduled loops";
   let description = [{
     This pass analyzes Affine loops and control flow, creates a Scheduling
     problem using the Calyx operator library, solves the problem, and lowers
-    the loops to a Pipeline pipeline.
+    the loops to a LoopSchedule.
   }];
-  let constructor = "circt::createAffineToPipeline()";
+  let constructor = "circt::createAffineToLoopSchedule()";
   let dependentDialects = [
-    "circt::pipeline::PipelineDialect",
+    "circt::loopschedule::LoopScheduleDialect",
     "mlir::arith::ArithDialect",
     "mlir::cf::ControlFlowDialect",
     "mlir::memref::MemRefDialect",
@@ -89,6 +89,18 @@ def TestApplyLoweringOption : Pass<"test-apply-lowering-options",
   ];
   let options = [
     Option<"options", "options", "std::string", "", "Lowering Options">
+  ];
+}
+
+def LegalizeAnonEnums : Pass<"legalize-anon-enums", "mlir::ModuleOp"> {
+  let summary = "Prepare anonymous enumeration types for ExportVerilog";
+  let description = [{
+    This pass transforms all anonymous enumeration types into typedecls to work
+    around difference in how anonymous enumerations work in SystemVerilog.
+  }];
+  let constructor = "createLegalizeAnonEnumsPass()";
+  let dependentDialects = [
+    "circt::sv::SVDialect", "circt::comb::CombDialect", "circt::hw::HWDialect"
   ];
 }
 
@@ -162,17 +174,17 @@ def SCFToCalyx : Pass<"lower-scf-to-calyx", "mlir::ModuleOp"> {
 }
 
 //===----------------------------------------------------------------------===//
-// PipelineToCalyx
+// LoopScheduleToCalyx
 //===----------------------------------------------------------------------===//
 
-def PipelineToCalyx : Pass<"lower-pipeline-to-calyx", "mlir::ModuleOp"> {
-  let summary = "Lower Pipeline to Calyx";
+def LoopScheduleToCalyx : Pass<"lower-loopschedule-to-calyx", "mlir::ModuleOp"> {
+  let summary = "Lower LoopSchedule to Calyx";
   let description = [{
-    This pass lowers Pipeline to Calyx.
+    This pass lowers LoopSchedule to Calyx.
   }];
-  let constructor = "circt::createPipelineToCalyxPass()";
+  let constructor = "circt::createLoopScheduleToCalyxPass()";
   let dependentDialects = [
-    "calyx::CalyxDialect", "::mlir::scf::SCFDialect", "hw::HWDialect",
+    "calyx::CalyxDialect", "loopschedule::LoopScheduleDialect", "hw::HWDialect",
     "comb::CombDialect"
   ];
   let options = [
@@ -396,6 +408,25 @@ def LowerFIRRTLToHW : Pass<"lower-firrtl-to-hw", "mlir::ModuleOp"> {
 }
 
 //===----------------------------------------------------------------------===//
+// HandshakeToDC
+//===----------------------------------------------------------------------===//
+
+def HandshakeToDC : Pass<"lower-handshake-to-dc", "mlir::ModuleOp"> {
+  let summary = "Lower Handshake to DC";
+  let description = [{
+    Lower Handshake to DC operations.
+    Currently, a `handshake.func` will be converted into a `hw.module`. This
+    is principally an incorrect jump of abstraction - DC does not imply any
+    RTL/hardware semantics. However, DC does not define a container operation,
+    and there does not exist an e.g. `func.graph_func` which would be a generic
+    function with graph region behaviour. Thus, for now, we just use `hw.module`
+    as a container operation.
+  }];
+  let constructor = "circt::createHandshakeToDCPass()";
+  let dependentDialects = ["dc::DCDialect", "mlir::func::FuncDialect", "hw::HWDialect"];
+}
+
+//===----------------------------------------------------------------------===//
 // HandshakeToHW
 //===----------------------------------------------------------------------===//
 
@@ -407,24 +438,6 @@ def HandshakeToHW : Pass<"lower-handshake-to-hw", "mlir::ModuleOp"> {
   let constructor = "circt::createHandshakeToHWPass()";
   let dependentDialects = ["hw::HWDialect", "esi::ESIDialect", "comb::CombDialect",
                            "seq::SeqDialect"];
-}
-
-//===----------------------------------------------------------------------===//
-// HandshakeToFIRRTL
-//===----------------------------------------------------------------------===//
-
-def HandshakeToFIRRTL : Pass<"lower-handshake-to-firrtl", "mlir::ModuleOp"> {
-  let summary = "Lower Handshake to FIRRTL";
-  let description = [{
-    Lower Handshake to FIRRTL.
-  }];
-  let constructor = "circt::createHandshakeToFIRRTLPass()";
-  let dependentDialects = ["firrtl::FIRRTLDialect"];
-  let options = [
-    Option<"enableFlattening", "flatten", "bool", "false",
-    "Flattens the generated FIRRTL component by inlining all dataflow component"
-    " instantiations into the top module.">,
-  ];
 }
 
 //===----------------------------------------------------------------------===//
@@ -451,7 +464,10 @@ def ConvertLLHDToLLVM : Pass<"convert-llhd-to-llvm", "mlir::ModuleOp"> {
     This pass translates LLHD to LLVM.
   }];
   let constructor = "circt::createConvertLLHDToLLVMPass()";
-  let dependentDialects = ["mlir::LLVM::LLVMDialect"];
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::LLVM::LLVMDialect"
+  ];
 }
 
 //===----------------------------------------------------------------------===//
@@ -464,19 +480,6 @@ def ConvertHWToLLVM : Pass<"convert-hw-to-llvm", "mlir::ModuleOp"> {
     This pass translates HW to LLVM.
   }];
   let constructor = "circt::createConvertHWToLLVMPass()";
-  let dependentDialects = ["mlir::LLVM::LLVMDialect"];
-}
-
-//===----------------------------------------------------------------------===//
-// CombToLLVM
-//===----------------------------------------------------------------------===//
-
-def ConvertCombToLLVM : Pass<"convert-comb-to-llvm", "mlir::ModuleOp"> {
-  let summary = "Convert Comb to LLVM";
-  let description = [{
-    This pass translates Comb to LLVM.
-  }];
-  let constructor = "circt::createConvertCombToLLVMPass()";
   let dependentDialects = ["mlir::LLVM::LLVMDialect"];
 }
 
@@ -583,7 +586,7 @@ def AffineToSTG : Pass<"convert-affine-to-stg", "mlir::func::FuncOp"> {
   }];
   let constructor = "circt::createAffineToSTGPass()";
   let dependentDialects = [
-    "circt::pipeline::PipelineDialect",
+    "circt::loopschedule::LoopScheduleDialect",
     "circt::stg::STGDialect",
     "mlir::arith::ArithDialect",
     "mlir::cf::ControlFlowDialect",
@@ -608,6 +611,31 @@ def ConvertToArcs : Pass<"convert-to-arcs", "mlir::ModuleOp"> {
   }];
   let constructor = "circt::createConvertToArcsPass()";
   let dependentDialects = ["circt::arc::ArcDialect"];
+}
+
+//===----------------------------------------------------------------------===//
+// ConvertCombToArith
+//===----------------------------------------------------------------------===//
+
+def ConvertCombToArith : Pass<"convert-comb-to-arith", "mlir::ModuleOp"> {
+  let summary = "Convert combinational ops and constants into arith ops";
+  let constructor = "circt::createConvertCombToArithPass()";
+  let dependentDialects = ["mlir::arith::ArithDialect"];
+}
+
+//===----------------------------------------------------------------------===//
+// ConvertArcToLLVM
+//===----------------------------------------------------------------------===//
+
+def LowerArcToLLVM : Pass<"lower-arc-to-llvm", "mlir::ModuleOp"> {
+  let summary = "Lower state transfer arc representation to LLVM";
+  let constructor = "circt::createLowerArcToLLVMPass()";
+  let dependentDialects = [
+    "arc::ArcDialect",
+    "mlir::LLVM::LLVMDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::func::FuncDialect"
+  ];
 }
 
 #endif // CIRCT_CONVERSION_PASSES_TD

@@ -10,7 +10,7 @@
 #include "../PassDetail.h"
 #include "circt/Analysis/DependenceAnalysis.h"
 #include "circt/Analysis/SchedulingAnalysis.h"
-#include "circt/Dialect/Pipeline/Pipeline.h"
+#include "circt/Dialect/LoopSchedule/LoopScheduleOps.h"
 #include "circt/Dialect/SSP/SSPInterfaces.h"
 #include "circt/Dialect/STG/STG.h"
 #include "circt/Scheduling/Algorithms.h"
@@ -46,10 +46,11 @@ using namespace mlir::arith;
 using namespace mlir::memref;
 using namespace mlir::scf;
 using namespace mlir::func;
+using namespace mlir::affine;
 using namespace circt;
 using namespace circt::analysis;
 using namespace circt::scheduling;
-using namespace circt::pipeline;
+using namespace circt::loopschedule;
 using namespace circt::stg;
 
 namespace {
@@ -215,11 +216,11 @@ struct IfOpHoisting : OpConversionPattern<IfOp> {
     rewriter.updateRootInPlace(op, [&]() {
       if (!op.thenBlock()->without_terminator().empty()) {
         rewriter.splitBlock(op.thenBlock(), --op.thenBlock()->end());
-        rewriter.mergeBlockBefore(&op.getThenRegion().front(), op);
+        rewriter.inlineBlockBefore(&op.getThenRegion().front(), op);
       }
       if (op.elseBlock() && !op.elseBlock()->without_terminator().empty()) {
         rewriter.splitBlock(op.elseBlock(), --op.elseBlock()->end());
-        rewriter.mergeBlockBefore(&op.getElseRegion().front(), op);
+        rewriter.inlineBlockBefore(&op.getElseRegion().front(), op);
       }
     });
 
@@ -254,8 +255,8 @@ LogicalResult AffineToSTG::lowerAffineStructures(
   ConversionTarget target(*context);
   target.addLegalDialect<AffineDialect, ArithDialect, MemRefDialect,
                          SCFDialect>();
-  target.addIllegalOp<AffineIfOp, mlir::AffineLoadOp, mlir::AffineStoreOp,
-                      AffineApplyOp, AffineForOp, AffineYieldOp>();
+  target.addIllegalOp<AffineIfOp, AffineLoadOp, AffineStoreOp, AffineApplyOp,
+                      AffineForOp, AffineYieldOp>();
   target.addDynamicallyLegalOp<IfOp>(ifOpLegalityCallback);
   // target.addDynamicallyLegalOp<AffineYieldOp>(yieldOpLegalityCallback);
 
@@ -271,14 +272,13 @@ LogicalResult AffineToSTG::lowerAffineStructures(
 
   // Loop invariant code motion to hoist produced constants out of loop
   op->walk(
-     [&](LoopLikeOpInterface loopLike) { moveLoopInvariantCode(loopLike); });
+      [&](LoopLikeOpInterface loopLike) { moveLoopInvariantCode(loopLike); });
 
   patterns.clear();
   patterns.add<ForLoopLoweringPattern>(context);
   target.addIllegalOp<scf::ForOp>();
   if (failed(applyPartialConversion(op, target, std::move(patterns))))
     return failure();
-
 
   return success();
 }
@@ -287,8 +287,7 @@ LogicalResult AffineToSTG::lowerAffineStructures(
 /// targetting. Right now, we assume Calyx, which has a standard library with
 /// well-defined operator latencies. Ultimately, we should move this to a
 /// dialect interface in the Scheduling dialect.
-LogicalResult AffineToSTG::populateOperatorTypes(
-    Operation *op) {
+LogicalResult AffineToSTG::populateOperatorTypes(Operation *op) {
   // Scheduling analyis only considers the innermost loop nest for now.
   // auto forOp = loopNest.back();
 
@@ -319,21 +318,20 @@ LogicalResult AffineToSTG::populateOperatorTypes(
 
   Operation *unsupported;
   WalkResult result = region->walk<WalkOrder::PreOrder>([&](Operation *op) {
-    if (op->getParentOfType<STGWhileOp>() != nullptr
-        || op->getParentOfType<PipelineWhileOp>() != nullptr) {
+    if (op->getParentOfType<STGWhileOp>() != nullptr ||
+        op->getParentOfType<LoopSchedulePipelineOp>() != nullptr) {
       return WalkResult::advance();
     }
 
     return TypeSwitch<Operation *, WalkResult>(op)
-        .Case<AffineYieldOp, arith::ConstantOp, IndexCastOp, 
-              memref::AllocaOp, YieldOp, ConditionOp,
-              memref::AllocOp, func::ReturnOp, ssp::AllocInterface>([&](Operation *combOp) {
+        .Case<AffineYieldOp, arith::ConstantOp, IndexCastOp, memref::AllocaOp,
+              YieldOp, ConditionOp, memref::AllocOp, func::ReturnOp,
+              ssp::AllocInterface>([&](Operation *combOp) {
           // Some known combinational ops.
           problem.setLinkedOperatorType(combOp, combOpr);
           return WalkResult::advance();
         })
-        .Case<IfOp, AddIOp, SubIOp, CmpIOp, STGWhileOp>(
-        [&](Operation *seqOp) {
+        .Case<IfOp, AddIOp, SubIOp, CmpIOp, STGWhileOp>([&](Operation *seqOp) {
           // Some known sequential ops. In certain cases, reads may be
           // combinational in Calyx, but taking advantage of that is left as
           // a future enhancement.
@@ -370,8 +368,8 @@ LogicalResult AffineToSTG::populateOperatorTypes(
           auto latencyOpt = loadOp.getLatency();
           auto limitOpt = loadOp.getLimit();
           assert(latencyOpt.has_value() && "Load op must have latency");
-          Problem::OperatorType portOpr = problem.getOrInsertOperatorType(
-            loadOp.getUnqiueId());
+          Problem::OperatorType portOpr =
+              problem.getOrInsertOperatorType(loadOp.getUnqiueId());
           problem.setLatency(portOpr, latencyOpt.value());
           problem.setLimit(portOpr, limitOpt.value());
           // if (limitOpt.has_value())
@@ -385,8 +383,8 @@ LogicalResult AffineToSTG::populateOperatorTypes(
           auto latencyOpt = storeOp.getLatency();
           auto limitOpt = storeOp.getLimit();
           assert(latencyOpt.has_value() && "Store op must have latency");
-          Problem::OperatorType portOpr = problem.getOrInsertOperatorType(
-            storeOp.getUnqiueId());
+          Problem::OperatorType portOpr =
+              problem.getOrInsertOperatorType(storeOp.getUnqiueId());
           problem.setLatency(portOpr, latencyOpt.value());
           problem.setLimit(portOpr, limitOpt.value());
           // if (limitOpt.has_value())
@@ -400,14 +398,16 @@ LogicalResult AffineToSTG::populateOperatorTypes(
           problem.setLinkedOperatorType(mcOp, mcOpr);
           return WalkResult::advance();
         })
-        .Case<PipelineWhileOp>([&](Operation *pipelineOp) {
-          // Problem::OperatorType whileOpr = problem.getOrInsertOperatorType("while");
+        .Case<LoopSchedulePipelineOp>([&](Operation *pipelineOp) {
+          // Problem::OperatorType whileOpr =
+          // problem.getOrInsertOperatorType("while");
           // problem.setLatency(whileOpr, 3);
           problem.setLinkedOperatorType(pipelineOp, seqOpr);
           return WalkResult::advance();
         })
         // .Case<STGWhileOp>([&](Operation *whileOp) {
-        //   Problem::OperatorType whileOpr = problem.getOrInsertOperatorType("while");
+        //   Problem::OperatorType whileOpr =
+        //   problem.getOrInsertOperatorType("while");
         //   problem.setLatency(whileOpr, 3);
         //   problem.setLinkedOperatorType(whileOp, whileOpr);
         //   return WalkResult::advance();
@@ -425,8 +425,7 @@ LogicalResult AffineToSTG::populateOperatorTypes(
 }
 
 /// Solve the pre-computed scheduling problem.
-LogicalResult AffineToSTG::solveSchedulingProblem(
-    Operation *op) {
+LogicalResult AffineToSTG::solveSchedulingProblem(Operation *op) {
   // Scheduling analyis only considers the innermost loop nest for now.
   // auto forOp = loopNest.back();
 
@@ -487,13 +486,13 @@ LogicalResult AffineToSTG::solveSchedulingProblem(
   //   llvm::dbgs() << "\n  start = " << problem.getStartTime(op);
   //   llvm::dbgs() << "\n\n";
   // });
-  
+
   return success();
 }
 
-
-DenseMap<int64_t, SmallVector<Operation*>> getOperationCycleMap(Problem &problem) {
-  DenseMap<int64_t, SmallVector<Operation*>> map;
+DenseMap<int64_t, SmallVector<Operation *>>
+getOperationCycleMap(Problem &problem) {
+  DenseMap<int64_t, SmallVector<Operation *>> map;
 
   for (auto *op : problem.getOperations()) {
     auto cycleOpt = problem.getStartTime(op);
@@ -507,14 +506,16 @@ DenseMap<int64_t, SmallVector<Operation*>> getOperationCycleMap(Problem &problem
   return map;
 }
 
-int64_t longestOperationStartingAtTime(Problem &problem, const DenseMap<int64_t, SmallVector<Operation*>>& opMap, int64_t cycle) {
+int64_t longestOperationStartingAtTime(
+    Problem &problem, const DenseMap<int64_t, SmallVector<Operation *>> &opMap,
+    int64_t cycle) {
   int64_t longestOp = 0;
   for (auto *op : opMap.lookup(cycle)) {
     auto oprType = problem.getLinkedOperatorType(op);
     assert(oprType.has_value());
     auto latency = problem.getLatency(oprType.value());
     assert(latency.has_value());
-    if (latency.value() > longestOp) 
+    if (latency.value() > longestOp)
       longestOp = latency.value();
   }
 
@@ -536,8 +537,7 @@ bool isUsedOutsideOfRegion(Value val, Block *block) {
 }
 
 /// Create the stg ops for a loop nest.
-LogicalResult AffineToSTG::createWhileOpSTG(
-    WhileOp &whileOp) {
+LogicalResult AffineToSTG::createWhileOpSTG(WhileOp &whileOp) {
   auto anchor = whileOp.getYieldOp();
 
   // Retrieve the cyclic scheduling problem for this loop.
@@ -554,7 +554,8 @@ LogicalResult AffineToSTG::createWhileOpSTG(
 
   for (size_t i = 0; i < whileOp.getNumResults(); ++i) {
     auto result = whileOp.getResult(i);
-    auto numUses = std::distance(result.getUses().begin(), result.getUses().end());
+    auto numUses =
+        std::distance(result.getUses().begin(), result.getUses().end());
     if (numUses > 0) {
       resultTypes.push_back(result.getType());
     }
@@ -570,7 +571,8 @@ LogicalResult AffineToSTG::createWhileOpSTG(
   // auto condValue = builder.getIntegerAttr(builder.getIndexType(), 1);
   // auto cond = builder.create<arith::ConstantOp>(whileOp.getLoc(), condValue);
 
-  auto stgWhile = builder.create<stg::STGWhileOp>(whileOp.getLoc(), resultTypes, llvm::None, iterArgs);
+  auto stgWhile = builder.create<stg::STGWhileOp>(whileOp.getLoc(), resultTypes,
+                                                  llvm::None, iterArgs);
 
   // Maintain mappings of values in the loop body and results of stages,
   // initially populated with the iter args.
@@ -581,7 +583,8 @@ LogicalResult AffineToSTG::createWhileOpSTG(
 
   builder.setInsertionPointToStart(&stgWhile.getCondBlock());
 
-  // auto condConst = builder.create<arith::ConstantOp>(whileOp.getLoc(), builder.getIntegerAttr(builder.getI1Type(), 1));
+  // auto condConst = builder.create<arith::ConstantOp>(whileOp.getLoc(),
+  // builder.getIntegerAttr(builder.getI1Type(), 1));
   auto *conditionReg = stgWhile.getCondBlock().getTerminator();
   // conditionReg->insertOperands(0, condConst.getResult());
   for (auto &op : whileOp.getBefore().front().getOperations()) {
@@ -590,7 +593,7 @@ LogicalResult AffineToSTG::createWhileOpSTG(
       auto cond = condOp.getCondition();
       auto condNew = valueMap.lookupOrNull(cond);
       assert(condNew);
-      conditionReg->insertOperands(0, condNew);     
+      conditionReg->insertOperands(0, condNew);
     } else {
       auto *newOp = builder.clone(op, valueMap);
       for (size_t i = 0; i < newOp->getNumResults(); ++i) {
@@ -603,7 +606,8 @@ LogicalResult AffineToSTG::createWhileOpSTG(
 
   builder.setInsertionPointToStart(&stgWhile.getScheduleBlock());
 
-  // auto termConst = builder.create<arith::ConstantOp>(whileOp.getLoc(), builder.getIndexAttr(1));
+  // auto termConst = builder.create<arith::ConstantOp>(whileOp.getLoc(),
+  // builder.getIndexAttr(1));
   auto term = stgWhile.getTerminator();
   // term.getIterArgsMutable().append(termConst.getResult());
 
@@ -616,7 +620,7 @@ LogicalResult AffineToSTG::createWhileOpSTG(
     startGroups[*startTime].push_back(op);
   }
 
-  SmallVector<SmallVector<Operation*>> scheduleGroups;
+  SmallVector<SmallVector<Operation *>> scheduleGroups;
   auto totalLatency = problem.getStartTime(anchor).value();
 
   // Maintain mappings of values in the loop body and results of stages,
@@ -632,7 +636,7 @@ LogicalResult AffineToSTG::createWhileOpSTG(
 
   // Iterate in order of the start times.
   SmallVector<unsigned> startTimes;
-  for (const auto& group : startGroups)
+  for (const auto &group : startGroups)
     startTimes.push_back(group.first);
   llvm::sort(startTimes);
 
@@ -654,15 +658,14 @@ LogicalResult AffineToSTG::createWhileOpSTG(
           if (!opsWithReturns.contains(op)) {
             opsWithReturns.insert(op);
             stepTypes.append(op->getResultTypes().begin(),
-                              op->getResultTypes().end());
+                             op->getResultTypes().end());
           }
         }
       }
     }
 
     // Create the stage itself.
-    auto stage =
-        builder.create<STGStepOp>(stepTypes);
+    auto stage = builder.create<STGStepOp>(stepTypes);
     auto &stageBlock = stage.getBodyBlock();
     auto *stageTerminator = stageBlock.getTerminator();
     builder.setInsertionPointToStart(&stageBlock);
@@ -704,12 +707,15 @@ LogicalResult AffineToSTG::createWhileOpSTG(
   SmallVector<Value> termIterArgs;
   SmallVector<Value> termResults;
   // termIterArgs.push_back(
-  //     scheduleBlock.front().getResult(scheduleBlock.front().getNumResults() - 1));
-  for (int i = 0, vals = whileOp.getYieldOp()->getNumOperands(); i < vals; ++i) {
+  //     scheduleBlock.front().getResult(scheduleBlock.front().getNumResults() -
+  //     1));
+  for (int i = 0, vals = whileOp.getYieldOp()->getNumOperands(); i < vals;
+       ++i) {
     auto value = whileOp.getYieldOp().getOperand(i);
     auto result = whileOp.getResult(i);
     termIterArgs.push_back(valueMap.lookup(value));
-    auto numUses = std::distance(result.getUses().begin(), result.getUses().end());
+    auto numUses =
+        std::distance(result.getUses().begin(), result.getUses().end());
     if (numUses > 0) {
       termResults.push_back(valueMap.lookup(value));
     }
@@ -718,12 +724,12 @@ LogicalResult AffineToSTG::createWhileOpSTG(
   scheduleTerminator.getIterArgsMutable().append(termIterArgs);
   scheduleTerminator.getResultsMutable().append(termResults);
 
-
   // Replace loop results with while results.
   auto resultNum = 0;
   for (size_t i = 0; i < whileOp.getNumResults(); ++i) {
     auto result = whileOp.getResult(i);
-    auto numUses = std::distance(result.getUses().begin(), result.getUses().end());
+    auto numUses =
+        std::distance(result.getUses().begin(), result.getUses().end());
     if (numUses > 0) {
       whileOp.getResult(i).replaceAllUsesWith(stgWhile.getResult(resultNum++));
     }
@@ -754,8 +760,7 @@ int64_t opOrParentStartTime(Problem &problem, Operation *op) {
 }
 
 /// Create the stg ops for a loop nest.
-LogicalResult AffineToSTG::createFuncOpSTG(
-    FuncOp &funcOp) {
+LogicalResult AffineToSTG::createFuncOpSTG(FuncOp &funcOp) {
   auto *anchor = funcOp.getBody().back().getTerminator();
 
   // Retrieve the cyclic scheduling problem for this loop.
@@ -776,16 +781,17 @@ LogicalResult AffineToSTG::createFuncOpSTG(
 
   builder.setInsertionPointToStart(&funcOp.getBody().front());
 
-  // auto condConst = builder.create<arith::ConstantOp>(whileOp.getLoc(), builder.getIntegerAttr(builder.getI1Type(), 1));
-  // auto *conditionReg = stgWhile.getCondBlock().getTerminator();
-  // conditionReg->insertOperands(0, condConst.getResult());
-  // for (auto &op : whileOp.getBefore().front().getOperations()) {
+  // auto condConst = builder.create<arith::ConstantOp>(whileOp.getLoc(),
+  // builder.getIntegerAttr(builder.getI1Type(), 1)); auto *conditionReg =
+  // stgWhile.getCondBlock().getTerminator(); conditionReg->insertOperands(0,
+  // condConst.getResult()); for (auto &op :
+  // whileOp.getBefore().front().getOperations()) {
   //   if (isa<scf::ConditionOp>(op)) {
   //     auto condOp = cast<scf::ConditionOp>(op);
   //     auto cond = condOp.getCondition();
   //     auto condNew = valueMap.lookupOrNull(cond);
   //     assert(condNew);
-  //     conditionReg->insertOperands(0, condNew);     
+  //     conditionReg->insertOperands(0, condNew);
   //   } else {
   //     auto *newOp = builder.clone(op, valueMap);
   //     for (size_t i = 0; i < newOp->getNumResults(); ++i) {
@@ -798,8 +804,8 @@ LogicalResult AffineToSTG::createFuncOpSTG(
 
   // builder.setInsertionPointToStart(&stgWhile.getScheduleBlock());
 
-  // auto termConst = builder.create<arith::ConstantOp>(whileOp.getLoc(), builder.getIndexAttr(1));
-  // auto term = stgWhile.getTerminator();
+  // auto termConst = builder.create<arith::ConstantOp>(whileOp.getLoc(),
+  // builder.getIndexAttr(1)); auto term = stgWhile.getTerminator();
   // term.getIterArgsMutable().append(termConst.getResult());
 
   // Add the non-yield operations to their start time groups.
@@ -811,7 +817,7 @@ LogicalResult AffineToSTG::createFuncOpSTG(
     startGroups[*startTime].push_back(op);
   }
 
-  SmallVector<SmallVector<Operation*>> scheduleGroups;
+  SmallVector<SmallVector<Operation *>> scheduleGroups;
   auto totalLatency = problem.getStartTime(anchor).value();
 
   // Maintain mappings of values in the loop body and results of stages,
@@ -827,7 +833,7 @@ LogicalResult AffineToSTG::createFuncOpSTG(
 
   // Iterate in order of the start times.
   SmallVector<unsigned> startTimes;
-  for (const auto& group : startGroups)
+  for (const auto &group : startGroups)
     startTimes.push_back(group.first);
   llvm::sort(startTimes);
 
@@ -845,19 +851,19 @@ LogicalResult AffineToSTG::createFuncOpSTG(
     DenseSet<Operation *> opsWithReturns;
     for (auto *op : group) {
       for (auto *user : op->getUsers()) {
-        if (opOrParentStartTime(problem, user) > startTime || isFuncTerminator(user)) {
+        if (opOrParentStartTime(problem, user) > startTime ||
+            isFuncTerminator(user)) {
           if (!opsWithReturns.contains(op)) {
             opsWithReturns.insert(op);
             stepTypes.append(op->getResultTypes().begin(),
-                              op->getResultTypes().end());
+                             op->getResultTypes().end());
           }
         }
       }
     }
 
     // Create the stage itself.
-    auto stage =
-        builder.create<STGStepOp>(stepTypes);
+    auto stage = builder.create<STGStepOp>(stepTypes);
     auto &stageBlock = stage.getBodyBlock();
     auto *stageTerminator = stageBlock.getTerminator();
     builder.setInsertionPointToStart(&stageBlock);
@@ -912,9 +918,8 @@ LogicalResult AffineToSTG::createFuncOpSTG(
 
   // Remove the loop nest from the IR.
   funcOp.getBody().walk<WalkOrder::PostOrder>([&](Operation *op) {
-    if ((isa<STGStepOp>(op) && isa<FuncOp>(op->getParentOp()))
-      || inTopLevelStepOp(op)
-      || isa<func::ReturnOp>(op))
+    if ((isa<STGStepOp>(op) && isa<FuncOp>(op->getParentOp())) ||
+        inTopLevelStepOp(op) || isa<func::ReturnOp>(op))
       return;
     op->dropAllUses();
     op->dropAllDefinedValueUses();

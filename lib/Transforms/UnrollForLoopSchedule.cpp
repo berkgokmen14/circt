@@ -8,15 +8,19 @@
 
 #include "PassDetail.h"
 #include "circt/Analysis/DependenceAnalysis.h"
+#include "circt/Analysis/SchedulingAnalysis.h"
 #include "circt/Transforms/Passes.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Pass/Pass.h"
+#include <algorithm>
+#include <limits>
 
 using namespace mlir;
 using namespace mlir::affine;
+using namespace circt::analysis;
 
 namespace {
 struct UnrollForLoopSchedule
@@ -26,58 +30,103 @@ struct UnrollForLoopSchedule
   void runOnOperation() override;
 
 private:
-  DenseSet<AffineMapAccessInterface> getMemoryOps(AffineForOp forOp);
+  std::tuple<unsigned, AffineForOp>
+  getDeepestNestedLoop(std::tuple<unsigned, AffineForOp> root);
+  DenseSet<AffineMapAccessInterface> updateMemoryOps(AffineForOp innermostLoop);
+  unsigned getMinDepDistance(AffineForOp innermostLoop);
+  SmallVector<AffineForOp> nestedLoops;
+  DenseMap<AffineForOp, DenseSet<AffineMapAccessInterface>> loopToMemOps;
+  MemoryDependenceAnalysis *memDepAnalysis;
 };
 } // namespace
 
+std::tuple<unsigned, AffineForOp> UnrollForLoopSchedule::getDeepestNestedLoop(
+    std::tuple<unsigned, AffineForOp> root) {
+  auto forOp = std::get<AffineForOp>(root);
+  auto depth = std::get<unsigned>(root);
+  if (forOp.getLoopBody().getOps<AffineForOp>().empty())
+    return root;
+
+  unsigned deepestDepth = depth;
+  AffineForOp deepestLoop = forOp;
+  for (auto loop : forOp.getLoopBody().getOps<AffineForOp>()) {
+    auto result = getDeepestNestedLoop(std::tuple(depth + 1, loop));
+    auto newDepth = std::get<unsigned>(result);
+    if (newDepth > deepestDepth) {
+      deepestDepth = newDepth;
+      deepestLoop = std::get<AffineForOp>(result);
+    }
+  }
+  return std::tuple(deepestDepth, deepestLoop);
+}
+
 DenseSet<AffineMapAccessInterface>
-UnrollForLoopSchedule::getMemoryOps(AffineForOp forOp) {
+UnrollForLoopSchedule::updateMemoryOps(AffineForOp innermostLoop) {
   DenseSet<AffineMapAccessInterface> memOps;
-  auto &bodyRegion = forOp.getLoopBody();
+  auto &bodyRegion = innermostLoop.getLoopBody();
   // Only affine memory dependencies are supported
   auto affineLdOps = bodyRegion.getOps<AffineLoadOp>();
   auto affineStOps = bodyRegion.getOps<AffineStoreOp>();
   memOps.insert(affineLdOps.begin(), affineLdOps.end());
   memOps.insert(affineStOps.begin(), affineStOps.end());
+  loopToMemOps[innermostLoop] = memOps;
   return memOps;
 }
 
-void UnrollForLoopSchedule::runOnOperation() {
-  SmallVector<SmallVector<AffineForOp>> loopNests;
-  for (auto rootForLoop : getOperation().getOps<AffineForOp>()) {
-    SmallVector<AffineForOp> loopNest;
-    loopNest.push_back(rootForLoop);
-    getPerfectlyNestedLoops(loopNest, rootForLoop);
-    loopNests.push_back(loopNest);
+unsigned UnrollForLoopSchedule::getMinDepDistance(AffineForOp innermostLoop) {
+  auto memOps = loopToMemOps[innermostLoop];
+  unsigned minDistance = std::numeric_limits<unsigned>::max();
+  for (auto memOp : memOps) {
+
+    ArrayRef<MemoryDependence> dependences =
+        memDepAnalysis->getDependences(memOp);
+    if (dependences.empty())
+      continue;
+
+    for (MemoryDependence memoryDep : dependences) {
+      if (!hasDependence(memoryDep.dependenceType))
+        continue;
+
+      unsigned distance = *memoryDep.dependenceComponents.back().lb;
+      minDistance = std::min(minDistance, distance);
+    }
   }
 
-  auto memDepAnalysis =
-      getAnalysis<circt::analysis::MemoryDependenceAnalysis>();
+  return minDistance;
+}
 
-  for (auto &loopNest : loopNests) {
-    auto innerLoop = loopNest.back();
+// LogicalResult stToLdBypass(AffineStoreOp storeOp, AffineLoadOp loadOp) {
+//   loadOp->replaceAllUsesWith(storeOp.getValueToStore());
+//   if (storeOp->getUses().empty())
+//     storeOp->erase();
+//   loadOp->erase();
+//   return success();
+// }
 
-    if (!innerLoop.getLoopBody().getOps<memref::LoadOp>().empty() ||
-        !innerLoop.getLoopBody().getOps<memref::StoreOp>().empty())
-      return signalPassFailure();
+void UnrollForLoopSchedule::runOnOperation() {
+  // Get loopNests in Function
+  for (auto rootForLoop :
+       getOperation().getFunctionBody().getOps<AffineForOp>())
+    nestedLoops.push_back(std::get<AffineForOp>(getDeepestNestedLoop(
+        std::tuple(std::numeric_limits<unsigned>::min(), rootForLoop))));
 
-    auto memOps = getMemoryOps(innerLoop);
-    for (auto dest : memOps) {
-      auto inboudDeps = memDepAnalysis.getDependences(dest);
-      for (const auto &inboudDep : inboudDeps) {
-        if (llvm::isa<AffineMapAccessInterface>(*inboudDep.source) &&
-            memOps.contains(
-                llvm::cast<AffineMapAccessInterface>(*inboudDep.source)) &&
-            inboudDep.dependenceType != DependenceResult::ResultEnum::Failure) {
-          if (inboudDep.dependenceType ==
-              DependenceResult::ResultEnum::HasDependence)
-            llvm::errs() << "there is a ";
-          else
-            llvm::errs() << "there is NOT a ";
-          llvm::errs() << "dep from " << *inboudDep.source << " to " << dest
-                       << " with distance " << inboudDep.dependenceType << "\n";
-        }
-      }
+  // Gert scheduling analyses
+  memDepAnalysis = &getAnalysis<MemoryDependenceAnalysis>();
+
+  for (auto innerLoop : nestedLoops) {
+    updateMemoryOps(innerLoop);
+    unsigned minDepDistance = getMinDepDistance(innerLoop);
+    if (minDepDistance == std::numeric_limits<unsigned>::max()) {
+      llvm::errs() << "unrolling by factor "
+                   << "full\n";
+      auto result = loopUnrollFull(innerLoop);
+      if (result.failed())
+        return signalPassFailure();
+    } else if (minDepDistance - 1 > 1) {
+      llvm::errs() << "unrolling by factor " << minDepDistance - 1 << "\n";
+      auto result = loopUnrollByFactor(innerLoop, minDepDistance - 1);
+      if (result.failed())
+        return signalPassFailure();
     }
   }
 }

@@ -44,9 +44,8 @@ void circt::firrtl::emitConnect(ImplicitLocOpBuilder &builder, Value dst,
   }
 
   // If the types are the exact same we can just connect them.
-  // Strict connect does not allow uninferred widths.
-  if (dstType == srcType && !dstType.hasUninferredWidth() &&
-      !dstType.hasUninferredReset()) {
+  if (dstType == srcType && dstType.isPassive() &&
+      !dstType.hasUninferredWidth()) {
     builder.create<StrictConnectOp>(dst, src);
     return;
   }
@@ -95,15 +94,16 @@ void circt::firrtl::emitConnect(ImplicitLocOpBuilder &builder, Value dst,
     srcType = dstType;
   }
 
+  // Be sure uint, uint -> uint, (uir uint) since we are changing extneding
+  // connect to identity.
+  if (dstType.hasUninferredWidth() || srcType.hasUninferredWidth()) {
+    src = builder.create<UninferredWidthCastOp>(dstType, src);
+    srcType = dstType;
+  }
+
   // Handle ground types with possibly uninferred widths.
   auto dstWidth = dstType.getBitWidthOrSentinel();
   auto srcWidth = srcType.getBitWidthOrSentinel();
-  if (dstWidth < 0 || srcWidth < 0) {
-    // If one of these types has an uninferred width, we connect them with a
-    // regular connect operation.
-    builder.create<ConnectOp>(dst, src);
-    return;
-  }
 
   // The source must be extended or truncated.
   if (dstWidth < srcWidth) {
@@ -122,10 +122,8 @@ void circt::firrtl::emitConnect(ImplicitLocOpBuilder &builder, Value dst,
 
   // Strict connect requires the types to be completely equal, including
   // connecting uint<1> to abstract reset types.
-  if (dstType == src.getType())
-    builder.create<StrictConnectOp>(dst, src);
-  else
-    builder.create<ConnectOp>(dst, src);
+  assert("Connect Types are equal" && dstType == src.getType());
+  builder.create<StrictConnectOp>(dst, src);
 }
 
 IntegerAttr circt::firrtl::getIntAttr(Type type, const APInt &value) {
@@ -448,19 +446,27 @@ FieldRef circt::firrtl::getFieldRefFromValue(Value value) {
     if (!op)
       break;
 
-    if (auto subfieldOp = dyn_cast<SubfieldOp>(op)) {
-      value = subfieldOp.getInput();
-      auto bundleType = subfieldOp.getInput().getType();
-      // Rebase the current index on the parent field's index.
-      id += bundleType.getFieldID(subfieldOp.getFieldIndex());
-    } else if (auto subindexOp = dyn_cast<SubindexOp>(op)) {
-      value = subindexOp.getInput();
-      auto vecType = subindexOp.getInput().getType();
-      // Rebase the current index on the parent field's index.
-      id += vecType.getFieldID(subindexOp.getIndex());
-    } else {
+    auto handled = TypeSwitch<Operation *, bool>(op)
+                       .Case<SubfieldOp, OpenSubfieldOp>([&](auto subfieldOp) {
+                         value = subfieldOp.getInput();
+                         auto bundleType = subfieldOp.getInput().getType();
+                         // Rebase the current index on the parent field's
+                         // index.
+                         id +=
+                             bundleType.getFieldID(subfieldOp.getFieldIndex());
+                         return true;
+                       })
+                       .Case<SubindexOp, OpenSubindexOp>([&](auto subindexOp) {
+                         value = subindexOp.getInput();
+                         auto vecType = subindexOp.getInput().getType();
+                         // Rebase the current index on the parent field's
+                         // index.
+                         id += vecType.getFieldID(subindexOp.getIndex());
+                         return true;
+                       })
+                       .Default(false);
+    if (!handled)
       break;
-    }
   }
   return {value, id};
 }

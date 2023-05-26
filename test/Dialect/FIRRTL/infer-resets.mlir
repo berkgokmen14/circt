@@ -333,10 +333,10 @@ firrtl.module @ShouldAdjustExtModule2() {
 firrtl.module @ForeignTypes(out %out: !firrtl.reset) {
   %0 = firrtl.wire : index
   %1 = firrtl.wire : index
-  firrtl.strictconnect %0, %1 : index
+  firrtl.connect %0, %1 : index, index
   // CHECK-NEXT: [[W0:%.+]] = firrtl.wire : index
   // CHECK-NEXT: [[W1:%.+]] = firrtl.wire : index
-  // CHECK-NEXT: firrtl.strictconnect [[W0]], [[W1]] : index
+  // CHECK-NEXT: firrtl.connect [[W0]], [[W1]] : index
   %c1_ui1 = firrtl.constant 1 : !firrtl.uint<1>
   firrtl.connect %out, %c1_ui1 : !firrtl.reset, !firrtl.uint<1>
 }
@@ -405,7 +405,7 @@ firrtl.circuit "Top" {
     // Factoring of sync reset into mux works through subindex op.
     // CHECK: %reg5 = firrtl.regreset %clock, %extraReset, %8
     // CHECK: %10 = firrtl.mux(%init, %reset5, %reg5)
-    // CHECK: firrtl.connect %reg5, %10
+    // CHECK: firrtl.strictconnect %reg5, %10
     // CHECK: %11 = firrtl.subindex %reset5[0]
     // CHECK: %12 = firrtl.subindex %reg5[0]
     // CHECK: %13 = firrtl.mux(%init, %11, %in)
@@ -418,7 +418,7 @@ firrtl.circuit "Top" {
     // Factoring of sync reset into mux works through subaccess op.
     // CHECK: %reg6 = firrtl.regreset %clock, %extraReset, %14 
     // CHECK: %16 = firrtl.mux(%init, %reset6, %reg6)
-    // CHECK: firrtl.connect %reg6, %16
+    // CHECK: firrtl.strictconnect %reg6, %16
     // CHECK: %17 = firrtl.subaccess %reset6[%in]
     // CHECK: %18 = firrtl.subaccess %reg6[%in]
     // CHECK: %19 = firrtl.mux(%init, %17, %in)
@@ -754,7 +754,7 @@ firrtl.circuit "SubAccess" {
     firrtl.strictconnect %2, %in : !firrtl.uint<8>
     // CHECK:  %reg6 = firrtl.regreset %clock, %extraReset, %c0_ui2  : !firrtl.clock, !firrtl.asyncreset, !firrtl.uint<2>, !firrtl.uint<2>
     // CHECK-NEXT: %0 = firrtl.mux(%init, %c1_ui2, %reg6)
-    // CHECK: firrtl.connect %reg6, %0
+    // CHECK: firrtl.strictconnect %reg6, %0
     // CHECK-NEXT:  %[[v0:.+]] = firrtl.subaccess %arr[%reg6] : !firrtl.vector<uint<8>, 1>, !firrtl.uint<2>
     // CHECK-NEXT:  firrtl.strictconnect %[[v0]], %in : !firrtl.uint<8>
 
@@ -887,20 +887,25 @@ firrtl.circuit "RefResetBundle" {
 firrtl.circuit "RefResetSub" {
   // CHECK-LABEL: firrtl.module @RefResetSub
   // CHECK-NOT: firrtl.reset
-  firrtl.module @RefResetSub(in %driver: !firrtl.asyncreset, out %out_a : !firrtl.reset, out %out_b: !firrtl.reset) {
-  %r = firrtl.wire : !firrtl.bundle<a: reset, b flip: reset> 
-  %ref_r = firrtl.ref.send %r : !firrtl.bundle<a: reset, b flip: reset>
-  %ref_r_a = firrtl.ref.sub %ref_r[0] : !firrtl.probe<bundle<a: reset, b : reset>>
-  %ref_r_b = firrtl.ref.sub %ref_r[1] : !firrtl.probe<bundle<a: reset, b : reset>>
+  firrtl.module @RefResetSub(in %driver: !firrtl.asyncreset, out %out_a : !firrtl.reset, out %out_b: !firrtl.vector<reset,2>) {
+  %r = firrtl.wire : !firrtl.bundle<a: reset, b flip: vector<reset, 2>> 
+  %ref_r = firrtl.ref.send %r : !firrtl.bundle<a: reset, b flip: vector<reset, 2>>
+  %ref_r_a = firrtl.ref.sub %ref_r[0] : !firrtl.probe<bundle<a: reset, b : vector<reset, 2>>>
   %reset_a = firrtl.ref.resolve %ref_r_a : !firrtl.probe<reset>
-  %reset_b = firrtl.ref.resolve %ref_r_b : !firrtl.probe<reset>
-  firrtl.strictconnect %out_a, %reset_a : !firrtl.reset
-  firrtl.strictconnect %out_b, %reset_b : !firrtl.reset
 
-   %r_a = firrtl.subfield %r[a] : !firrtl.bundle<a: reset, b flip: reset>
-   %r_b = firrtl.subfield %r[b] : !firrtl.bundle<a: reset, b flip: reset>
+  %ref_r_b = firrtl.ref.sub %ref_r[1] : !firrtl.probe<bundle<a: reset, b : vector<reset, 2>>>
+  %reset_b = firrtl.ref.resolve %ref_r_b : !firrtl.probe<vector<reset, 2>>
+
+  firrtl.strictconnect %out_a, %reset_a : !firrtl.reset
+  firrtl.strictconnect %out_b, %reset_b : !firrtl.vector<reset, 2>
+
+   %r_a = firrtl.subfield %r[a] : !firrtl.bundle<a: reset, b flip: vector<reset, 2>>
+   %r_b = firrtl.subfield %r[b] : !firrtl.bundle<a: reset, b flip: vector<reset, 2>>
+   %r_b_0 = firrtl.subindex %r_b[0] : !firrtl.vector<reset, 2>
+   %r_b_1 = firrtl.subindex %r_b[1] : !firrtl.vector<reset, 2>
    firrtl.connect %r_a, %driver : !firrtl.reset, !firrtl.asyncreset
-   firrtl.connect %r_b, %driver : !firrtl.reset, !firrtl.asyncreset
+   firrtl.connect %r_b_0, %driver : !firrtl.reset, !firrtl.asyncreset
+   firrtl.connect %r_b_1, %driver : !firrtl.reset, !firrtl.asyncreset
   }
 }
 

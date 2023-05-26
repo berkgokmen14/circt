@@ -14,24 +14,12 @@
 #define CIRCT_DIALECT_FIRRTL_FIRRTLOPINTERFACES_TD
 
 include "mlir/IR/OpBase.td"
+include "circt/Dialect/HW/HWOpInterfaces.td"
 
-def FModuleLike : OpInterface<"FModuleLike"> {
+def FModuleLike : OpInterface<"FModuleLike", [HWModuleLike]> {
   let cppNamespace = "circt::firrtl";
   let description = "Provide common module information.";
   let methods = [
-
-    //===------------------------------------------------------------------===//
-    // Module Name
-    //===------------------------------------------------------------------===//
-
-    InterfaceMethod<"Get the module name",
-    "StringRef", "moduleName", (ins),
-    /*methodBody=*/[{ return $_op.getName(); }]>,
-
-    InterfaceMethod<"Get the module name",
-    "StringAttr", "moduleNameAttr", (ins),
-    /*methodBody=*/[{ return $_op.getNameAttr(); }]>,
-
     //===------------------------------------------------------------------===//
     // Parameters
     //===------------------------------------------------------------------===//
@@ -357,7 +345,7 @@ def FModuleLike : OpInterface<"FModuleLike"> {
     static_assert(
         ConcreteOp::template hasTrait<OpTrait::InnerSymbolTable>(),
         "expected operation to be an inner symbol table");
-    return verifyModuleLikeOpInterface(op);
+    return verifyModuleLikeOpInterface(cast<::circt::firrtl::FModuleLike>(op));
   }];
 }
 
@@ -452,7 +440,9 @@ def Forceable : OpInterface<"Forceable"> {
     /// Attribute name for 'forceable' tracking.
     static StringRef getForceableAttrName() { return "forceable"; }
   }];
-  let verify = [{ return detail::verifyForceableOp($_op); }];
+  let verify = [{
+    return detail::verifyForceableOp(cast<::circt::firrtl::Forceable>($_op));
+  }];
 }
 
 #endif // CIRCT_DIALECT_FIRRTL_FIRRTLOPINTERFACES_TD

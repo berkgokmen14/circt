@@ -27,11 +27,19 @@ def OMDialect : Dialect {
     [Object Model Dialect Rationale](./RationaleOM.md).
   }];
 
+  let useDefaultAttributePrinterParser = 1;
   let useDefaultTypePrinterParser = 1;
+
+  let dependentDialects = [
+    "circt::hw::HWDialect"
+  ];
 
   let extraClassDeclaration = [{
     /// Register all OM types.
     void registerTypes();
+
+    /// Register all OM types.
+    void registerAttributes();
   }];
 }
 

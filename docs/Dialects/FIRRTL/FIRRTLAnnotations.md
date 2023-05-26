@@ -201,6 +201,28 @@ Annotations here are written in their JSON format. A "reference target"
 indicates that the annotation could target any object in the hierarchy,
 although there may be further restrictions in the annotation.
 
+### [AttributeAnnotation](https://javadoc.io/doc/edu.berkeley.cs/firrtl_2.13/latest/firrtl/AttributeAnnotation.html)
+
+| Property    | Type   | Description                  |
+| ----------  | ------ | ---------------------------- |
+| class       | string | `firrtl.AttributeAnnotation` |
+| target      | string | A reference target           |
+| description | string | An attribute                 |
+
+This annotation attaches SV attributes to a specified target. A reference
+target must be a wire, node, reg, or module. This annotation doesn't prevent
+optimizations so it's necessary to add dontTouch annotation if users want to
+preseve the target.
+
+Example:
+```json
+{
+  "class": "firrtl.AttributeAnnotation",
+  "target": "~Foo|Foo>r",
+  "description": "debug = \"true\""
+}
+```
+
 ### BlackBox
 
 | Property   | Type   | Description                  |
@@ -388,6 +410,28 @@ Example:
 {
   "class":"sifive.enterprise.firrtl.AddSeqMemPortsFileAnnotation",
   "filename":"SRAMPorts.txt"
+}
+```
+
+### [DocStringAnnotation](https://javadoc.io/doc/edu.berkeley.cs/firrtl_2.13/latest/firrtl/DocStringAnnotation.html)
+
+| Property    | Type   | Description                  |
+| ----------  | ------ | ---------------------------- |
+| class       | string | `firrtl.DocStringAnnotation` |
+| target      | string | A reference target           |
+| description | string | An attribute                 |
+
+This annotation attaches a comment to a specified target. A reference
+target must be a wire, node, reg, or module. This annotation doesn't prevent
+optimizations so it's necessary to add dontTouch annotation if users want to
+preseve the target.
+
+Example:
+```json
+{
+  "class": "firrtl.DocStringAnnotation",
+  "target": "~Foo|Foo>r",
+  "description": "comment"
 }
 ```
 
@@ -1486,11 +1530,6 @@ modules. This attribute has type `OutputFileAttr`.
 
 Used by SVExtractTestCode.  Specifies the output directory for extracted
 modules. This attribute has type `OutputFileAttr`.
-
-### firrtl.extract.testbench
-
-Used by SVExtractTestCode.  Specifies the output directory for extracted
-testbench only modules. This attribute has type `OutputFileAttr`.
 
 ### firrtl.extract.assert.bindfile
 

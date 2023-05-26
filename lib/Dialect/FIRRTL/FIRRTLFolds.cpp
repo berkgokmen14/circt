@@ -182,6 +182,14 @@ static bool isConstantZero(Attribute operand) {
   return false;
 }
 
+/// Determine whether a constant operand is a one value for the sake of constant
+/// folding.
+static bool isConstantOne(Attribute operand) {
+  if (auto cst = getConstant(operand))
+    return cst->isOne();
+  return false;
+}
+
 /// This is the policy for folding, which depends on the sort of operator we're
 /// processing.
 enum class BinOpKind {
@@ -1591,7 +1599,7 @@ LogicalResult MultibitMuxOp::canonicalize(MultibitMuxOp op,
 /// exactly one connect that has the value as its destination. This returns the
 /// operation if found and if all the other users are "reads" from the value.
 /// Returns null if there are no connects, or multiple connects to the value, or
-/// if the value is involved in an `AttachOp`.
+/// if the value is involved in an `AttachOp`, or if the connect isn't strict.
 ///
 /// Note that this will simply return the connect, which is located *anywhere*
 /// after the definition of the value. Users of this function are likely
@@ -1604,12 +1612,14 @@ StrictConnectOp firrtl::getSingleConnectUserOf(Value value) {
     if (isa<AttachOp>(user))
       return {};
 
-    if (auto aConnect = dyn_cast<StrictConnectOp>(user))
+    if (auto aConnect = dyn_cast<FConnectLike>(user))
       if (aConnect.getDest() == value) {
-        if (!connect || connect == aConnect)
-          connect = aConnect;
-        else
+        auto strictConnect = dyn_cast<StrictConnectOp>(*aConnect);
+        // If this is not a strict connect, or a second strict connect, fail.
+        if (!strictConnect || (connect && connect != strictConnect))
           return {};
+        else
+          connect = strictConnect;
       }
   }
   return connect;
@@ -1659,7 +1669,7 @@ static LogicalResult canonicalizeSingleSetConnect(StrictConnectOp op,
 
   // Ok, we know we are doing the transformation.
 
-  auto replacement = op.getSrc();
+  Value replacement = op.getSrc();
   if (srcValueOp) {
     // Replace with constant zero.
     if (isa<InvalidValueOp>(srcValueOp)) {
@@ -2033,6 +2043,12 @@ OpFoldResult VectorCreateOp::fold(FoldAdaptor adaptor) {
 
 OpFoldResult UninferredResetCastOp::fold(FoldAdaptor adaptor) {
   if (getOperand().getType() == getType())
+    return getOperand();
+  return {};
+}
+
+OpFoldResult UninferredWidthCastOp::fold(FoldAdaptor adaptor) {
+  if (getOperand().getType() == getType() && !getType().hasUninferredWidth())
     return getOperand();
   return {};
 }
@@ -2446,7 +2462,7 @@ struct FoldReadWritePorts : public mlir::RewritePattern {
 
           auto toField = rewriter.create<SubfieldOp>(newResult.getLoc(),
                                                      newResult, toName);
-          for (auto *op : result.getUsers()) {
+          for (auto *op : llvm::make_early_inc_range(result.getUsers())) {
             auto fromField = cast<SubfieldOp>(op);
             if (fromFieldIndex != fromField.getFieldIndex())
               continue;
@@ -2462,7 +2478,7 @@ struct FoldReadWritePorts : public mlir::RewritePattern {
 
         // Remove the wmode field, replacing it with dummy wires.
         auto wmodeFieldIndex = resultPortTy.getElementIndex("wmode");
-        for (auto *op : result.getUsers()) {
+        for (auto *op : llvm::make_early_inc_range(result.getUsers())) {
           auto wmodeField = cast<SubfieldOp>(op);
           if (wmodeFieldIndex != wmodeField.getFieldIndex())
             continue;
@@ -2954,7 +2970,8 @@ static LogicalResult foldHiddenReset(RegOp reg, PatternRewriter &rewriter) {
   auto pt = rewriter.saveInsertionPoint();
   rewriter.setInsertionPoint(con);
   auto v = constReg ? (Value)constOp.getResult() : (Value)mux.getLow();
-  replaceOpWithNewOpAndCopyName<ConnectOp>(rewriter, con, con.getDest(), v);
+  replaceOpWithNewOpAndCopyName<StrictConnectOp>(rewriter, con, con.getDest(),
+                                                 v);
   rewriter.restoreInsertionPoint(pt);
   return success();
 }
@@ -3031,4 +3048,64 @@ LogicalResult InvalidValueOp::canonicalize(InvalidValueOp op,
     return success();
   }
   return failure();
+}
+
+//===----------------------------------------------------------------------===//
+// ClockGateIntrinsicOp
+//===----------------------------------------------------------------------===//
+
+OpFoldResult ClockGateIntrinsicOp::fold(FoldAdaptor adaptor) {
+  // Forward the clock if one of the enables is always true.
+  if (isConstantOne(adaptor.getEnable()) ||
+      isConstantOne(adaptor.getTestEnable()))
+    return getInput();
+
+  // Fold to a constant zero clock if the enables are always false.
+  if (isConstantZero(adaptor.getEnable()) &&
+      (!getTestEnable() || isConstantZero(adaptor.getTestEnable())))
+    return BoolAttr::get(getContext(), false);
+
+  // Forward constant zero clocks.
+  if (isConstantZero(adaptor.getInput()))
+    return BoolAttr::get(getContext(), false);
+
+  return {};
+}
+
+LogicalResult ClockGateIntrinsicOp::canonicalize(ClockGateIntrinsicOp op,
+                                                 PatternRewriter &rewriter) {
+  // Remove constant false test enable.
+  if (auto testEnable = op.getTestEnable()) {
+    if (auto constOp = testEnable.getDefiningOp<ConstantOp>()) {
+      if (constOp.getValue().isZero()) {
+        rewriter.updateRootInPlace(op,
+                                   [&] { op.getTestEnableMutable().clear(); });
+        return success();
+      }
+    }
+  }
+
+  return failure();
+}
+
+//===----------------------------------------------------------------------===//
+// RefOps
+//===----------------------------------------------------------------------===//
+
+// refresolve(forceable.ref) -> forceable.data
+static LogicalResult
+canonicalizeRefResolveOfForceable(RefResolveOp op, PatternRewriter &rewriter) {
+  auto forceable = op.getRef().getDefiningOp<Forceable>();
+  if (!forceable || !forceable.isForceable() ||
+      op.getRef() != forceable.getDataRef() ||
+      op.getType() != forceable.getDataType())
+    return failure();
+  rewriter.replaceAllUsesWith(op, forceable.getData());
+  return success();
+}
+
+void RefResolveOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                               MLIRContext *context) {
+  results.insert<patterns::RefResolveOfRefSend>(context);
+  results.insert(canonicalizeRefResolveOfForceable);
 }

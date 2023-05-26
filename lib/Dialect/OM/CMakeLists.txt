@@ -9,18 +9,23 @@
 add_circt_dialect_library(
   CIRCTOM
 
+  OMAttributes.cpp
   OMDialect.cpp
   OMOps.cpp
   OMTypes.cpp
 
   DEPENDS
   MLIROMIncGen
+  MLIROMAttrIncGen
 
   LINK_COMPONENTS
   Support
 
   LINK_LIBS PRIVATE
+  CIRCTHW
   MLIRIR
 )
 
 add_dependencies(circt-headers MLIROMIncGen)
+
+add_subdirectory(Evaluator)

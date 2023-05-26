@@ -49,9 +49,11 @@ firrtl.circuit "Foo" {
     // CHECK: firrtl.invalidvalue : !firrtl.uint<0>
     // CHECK: firrtl.invalidvalue : !firrtl.bundle<x: uint<0>>
     // CHECK: firrtl.invalidvalue : !firrtl.vector<uint<0>, 2>
+    // CHECK: firrtl.invalidvalue : !firrtl.enum<a: uint<0>>
     %invalid_0 = firrtl.invalidvalue : !firrtl.uint
     %invalid_1 = firrtl.invalidvalue : !firrtl.bundle<x: uint>
     %invalid_2 = firrtl.invalidvalue : !firrtl.vector<uint, 2>
+    %invalid_3 = firrtl.invalidvalue : !firrtl.enum<a: uint>
   }
 
   // CHECK-LABEL: @InferOutput
@@ -669,6 +671,15 @@ firrtl.circuit "Foo" {
     firrtl.connect %w_a, %c2_ui3 : !firrtl.uint, !firrtl.uint<3>
   }
 
+  // CHECK-LABEL: @InferEnum
+  firrtl.module @InferEnum(in %in : !firrtl.enum<a: uint<3>>) {
+    // CHECK: %w = firrtl.wire : !firrtl.enum<a: uint<3>>
+    %w = firrtl.wire : !firrtl.enum<a: uint>
+    firrtl.connect %w, %in : !firrtl.enum<a: uint>, !firrtl.enum<a: uint<3>>
+    // CHECK: %0 = firrtl.subtag %w[a] : !firrtl.enum<a: uint<3>>
+    %0 = firrtl.subtag %w[a] : !firrtl.enum<a: uint>
+  }
+
   // CHECK-LABEL: InferComplexBundles
   firrtl.module @InferComplexBundles() {
     // CHECK: %w = firrtl.wire : !firrtl.bundle<a: bundle<v: vector<uint<3>, 10>>, b: bundle<v: vector<uint<3>, 10>>>
@@ -874,11 +885,11 @@ firrtl.circuit "Foo" {
   firrtl.module @ForeignTypes(in %a: !firrtl.uint<42>, out %b: !firrtl.uint) {
     %0 = firrtl.wire : index
     %1 = firrtl.wire : index
-    firrtl.strictconnect %0, %1 : index
+    firrtl.connect %0, %1 : index, index
     firrtl.connect %b, %a : !firrtl.uint, !firrtl.uint<42>
     // CHECK-NEXT: [[W0:%.+]] = firrtl.wire : index
     // CHECK-NEXT: [[W1:%.+]] = firrtl.wire : index
-    // CHECK-NEXT: firrtl.strictconnect [[W0]], [[W1]] : index
+    // CHECK-NEXT: firrtl.connect [[W0]], [[W1]] : index
   }
 
   // CHECK-LABEL: @Issue4859

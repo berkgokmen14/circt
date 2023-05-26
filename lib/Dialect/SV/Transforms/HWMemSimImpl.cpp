@@ -52,7 +52,7 @@ struct FirMemory {
 namespace {
 
 class HWMemSimImpl {
-  bool ignoreReadEnableMem;
+  bool ignoreReadEnable;
   bool addMuxPragmas;
   bool disableMemRandomization;
   bool disableRegRandomization;
@@ -68,11 +68,11 @@ class HWMemSimImpl {
 public:
   Namespace &mlirModuleNamespace;
 
-  HWMemSimImpl(bool ignoreReadEnableMem, bool addMuxPragmas,
+  HWMemSimImpl(bool ignoreReadEnable, bool addMuxPragmas,
                bool disableMemRandomization, bool disableRegRandomization,
                bool addVivadoRAMAddressConflictSynthesisBugWorkaround,
                Namespace &mlirModuleNamespace)
-      : ignoreReadEnableMem(ignoreReadEnableMem), addMuxPragmas(addMuxPragmas),
+      : ignoreReadEnable(ignoreReadEnable), addMuxPragmas(addMuxPragmas),
         disableMemRandomization(disableMemRandomization),
         disableRegRandomization(disableRegRandomization),
         addVivadoRAMAddressConflictSynthesisBugWorkaround(
@@ -85,7 +85,7 @@ public:
 struct HWMemSimImplPass : public sv::HWMemSimImplBase<HWMemSimImplPass> {
   void runOnOperation() override;
 
-  using sv::HWMemSimImplBase<HWMemSimImplPass>::ignoreReadEnableMem;
+  using sv::HWMemSimImplBase<HWMemSimImplPass>::ignoreReadEnable;
   using sv::HWMemSimImplBase<HWMemSimImplPass>::replSeqMem;
   using sv::HWMemSimImplBase<HWMemSimImplPass>::addMuxPragmas;
   using sv::HWMemSimImplBase<HWMemSimImplPass>::disableMemRandomization;
@@ -272,7 +272,7 @@ void HWMemSimImpl::generateMemory(HWModuleOp op, FirMemory mem) {
     Value en = op.getBody().getArgument(inArg++);
     Value clock = op.getBody().getArgument(inArg++);
     // Add pipeline stages
-    if (ignoreReadEnableMem) {
+    if (ignoreReadEnable) {
       for (size_t j = 0, e = mem.readLatency; j != e; ++j) {
         auto enLast = en;
         if (j < e - 1)
@@ -287,7 +287,7 @@ void HWMemSimImpl::generateMemory(HWModuleOp op, FirMemory mem) {
 
     // Read Logic
     Value rdata = getMemoryRead(b, reg, addr, addMuxPragmas);
-    if (!ignoreReadEnableMem) {
+    if (!ignoreReadEnable) {
       Value x = b.create<sv::ConstantXOp>(rdata.getType());
       rdata = b.create<comb::MuxOp>(en, rdata, x, false);
     }
@@ -478,7 +478,7 @@ void HWMemSimImpl::generateMemory(HWModuleOp op, FirMemory mem) {
           b.getStringAttr(moduleNamespace.newName(reg.getName())));
 
     if (mem.initIsInline) {
-      b.create<sv::IfDefOp>("SYNTHESIS", std::function<void()>(), [&]() {
+      b.create<sv::IfDefOp>("ENABLE_INITIAL_MEM_", [&]() {
         b.create<sv::InitialOp>([&]() {
           b.create<sv::ReadMemOp>(reg, mem.initFilename,
                                   mem.initIsBinary
@@ -508,13 +508,17 @@ void HWMemSimImpl::generateMemory(HWModuleOp op, FirMemory mem) {
             b.getContext(), boundModule.getName() + ".sv");
       }
 
+      // Build the hierpathop
+      auto path = b.create<hw::HierPathOp>(
+          mlirModuleNamespace.newName(op.getName() + "_path"),
+          b.getArrayAttr(
+              ::InnerRefAttr::get(op.getNameAttr(), reg.getInnerSymAttr())));
+
       boundModule->setAttr("output_file", filename);
       b.setInsertionPointToStart(op.getBodyBlock());
       b.setInsertionPointToStart(boundModule.getBodyBlock());
       b.create<sv::InitialOp>([&]() {
-        auto xmr = b.create<sv::XMRRefOp>(
-            reg.getType(),
-            hw::InnerRefAttr::get(op.getNameAttr(), reg.getInnerSymAttr()));
+        auto xmr = b.create<sv::XMRRefOp>(reg.getType(), path.getSymNameAttr());
         b.create<sv::ReadMemOp>(xmr, mem.initFilename,
                                 mem.initIsBinary ? MemBaseTypeAttr::MemBaseBin
                                                  : MemBaseTypeAttr::MemBaseHex);
@@ -543,7 +547,7 @@ void HWMemSimImpl::generateMemory(HWModuleOp op, FirMemory mem) {
     return;
 
   constexpr unsigned randomWidth = 32;
-  b.create<sv::IfDefOp>("SYNTHESIS", std::function<void()>(), [&]() {
+  b.create<sv::IfDefOp>("ENABLE_INITIAL_MEM_", [&]() {
     sv::RegOp randReg;
     SmallVector<sv::RegOp> randRegs;
     if (!disableRegRandomization) {
@@ -714,12 +718,9 @@ void HWMemSimImplPass::runOnOperation() {
 
       // The requirements for macro replacement:
       // 1. read latency and write latency of one.
-      // 2. only one readwrite port or write port.
-      // 3. zero or one read port.
-      // 4. undefined read-under-write behavior.
+      // 2. undefined read-under-write behavior.
       if (replSeqMem && ((mem.readLatency == 1 && mem.writeLatency == 1) &&
-                         (mem.numWritePorts + mem.numReadWritePorts == 1) &&
-                         (mem.numReadPorts <= 1) && mem.dataWidth > 0)) {
+                         mem.dataWidth > 0)) {
         builder.create<HWModuleExternOp>(oldModule.getLoc(), nameAttr,
                                          oldModule.getPorts());
       } else {
@@ -730,8 +731,8 @@ void HWMemSimImplPass::runOnOperation() {
         newModule.setCommentAttr(
             builder.getStringAttr("VCS coverage exclude_file"));
 
-        HWMemSimImpl(ignoreReadEnableMem, addMuxPragmas,
-                     disableMemRandomization, disableRegRandomization,
+        HWMemSimImpl(ignoreReadEnable, addMuxPragmas, disableMemRandomization,
+                     disableRegRandomization,
                      addVivadoRAMAddressConflictSynthesisBugWorkaround,
                      mlirModuleNamespace)
             .generateMemory(newModule, mem);
@@ -747,12 +748,12 @@ void HWMemSimImplPass::runOnOperation() {
 }
 
 std::unique_ptr<Pass> circt::sv::createHWMemSimImplPass(
-    bool replSeqMem, bool ignoreReadEnableMem, bool addMuxPragmas,
+    bool replSeqMem, bool ignoreReadEnable, bool addMuxPragmas,
     bool disableMemRandomization, bool disableRegRandomization,
     bool addVivadoRAMAddressConflictSynthesisBugWorkaround) {
   auto pass = std::make_unique<HWMemSimImplPass>();
   pass->replSeqMem = replSeqMem;
-  pass->ignoreReadEnableMem = ignoreReadEnableMem;
+  pass->ignoreReadEnable = ignoreReadEnable;
   pass->addMuxPragmas = addMuxPragmas;
   pass->disableMemRandomization = disableMemRandomization;
   pass->disableRegRandomization = disableRegRandomization;

@@ -696,8 +696,8 @@ struct Deduper {
     if (auto to = dyn_cast<FModuleOp>(*toModule))
       rewriteModuleNLAs(renameMap, to, cast<FModuleOp>(*fromModule));
     else
-      rewriteExtModuleNLAs(renameMap, toModule.moduleNameAttr(),
-                           fromModule.moduleNameAttr());
+      rewriteExtModuleNLAs(renameMap, toModule.getModuleNameAttr(),
+                           fromModule.getModuleNameAttr());
 
     replaceInstances(toModule, fromModule);
   }
@@ -717,7 +717,8 @@ struct Deduper {
 private:
   /// Get a cached namespace for a module.
   ModuleNamespace &getNamespace(Operation *module) {
-    auto [it, inserted] = moduleNamespaces.try_emplace(module, module);
+    auto [it, inserted] =
+        moduleNamespaces.try_emplace(module, cast<FModuleLike>(module));
     return it->second;
   }
 
@@ -748,9 +749,9 @@ private:
   /// of the "toModule".
   void replaceInstances(FModuleLike toModule, Operation *fromModule) {
     // Replace all instances of the other module.
-    auto *fromNode = instanceGraph[fromModule];
-    auto *toNode = instanceGraph[::cast<hw::HWModuleLike>(*toModule)];
-    auto toModuleRef = FlatSymbolRefAttr::get(toModule.moduleNameAttr());
+    auto *fromNode = instanceGraph[::cast<hw::HWModuleLike>(fromModule)];
+    auto *toNode = instanceGraph[toModule];
+    auto toModuleRef = FlatSymbolRefAttr::get(toModule.getModuleNameAttr());
     for (auto *oldInstRec : llvm::make_early_inc_range(fromNode->uses())) {
       auto inst = ::cast<InstanceOp>(*oldInstRec->getInstance());
       inst.setModuleNameAttr(toModuleRef);
@@ -776,8 +777,9 @@ private:
     namepath.append(baseNamepath.begin(), baseNamepath.end());
 
     auto loc = fromModule->getLoc();
+    auto *fromNode = instanceGraph[cast<hw::HWModuleLike>(fromModule)];
     SmallVector<FlatSymbolRefAttr> nlas;
-    for (auto *instanceRecord : instanceGraph[fromModule]->uses()) {
+    for (auto *instanceRecord : fromNode->uses()) {
       auto parent = cast<FModuleOp>(*instanceRecord->getParent()->getModule());
       auto inst = instanceRecord->getInstance();
       namepath[0] = OpAnnoTarget(inst).getNLAReference(getNamespace(parent));
@@ -982,7 +984,7 @@ private:
         continue;
       }
       // Otherwise make the annotation non-local and add it to the set.
-      makeAnnotationNonLocal(toModule.moduleNameAttr(), to, fromModule, anno,
+      makeAnnotationNonLocal(toModule.getModuleNameAttr(), to, fromModule, anno,
                              newAnnotations);
     }
   }
@@ -1176,7 +1178,7 @@ void fixupConnect(ImplicitLocOpBuilder &builder, Value dst, Value src) {
   auto dstType = dst.getType();
   auto srcType = src.getType();
   if (dstType == srcType) {
-    builder.create<StrictConnectOp>(dst, src);
+    emitConnect(builder, dst, src);
     return;
   }
   // It must be a bundle type and the field name has changed. We have to
@@ -1293,7 +1295,7 @@ class DedupPass : public DedupBase<DedupPass> {
         }));
 
     for (auto module : modules) {
-      auto moduleName = module.moduleNameAttr();
+      auto moduleName = module.getModuleNameAttr();
       // If the module is marked with NoDedup, just skip it.
       if (AnnotationSet(module).hasAnnotation(noDedupClass)) {
         // We record it in the dedup map to help detect errors when the user
@@ -1317,7 +1319,7 @@ class DedupPass : public DedupBase<DedupPass> {
       if (it != moduleHashes.end()) {
         auto original = cast<FModuleLike>(it->second);
         // Record the group ID of the other module.
-        dedupMap[moduleName] = original.moduleNameAttr();
+        dedupMap[moduleName] = original.getModuleNameAttr();
         deduper.dedup(original, module);
         ++erasedModules;
         anythingChanged = true;

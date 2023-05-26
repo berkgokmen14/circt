@@ -23,6 +23,7 @@ include "circt/Dialect/HW/HWTypes.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/SymbolInterfaces.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
 
 class ReferableDeclOp<string mnemonic, list<Trait> traits = []> :
   FIRRTLOp<mnemonic, traits # [HasCustomSSAName,
@@ -315,7 +316,8 @@ def RegOp : ReferableDeclOp<"reg", [Forceable]> {
       $_state.addTypes(elementType);
       if (forceable) {
         $_state.addAttribute(getForceableAttrName($_state.name), forceable);
-        $_state.addTypes(detail::getForceableResultType(true, elementType));
+        if (auto type = detail::getForceableResultType(true, elementType))
+          $_state.addTypes(type);
       }
     }]>,
     OpBuilder<(ins "::mlir::Type":$elementType,
@@ -373,7 +375,7 @@ def RegResetOp : ReferableDeclOp<"regreset", [Forceable]> {
 
   let arguments = (
     ins ClockType:$clockVal, AnyResetType:$resetSignal,
-        AnyRegisterType:$resetValue,
+        FIRRTLBaseType:$resetValue,
         StrAttr:$name, NameKindAttr:$nameKind,
         AnnotationArrayAttr:$annotations,
         OptionalAttr<InnerSymAttr>:$inner_sym,
@@ -410,7 +412,8 @@ def RegResetOp : ReferableDeclOp<"regreset", [Forceable]> {
       $_state.addTypes(elementType);
       if (forceable) {
         $_state.addAttribute(getForceableAttrName($_state.name), forceable);
-        $_state.addTypes(detail::getForceableResultType(true, elementType));
+        if (auto type = detail::getForceableResultType(true, elementType))
+          $_state.addTypes(type);
       }
     }]>,
     OpBuilder<(ins "::mlir::Type":$elementType, "::mlir::Value":$clockVal,
@@ -496,7 +499,8 @@ def WireOp : ReferableDeclOp<"wire", [Forceable]> {
       $_state.addTypes(elementType);
       if (forceable) {
         $_state.addAttribute(getForceableAttrName($_state.name), forceable);
-        $_state.addTypes(detail::getForceableResultType(true, elementType));
+        if (auto type = detail::getForceableResultType(true, elementType))
+          $_state.addTypes(type);
       }
     }]>,
     OpBuilder<(ins "::mlir::Type":$elementType,
@@ -538,6 +542,34 @@ def WireOp : ReferableDeclOp<"wire", [Forceable]> {
     (`sym` $inner_sym^)? `` custom<NameKind>($nameKind)
     (`forceable` $forceable^)? `` custom<FIRRTLImplicitSSAName>(attr-dict) `:`
     qualified(type($result)) (`,` qualified(type($ref))^)?
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// Clock Gate Intrinsic
+//===----------------------------------------------------------------------===//
+
+def ClockGateIntrinsicOp : FIRRTLOp<"int.clock_gate", [Pure]> {
+  let summary = "Safely gates a clock with an enable signal";
+  let description = [{
+    The `int.clock_gate` enables and disables a clock safely, without glitches,
+    based on a boolean enable value. If the enable input is 1, the output clock
+    produced by the clock gate is identical to the input clock. If the enable
+    input is 0, the output clock is a constant zero.
+
+    The enable input is sampled at the rising edge of the input clock; any
+    changes on the enable before or after that edge are ignored and do not
+    affect the output clock.
+  }];
+
+  let arguments = (ins NonConstClockType:$input,
+                       NonConstUInt1Type:$enable,
+                       Optional<NonConstUInt1Type>:$test_enable);
+  let results = (outs NonConstClockType:$output);
+  let hasFolder = 1;
+  let hasCanonicalizeMethod = 1;
+  let assemblyFormat = [{
+    $input `,` $enable (`,` $test_enable^)? attr-dict
   }];
 }
 

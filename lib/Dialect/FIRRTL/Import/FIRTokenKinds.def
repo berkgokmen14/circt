@@ -45,7 +45,8 @@ TOK_MARKER(eof)
 TOK_MARKER(error)
 
 // Identifiers.
-TOK_IDENTIFIER(identifier) // foo
+TOK_IDENTIFIER(identifier)         // foo
+TOK_IDENTIFIER(literal_identifier) // `42`
 
 // Literals
 TOK_LITERAL(integer)        // 42
@@ -65,7 +66,9 @@ TOK_PUNCTUATION(question, "?")
 TOK_PUNCTUATION(l_paren, "(")
 TOK_PUNCTUATION(r_paren, ")")
 TOK_PUNCTUATION(l_brace, "{")
+TOK_PUNCTUATION(l_brace_bar, "{|")
 TOK_PUNCTUATION(r_brace, "}")
+TOK_PUNCTUATION(r_brace_bar, "|}")
 TOK_PUNCTUATION(l_square, "[")
 TOK_PUNCTUATION(r_square, "]")
 TOK_PUNCTUATION(less, "<")
@@ -90,6 +93,7 @@ TOK_KEYWORD(Reset)
 TOK_KEYWORD(SInt)
 TOK_KEYWORD(UInt)
 TOK_KEYWORD(attach)
+TOK_KEYWORD(case)
 TOK_KEYWORD(circuit)
 TOK_KEYWORD(cmem)
 TOK_KEYWORD(connect)
@@ -106,6 +110,7 @@ TOK_KEYWORD(inst)
 TOK_KEYWORD(invalid)
 TOK_KEYWORD(invalidate)
 TOK_KEYWORD(is)
+TOK_KEYWORD(match)
 TOK_KEYWORD(mem)
 TOK_KEYWORD(module)
 TOK_KEYWORD(mport)
@@ -119,6 +124,7 @@ TOK_KEYWORD(rdwr)
 TOK_KEYWORD(read)
 TOK_KEYWORD(ref)
 TOK_KEYWORD(reg)
+TOK_KEYWORD(regreset)
 TOK_KEYWORD(reset)
 TOK_KEYWORD(skip)
 TOK_KEYWORD(smem)

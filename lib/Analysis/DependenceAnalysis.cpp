@@ -134,15 +134,15 @@ circt::analysis::MemoryDependenceAnalysis::MemoryDependenceAnalysis(
   depthToLoops.erase(depthToLoops.begin());
 
   // Collect load and store operations to check.
-  auto rootReads = funcOp.getFunctionBody().getOps<AffineReadOpInterface>();
-  auto rootWrites = funcOp.getFunctionBody().getOps<AffineWriteOpInterface>();
+  auto rootReads = funcOp.getOps<AffineReadOpInterface>();
+  auto rootWrites = funcOp.getOps<AffineWriteOpInterface>();
   SmallVector<Operation *> rootMemoryOps(rootReads.begin(), rootReads.end());
   rootMemoryOps.append(rootWrites.begin(), rootWrites.end());
 
   // Need to loop over each root loop to preserve loop nest structure
-  for (auto forOp : funcOp.getFunctionBody().getOps<AffineForOp>()) {
+  for (auto forOp : funcOp.getOps<AffineForOp>()) {
     SmallVector<Operation *> memoryOps = rootMemoryOps;
-    forOp.getLoopBody().walk([&](Operation *op) {
+    forOp.walk([&](Operation *op) {
       if (isa<AffineReadOpInterface, AffineWriteOpInterface>(op))
         memoryOps.push_back(op);
     });

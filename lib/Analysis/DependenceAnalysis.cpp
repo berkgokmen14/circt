@@ -138,35 +138,17 @@ circt::analysis::MemoryDependenceAnalysis::MemoryDependenceAnalysis(
   // Collect affine loops grouped by nesting depth.
   std::vector<SmallVector<AffineForOp, 2>> depthToLoops;
   mlir::affine::gatherLoops(funcOp, depthToLoops);
-  depthToLoops.erase(depthToLoops.begin());
 
   // Collect load and store operations to check.
-  auto rootReads = funcOp.getOps<AffineReadOpInterface>();
-  auto rootWrites = funcOp.getOps<AffineWriteOpInterface>();
-  SmallVector<Operation *> rootMemoryOps(rootReads.begin(), rootReads.end());
-  rootMemoryOps.append(rootWrites.begin(), rootWrites.end());
+  SmallVector<Operation *> memoryOps;
+  funcOp.walk([&](Operation *op) {
+    if (isa<AffineReadOpInterface, AffineWriteOpInterface>(op))
+      memoryOps.push_back(op);
+  });
 
-  // Need to loop over each root loop to preserve loop nest structure
-  for (auto forOp : funcOp.getOps<AffineForOp>()) {
-    SmallVector<Operation *> memoryOps = rootMemoryOps;
-    forOp.walk([&](Operation *op) {
-      if (isa<AffineReadOpInterface, AffineWriteOpInterface>(op))
-        memoryOps.push_back(op);
-    });
-    std::size_t maxLoopDepth = 1;
-    // Find out max depth for this loop nest <= depthToLoops().size() - 1
-    for (auto loops : enumerate(depthToLoops))
-      for (auto innerLoop : loops.value())
-        if (forOp->isAncestor(innerLoop)) {
-          // Add plus 2 since we popped the front
-          maxLoopDepth = std::max(maxLoopDepth, loops.index() + 2);
-          break;
-        }
-
-    // For each depth, check memref accesses.
-    for (unsigned depth = 1; depth <= maxLoopDepth; ++depth)
-      checkMemrefDependence(memoryOps, depth, results);
-  }
+  // For each depth, check memref accesses.
+  for (unsigned depth = 1, e = depthToLoops.size(); depth <= e; ++depth)
+    checkMemrefDependence(memoryOps, depth, results);
 }
 
 /// Returns the dependences, if any, that the given Operation depends on.
@@ -180,17 +162,14 @@ void circt::analysis::MemoryDependenceAnalysis::replaceOp(Operation *oldOp,
                                                           Operation *newOp) {
   // If oldOp had any dependences.
   auto it = results.find(oldOp);
-  if (it != results.end()) {
+  if (it != results.end())
     // Move the dependences to newOp.
-    results.insert(std::pair(newOp, it->getSecond()));
-    results.erase(oldOp);
-  }
+    it->first = newOp;
 
   // Find any dependences originating from oldOp and make newOp the source.
   // TODO(mikeurbach): consider adding an inverted index to avoid this scan.
-  for (auto &it : results) {
+  for (auto &it : results)
     for (auto &dep : it.second)
       if (dep.source == oldOp)
         dep.source = newOp;
-  }
 }

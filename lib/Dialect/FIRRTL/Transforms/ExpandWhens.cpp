@@ -333,6 +333,10 @@ public:
     recordConnect(getFieldRefFromValue(op.getDest()), op);
   }
 
+  void visitStmt(PropAssignOp op) {
+    recordConnect(getFieldRefFromValue(op.getDest()), op);
+  }
+
   void processWhenOp(WhenOp whenOp, Value outerCondition);
 
   /// Combine the connect statements from each side of the block. There are 5
@@ -384,8 +388,6 @@ public:
         elseConnect->erase();
         recordConnect(dest, newConnect);
 
-        // Do not process connect in the else scope.
-        elseScope.erase(dest);
         continue;
       }
 
@@ -419,6 +421,11 @@ public:
       auto dest = std::get<0>(destAndConnect);
       auto elseConnect = std::get<1>(destAndConnect);
 
+      // If this destination was driven in the 'then' scope, then we will have
+      // already consumed the driver from the 'else' scope, and we must skip it.
+      if (thenScope.contains(dest))
+        continue;
+
       auto outerIt = driverMap.find(dest);
       if (outerIt == driverMap.end()) {
         // `dest` is set in `else` only. This indicates it was created in the
@@ -430,7 +437,7 @@ public:
       auto &outerConnect = std::get<1>(*outerIt);
       if (!outerConnect) {
         if (isLastConnect(elseConnect)) {
-          // `dest` is null in the outer scope. This indicate an initialization
+          // `dest` is null in the outer scope. This indicates an initialization
           // problem: `mux(p, then, nullptr)`. Just delete the broken connect.
           elseConnect->erase();
         } else {

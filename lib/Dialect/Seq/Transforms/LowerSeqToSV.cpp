@@ -46,8 +46,6 @@ struct SeqFIRRTLToSVPass
     : public impl::LowerSeqFIRRTLToSVBase<SeqFIRRTLToSVPass> {
   void runOnOperation() override;
   using LowerSeqFIRRTLToSVBase<SeqFIRRTLToSVPass>::disableRegRandomization;
-  using LowerSeqFIRRTLToSVBase<
-      SeqFIRRTLToSVPass>::addVivadoRAMAddressConflictSynthesisBugWorkaround;
   using LowerSeqFIRRTLToSVBase<SeqFIRRTLToSVPass>::emitSeparateAlwaysBlocks;
   using LowerSeqFIRRTLToSVBase<SeqFIRRTLToSVPass>::LowerSeqFIRRTLToSVBase;
   using LowerSeqFIRRTLToSVBase<SeqFIRRTLToSVPass>::numSubaccessRestored;
@@ -144,11 +142,8 @@ namespace {
 class FirRegLower {
 public:
   FirRegLower(hw::HWModuleOp module, bool disableRegRandomization = false,
-              bool addVivadoRAMAddressConflictSynthesisBugWorkaround = false,
               bool emitSeparateAlwaysBlocks = false)
       : module(module), disableRegRandomization(disableRegRandomization),
-        addVivadoRAMAddressConflictSynthesisBugWorkaround(
-            addVivadoRAMAddressConflictSynthesisBugWorkaround),
         emitSeparateAlwaysBlocks(emitSeparateAlwaysBlocks){};
 
   void lower();
@@ -189,7 +184,7 @@ private:
     OpBuilder builder(module.getBody());
     auto &constant = constantCache[value];
     if (constant) {
-      constant->setLoc(builder.getFusedLoc(constant->getLoc(), loc));
+      constant->setLoc(builder.getFusedLoc({constant->getLoc(), loc}));
       return constant;
     }
 
@@ -211,7 +206,6 @@ private:
   hw::HWModuleOp module;
 
   bool disableRegRandomization;
-  bool addVivadoRAMAddressConflictSynthesisBugWorkaround;
   bool emitSeparateAlwaysBlocks;
 };
 } // namespace
@@ -492,17 +486,38 @@ FirRegLower::tryRestoringSubaccess(OpBuilder &builder, Value reg, Value term,
 
 void FirRegLower::createTree(OpBuilder &builder, Value reg, Value term,
                              Value next) {
-  // If term and next values are equivalent, we don't have to create an
-  // assignment.
-  if (areEquivalentValues(term, next))
-    return;
-  auto mux = next.getDefiningOp<comb::MuxOp>();
-  if (mux && mux.getTwoState()) {
-    addToIfBlock(
-        builder, mux.getCond(),
-        [&]() { createTree(builder, reg, term, mux.getTrueValue()); },
-        [&]() { createTree(builder, reg, term, mux.getFalseValue()); });
-  } else {
+
+  SmallVector<std::tuple<Block *, Value, Value, Value>> worklist;
+  auto addToWorklist = [&](Value reg, Value term, Value next) {
+    worklist.push_back({builder.getBlock(), reg, term, next});
+  };
+
+  auto getArrayIndex = [&](Value reg, Value idx) {
+    // Create an array index op just after `reg`.
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointAfterValue(reg);
+    return builder.create<sv::ArrayIndexInOutOp>(reg.getLoc(), reg, idx);
+  };
+
+  SmallVector<Value, 8> opsToDelete;
+  addToWorklist(reg, term, next);
+  while (!worklist.empty()) {
+    OpBuilder::InsertionGuard guard(builder);
+    Block *block;
+    Value reg, term, next;
+    std::tie(block, reg, term, next) = worklist.pop_back_val();
+    builder.setInsertionPointToEnd(block);
+    if (areEquivalentValues(term, next))
+      continue;
+
+    auto mux = next.getDefiningOp<comb::MuxOp>();
+    if (mux && mux.getTwoState()) {
+      addToIfBlock(
+          builder, mux.getCond(),
+          [&]() { addToWorklist(reg, term, mux.getTrueValue()); },
+          [&]() { addToWorklist(reg, term, mux.getFalseValue()); });
+      continue;
+    }
     // If the next value is an array creation, split the value into
     // invidial elements and construct trees recursively.
     if (auto array = next.getDefiningOp<hw::ArrayCreateOp>()) {
@@ -514,28 +529,24 @@ void FirRegLower::createTree(OpBuilder &builder, Value reg, Value term,
         addToIfBlock(
             builder, cond,
             [&]() {
-              Value nextReg;
-              {
-                // Create an array index op just after `reg`.
-                OpBuilder::InsertionGuard guard(builder);
-                builder.setInsertionPointAfterValue(reg);
-                nextReg = builder.create<sv::ArrayIndexInOutOp>(reg.getLoc(),
-                                                                reg, index);
-              }
+              Value nextReg = getArrayIndex(reg, index);
+              // Create a value to use for equivalence checking in the
+              // recursive calls. Add the value to `opsToDelete` so that it can
+              // be deleted afterwards.
               auto termElement =
                   builder.create<hw::ArrayGetOp>(term.getLoc(), term, index);
-              createTree(builder, nextReg, termElement, trueValue);
-              termElement.erase();
+              opsToDelete.push_back(termElement);
+              addToWorklist(nextReg, termElement, trueValue);
             },
             []() {});
         ++numSubaccessRestored;
-        return;
+        continue;
       }
       // Compat fix for GCC12's libstdc++, cannot use
       // llvm::enumerate(llvm::reverse(OperandRange)).  See #4900.
-      SmallVector<Value> reverseOpValues(llvm::reverse(array.getOperands()));
-      for (auto [idx, value] : llvm::enumerate(reverseOpValues)) {
-
+      // SmallVector<Value> reverseOpValues(llvm::reverse(array.getOperands()));
+      for (auto [idx, value] : llvm::enumerate(array.getOperands())) {
+        idx = array.getOperands().size() - idx - 1;
         // Create an index constant.
         auto idxVal = getOrCreateConstant(
             array.getLoc(),
@@ -543,24 +554,27 @@ void FirRegLower::createTree(OpBuilder &builder, Value reg, Value term,
                   idx));
 
         auto &index = arrayIndexCache[{reg, idx}];
-        if (!index) {
-          // Create an array index op just after `reg`.
-          OpBuilder::InsertionGuard guard(builder);
-          builder.setInsertionPointAfterValue(reg);
-          index =
-              builder.create<sv::ArrayIndexInOutOp>(reg.getLoc(), reg, idxVal);
-        }
+        if (!index)
+          index = getArrayIndex(reg, idxVal);
 
+        // Create a value to use for equivalence checking in the
+        // recursive calls. Add the value to `opsToDelete` so that it can
+        // be deleted afterwards.
         auto termElement =
             builder.create<hw::ArrayGetOp>(term.getLoc(), term, idxVal);
-        createTree(builder, index, termElement, value);
-        // This value was used to check the equivalence of elements so useless
-        // anymore.
-        termElement.erase();
+        opsToDelete.push_back(termElement);
+        addToWorklist(index, termElement, value);
       }
-      return;
+      continue;
     }
+
     builder.create<sv::PAssignOp>(term.getLoc(), reg, next);
+  }
+
+  while (!opsToDelete.empty()) {
+    auto value = opsToDelete.pop_back_val();
+    assert(value.use_empty());
+    value.getDefiningOp()->erase();
   }
 }
 
@@ -580,17 +594,6 @@ FirRegLower::RegLowerInfo FirRegLower::lower(FirRegOp reg) {
 
   // Move Attributes
   svReg.reg->setDialectAttrs(reg->getDialectAttrs());
-
-  // For array registers, we annotate ram_style attributes if
-  // `addVivadoRAMAddressConflictSynthesisBugWorkaround` is enabled so that we
-  // can workaround incorrect optimizations of vivado. See "RAM address conflict
-  // and Vivado synthesis bug" issue in the vivado forum for the more detail.
-  if (addVivadoRAMAddressConflictSynthesisBugWorkaround &&
-      hw::type_isa<hw::ArrayType, hw::UnpackedArrayType>(reg.getType()))
-    circt::sv::setSVAttributes(
-        svReg.reg,
-        sv::SVAttributeAttr::get(builder.getContext(), "ram_style",
-                                 R"("distributed")", /*emitAsComment=*/false));
 
   if (auto innerSymAttr = reg.getInnerSymAttr())
     svReg.reg.setInnerSymAttr(innerSymAttr);
@@ -781,7 +784,6 @@ void SeqToSVPass::runOnOperation() {
 void SeqFIRRTLToSVPass::runOnOperation() {
   hw::HWModuleOp module = getOperation();
   FirRegLower firRegLower(module, disableRegRandomization,
-                          addVivadoRAMAddressConflictSynthesisBugWorkaround,
                           emitSeparateAlwaysBlocks);
   firRegLower.lower();
   numSubaccessRestored += firRegLower.numSubaccessRestored;

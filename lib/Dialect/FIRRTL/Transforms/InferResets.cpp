@@ -758,7 +758,7 @@ void InferResetsPass::traceResets(CircuitOp circuit) {
             traceResets(op.getDataType(), op.getData(), 0, op.getDataType(),
                         op.getDataRef(), 0, op.getLoc());
         })
-        .Case<UninferredResetCastOp>([&](auto op) {
+        .Case<UninferredResetCastOp, ConstCastOp, RefCastOp>([&](auto op) {
           traceResets(op.getResult(), op.getInput(), op.getLoc());
         })
         .Case<InvalidValueOp>([&](auto op) {
@@ -1073,7 +1073,8 @@ LogicalResult InferResetsPass::updateReset(ResetNetwork net, ResetKind kind) {
     Value value = signal.field.getValue();
     if (!value.isa<BlockArgument>() &&
         !isa_and_nonnull<WireOp, RegOp, RegResetOp, InstanceOp, InvalidValueOp,
-                         UninferredResetCastOp>(value.getDefiningOp()))
+                         RefCastOp, UninferredResetCastOp>(
+            value.getDefiningOp()))
       continue;
     if (updateReset(signal.field, resetType)) {
       for (auto user : value.getUsers())
@@ -1125,6 +1126,17 @@ LogicalResult InferResetsPass::updateReset(ResetNetwork net, ResetKind kind) {
       uop.replaceAllUsesWith(uop.getInput());
       LLVM_DEBUG(llvm::dbgs() << "- Inferred " << uop << "\n");
       uop.erase();
+    } else if (auto constCastOp = dyn_cast<ConstCastOp>(wop)) {
+      // Propagate inferred reset types across const-casts of what was
+      // originally ResetType
+      if (constCastOp.getResult().getType().isa<ResetType>() &&
+          !constCastOp.getInput().getType().isa<ResetType>()) {
+        auto result = constCastOp.getResult();
+        result.setType(constCastOp.getInput().getType().getConstType(false));
+        for (auto *user : result.getUsers())
+          worklist.insert(user);
+        LLVM_DEBUG(llvm::dbgs() << "- Inferred " << constCastOp << "\n");
+      }
     }
   }
 

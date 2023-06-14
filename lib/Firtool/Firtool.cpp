@@ -26,14 +26,14 @@ LogicalResult firtool::populateCHIRRTLToLowFIRRTL(mlir::PassManager &pm,
                                                   StringRef inputFilename) {
   pm.nest<firrtl::CircuitOp>().addPass(firrtl::createLowerIntrinsicsPass());
 
-  if (!opt.disableOptimization)
-    pm.nest<firrtl::CircuitOp>().nest<firrtl::FModuleOp>().addPass(
-        mlir::createCSEPass());
+  pm.nest<firrtl::CircuitOp>().addPass(firrtl::createInjectDUTHierarchyPass());
 
   pm.nest<firrtl::CircuitOp>().nest<firrtl::FModuleOp>().addPass(
       firrtl::createDropNamesPass(opt.getPreserveMode()));
 
-  pm.nest<firrtl::CircuitOp>().addPass(firrtl::createInjectDUTHierarchyPass());
+  if (!opt.disableOptimization)
+    pm.nest<firrtl::CircuitOp>().nest<firrtl::FModuleOp>().addPass(
+        mlir::createCSEPass());
 
   pm.nest<firrtl::CircuitOp>().nest<firrtl::FModuleOp>().addPass(
       firrtl::createLowerCHIRRTLPass());
@@ -59,6 +59,8 @@ LogicalResult firtool::populateCHIRRTLToLowFIRRTL(mlir::PassManager &pm,
           opt.chiselInterfaceOutDirectory));
     }
   }
+
+  pm.nest<firrtl::CircuitOp>().nestAny().addPass(firrtl::createDropConstPass());
 
   if (opt.dedup)
     pm.nest<firrtl::CircuitOp>().addPass(firrtl::createDedupPass());
@@ -125,7 +127,7 @@ LogicalResult firtool::populateCHIRRTLToLowFIRRTL(mlir::PassManager &pm,
 
   pm.addNestedPass<firrtl::CircuitOp>(firrtl::createAddSeqMemPortsPass());
 
-  pm.nest<firrtl::CircuitOp>().addPass(firrtl::createCreateSiFiveMetadataPass(
+  pm.addPass(firrtl::createCreateSiFiveMetadataPass(
       opt.replSeqMem, opt.replSeqMemCircuit, opt.replSeqMemFile));
 
   pm.addNestedPass<firrtl::CircuitOp>(firrtl::createExtractInstancesPass());
@@ -159,7 +161,7 @@ LogicalResult firtool::populateCHIRRTLToLowFIRRTL(mlir::PassManager &pm,
         createSimpleCanonicalizerPass());
     pm.nest<firrtl::CircuitOp>().nest<firrtl::FModuleOp>().addPass(
         circt::firrtl::createRegisterOptimizerPass());
-    pm.nest<firrtl::CircuitOp>().addPass(firrtl::createIMDeadCodeElimPass());
+    pm.addPass(firrtl::createIMDeadCodeElimPass());
   }
 
   if (opt.emitOMIR)
@@ -191,7 +193,7 @@ LogicalResult firtool::populateLowFIRRTLToHW(mlir::PassManager &pm,
   // Lower the ref.resolve and ref.send ops and remove the RefType ports.
   // LowerToHW cannot handle RefType so, this pass must be run to remove all
   // RefType ports and ops.
-  pm.addPass(firrtl::createLowerXMRPass());
+  pm.nest<firrtl::CircuitOp>().addPass(firrtl::createLowerXMRPass());
 
   pm.addPass(createLowerFIRRTLToHWPass(
       opt.enableAnnotationWarning.getValue(),
@@ -210,11 +212,15 @@ LogicalResult firtool::populateLowFIRRTLToHW(mlir::PassManager &pm,
 
 LogicalResult firtool::populateHWToSV(mlir::PassManager &pm,
                                       const FirtoolOptions &opt) {
+  if (opt.extractTestCode)
+    pm.addPass(sv::createSVExtractTestCodePass(opt.etcDisableInstanceExtraction,
+                                               opt.etcDisableRegisterExtraction,
+                                               opt.etcDisableModuleInlining));
+
+  pm.addPass(seq::createExternalizeClockGatePass(opt.clockGateOpts));
   pm.nest<hw::HWModuleOp>().addPass(seq::createSeqFIRRTLLowerToSVPass(
       {/*disableRandomization=*/!opt.isRandomEnabled(
            FirtoolOptions::RandomKind::Reg),
-       /*addVivadoRAMAddressConflictSynthesisBugWorkaround=*/
-       opt.addVivadoRAMAddressConflictSynthesisBugWorkaround,
        /*emitSeparateAlwaysBlocks=*/
        opt.emitSeparateAlwaysBlocks}));
   pm.addPass(sv::createHWMemSimImplPass(
@@ -222,10 +228,6 @@ LogicalResult firtool::populateHWToSV(mlir::PassManager &pm,
       !opt.isRandomEnabled(FirtoolOptions::RandomKind::Mem),
       !opt.isRandomEnabled(FirtoolOptions::RandomKind::Reg),
       opt.addVivadoRAMAddressConflictSynthesisBugWorkaround));
-
-  if (opt.extractTestCode)
-    pm.addPass(sv::createSVExtractTestCodePass(opt.etcDisableInstanceExtraction,
-                                               opt.etcDisableModuleInlining));
 
   // If enabled, run the optimizer.
   if (!opt.disableOptimization) {

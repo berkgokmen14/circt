@@ -117,7 +117,7 @@ def RemoveUnusedPorts : Pass<"firrtl-remove-unused-ports", "firrtl::CircuitOp"> 
   ];
 }
 
-def IMDeadCodeElim : Pass<"firrtl-imdeadcodeelim", "firrtl::CircuitOp"> {
+def IMDeadCodeElim : Pass<"firrtl-imdeadcodeelim", "mlir::ModuleOp"> {
   let summary = "Intermodule dead code elimination";
   let description = [{
     This pass performs inter-module liveness analysis and deletes dead code
@@ -169,7 +169,7 @@ def AddSeqMemPorts : Pass<"firrtl-add-seqmem-ports", "firrtl::CircuitOp"> {
   ];
 }
 
-def CreateSiFiveMetadata : Pass<"firrtl-emit-metadata", "firrtl::CircuitOp"> {
+def CreateSiFiveMetadata : Pass<"firrtl-emit-metadata", "mlir::ModuleOp"> {
   let summary = "Emit metadata of the FIRRTL modules";
   let description = [{
     This pass handles the emission of several different kinds of metadata.
@@ -182,7 +182,7 @@ def CreateSiFiveMetadata : Pass<"firrtl-emit-metadata", "firrtl::CircuitOp"> {
     Option<"replSeqMemFile", "repl-seq-mem-file", "std::string", "",
       "File to which emit seq meme metadata">
   ];
-  let dependentDialects = ["hw::HWDialect"];
+  let dependentDialects = ["hw::HWDialect", "om::OMDialect"];
 }
 
 def FlattenMemory : Pass<"firrtl-flatten-memory", "firrtl::FModuleOp"> {
@@ -602,6 +602,8 @@ def DropName : Pass<"firrtl-drop-names", "firrtl::FModuleOp"> {
            }]>
   ];
   let statistics = [
+    Statistic<"numNamesDropped", "num-names-dropped",
+      "Number of names dropped">,
     Statistic<"numNamesConverted", "num-names-converted",
       "Number of interesting names made droppable">,
   ];
@@ -622,7 +624,7 @@ def RandomizeRegisterInit :
   let constructor = "circt::firrtl::createRandomizeRegisterInitPass()";
 }
 
-def LowerXMR : Pass<"firrtl-lower-xmr", "mlir::ModuleOp"> {
+def LowerXMR : Pass<"firrtl-lower-xmr", "firrtl::CircuitOp"> {
   let summary = "Lower ref ports to XMR";
   let description = [{
     This pass lowers RefType ops and ports to verbatim encoded XMRs.
@@ -689,6 +691,18 @@ def VBToBV : Pass<"firrtl-vb-to-bv", "firrtl::CircuitOp"> {
     vectors.
   }];
   let constructor = "circt::firrtl::createVBToBVPass()";
+}
+
+def DropConst : InterfacePass<"firrtl-drop-const", "firrtl::FModuleLike"> {
+  let summary = "Drop 'const' modifier from types";
+  let description = [{
+    This pass drops the 'const' modifier from all types and removes all 
+    const-cast ops. 
+    
+    This simplifies downstream passes and folds so that they do not need to 
+    take 'const' into account.
+  }];
+  let constructor = "circt::firrtl::createDropConstPass()";
 }
 
 def FinalizeIR : Pass<"firrtl-finalize-ir", "mlir::ModuleOp"> {

@@ -39,6 +39,7 @@ private:
   DenseSet<AffineMapAccessInterface> updateMemoryOps(AffineForOp affineFor);
   uint64_t getMinDepDistance(AffineForOp affineFor);
   std::optional<uint64_t> consumePragma(AffineForOp affineFor);
+  AffineForOp cloneIntoNewBlock(AffineForOp affineFor);
   LogicalResult unrollForDataParallel(AffineForOp affineFor);
   std::pair<AffineForOp, unsigned>
   getDeepestNestedForOp(std::pair<AffineForOp, unsigned> pair);
@@ -107,6 +108,25 @@ UnrollForLoopSchedule::consumePragma(AffineForOp affineFor) {
   return maxUnrollFactor;
 }
 
+// Clone an affine loop into its own isolated block. Not all values in scope are
+// copied over
+AffineForOp UnrollForLoopSchedule::cloneIntoNewBlock(AffineForOp affineFor) {
+  OpBuilder builder(affineFor);
+  auto originalPt = builder.saveInsertionPoint();
+  auto *originalBlk = originalPt.getBlock();
+  SmallVector<Location> locs;
+  for (auto arg : originalBlk->getArguments())
+    locs.push_back(arg.getLoc());
+  auto *tmpBlk =
+      builder.createBlock(originalBlk, originalBlk->getArgumentTypes(), locs);
+  IRMapping argsMapping;
+  for (unsigned i = 0; i < originalBlk->getNumArguments(); ++i)
+    argsMapping.map(originalBlk->getArgument(i), tmpBlk->getArgument(i));
+
+  return cast<AffineForOp>(
+      *builder.clone(*affineFor.getOperation(), argsMapping));
+}
+
 // Look for data-level parallelism towards the top level
 LogicalResult
 UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
@@ -126,29 +146,33 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   if (!perfectlyNested)
     return success();
 
-  // We need to know if we are fully-unrolling, because then the body will get
-  // promoted to the containing region
-  auto *containingRegion = affineFor->getParentRegion();
-  bool unrollFull =
+  // We need to know if we are fully-unrolling, because then the loop body will
+  // get promoted to the containing region. And the anchoring ForOp will change.
+  bool loopIsPromoted =
       unrollFactor >= getConstantTripCount(affineFor).value_or(
                           std::numeric_limits<uint64_t>::max() - 1);
 
-  if (loopUnrollUpToFactor(affineFor, unrollFactor).failed())
+  // Since the unrolled loop may be optimized/promoted away, I put the for loop
+  // in its own block to isolated the new anchoring ForOp
+  auto tmpFor = cloneIntoNewBlock(affineFor);
+  auto *tmpBlk = tmpFor->getBlock();
+
+  if (loopUnrollUpToFactor(tmpFor, unrollFactor).failed())
     return failure();
 
   SmallVector<AffineForOp> innerLoops;
-  // TODO(matth2k): If the loop got promoted, then we only want to grab the
-  // loops that are related together. This should be trivial, but I have no way
-  // to track which loops are clones. So this code will throw errors sometimes
-  if (unrollFull)
-    innerLoops.append(containingRegion->getOps<AffineForOp>().begin(),
-                      containingRegion->getOps<AffineForOp>().end());
+  // Since we isolated the unrolled loop in its own block we have isolated all
+  // the ops that can be trivially fused together
+  if (loopIsPromoted)
+    innerLoops.append(tmpBlk->getOps<AffineForOp>().begin(),
+                      tmpBlk->getOps<AffineForOp>().end());
   else
-    innerLoops.append(affineFor.getOps<AffineForOp>().begin(),
-                      affineFor.getOps<AffineForOp>().end());
+    innerLoops.append(tmpFor.getOps<AffineForOp>().begin(),
+                      tmpFor.getOps<AffineForOp>().end());
 
   auto destLoop = innerLoops.pop_back_val();
-  OpBuilder builder(containingRegion);
+
+  OpBuilder builder(affineFor);
   IRRewriter rewriter(builder);
 
   for (auto innerLoop : innerLoops) {
@@ -161,6 +185,11 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
 
   for (auto innerLoop : innerLoops)
     innerLoop->erase();
+
+  // Now we dump the fused-loop block in the location of the original loop
+  rewriter.inlineBlockBefore(tmpBlk, affineFor,
+                             affineFor->getBlock()->getArguments());
+  affineFor->erase();
 
   return success();
 }
@@ -200,9 +229,6 @@ std::pair<AffineForOp, unsigned> UnrollForLoopSchedule::getDeepestNestedForOp(
 
 void UnrollForLoopSchedule::runOnOperation() {
 
-  // Gert scheduling analyses
-  memDepAnalysis = &getAnalysis<MemoryDependenceAnalysis>();
-
   SmallVector<AffineForOp> rootForOps(getOperation().getOps<AffineForOp>());
   for (auto loop : rootForOps)
     if (unrollForDataParallel(loop).failed())
@@ -211,6 +237,9 @@ void UnrollForLoopSchedule::runOnOperation() {
   SmallVector<AffineForOp> opsToPipeline;
   for (auto loop : getOperation().getOps<AffineForOp>())
     opsToPipeline.push_back(getDeepestNestedForOp(std::pair(loop, 0)).first);
+
+  // Get scheduling analyses
+  memDepAnalysis = &getAnalysis<MemoryDependenceAnalysis>();
 
   for (auto loop : opsToPipeline)
     if (unrollForPipelineParallel(loop).failed())

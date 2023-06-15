@@ -10,12 +10,18 @@
 #include "circt/Analysis/DependenceAnalysis.h"
 #include "circt/Analysis/SchedulingAnalysis.h"
 #include "circt/Transforms/Passes.h"
+#include "mlir/Dialect/Affine/Analysis/LoopAnalysis.h"
+#include "mlir/Dialect/Affine/Analysis/Utils.h"
+#include "mlir/Dialect/Affine/LoopFusionUtils.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Pass/Pass.h"
 #include <algorithm>
+#include <cassert>
+#include <cstdint>
 #include <limits>
 
 using namespace mlir;
@@ -30,52 +36,33 @@ struct UnrollForLoopSchedule
   void runOnOperation() override;
 
 private:
-  std::tuple<unsigned, AffineForOp>
-  getDeepestNestedLoop(std::tuple<unsigned, AffineForOp> root);
-  DenseSet<AffineMapAccessInterface> updateMemoryOps(AffineForOp innermostLoop);
-  unsigned getMinDepDistance(AffineForOp innermostLoop);
-  SmallVector<AffineForOp> nestedLoops;
+  DenseSet<AffineMapAccessInterface> updateMemoryOps(AffineForOp affineFor);
+  uint64_t getMinDepDistance(AffineForOp affineFor);
+  LogicalResult unrollForDataParallel(AffineForOp affineFor);
   DenseMap<AffineForOp, DenseSet<AffineMapAccessInterface>> loopToMemOps;
   MemoryDependenceAnalysis *memDepAnalysis;
 };
 } // namespace
 
-std::tuple<unsigned, AffineForOp> UnrollForLoopSchedule::getDeepestNestedLoop(
-    std::tuple<unsigned, AffineForOp> root) {
-  auto forOp = std::get<AffineForOp>(root);
-  auto depth = std::get<unsigned>(root);
-  if (forOp.getLoopBody().getOps<AffineForOp>().empty())
-    return root;
-
-  unsigned deepestDepth = depth;
-  AffineForOp deepestLoop = forOp;
-  for (auto loop : forOp.getLoopBody().getOps<AffineForOp>()) {
-    auto result = getDeepestNestedLoop(std::tuple(depth + 1, loop));
-    auto newDepth = std::get<unsigned>(result);
-    if (newDepth > deepestDepth) {
-      deepestDepth = newDepth;
-      deepestLoop = std::get<AffineForOp>(result);
-    }
-  }
-  return std::tuple(deepestDepth, deepestLoop);
-}
-
+// We need to keep track of memory ops in within the body to understand the
+// amount of pipeline parallelism that exists within
 DenseSet<AffineMapAccessInterface>
-UnrollForLoopSchedule::updateMemoryOps(AffineForOp innermostLoop) {
+UnrollForLoopSchedule::updateMemoryOps(AffineForOp affineFor) {
   DenseSet<AffineMapAccessInterface> memOps;
-  auto &bodyRegion = innermostLoop.getLoopBody();
+  auto &bodyRegion = affineFor.getLoopBody();
   // Only affine memory dependencies are supported
   auto affineLdOps = bodyRegion.getOps<AffineLoadOp>();
   auto affineStOps = bodyRegion.getOps<AffineStoreOp>();
   memOps.insert(affineLdOps.begin(), affineLdOps.end());
   memOps.insert(affineStOps.begin(), affineStOps.end());
-  loopToMemOps[innermostLoop] = memOps;
+  loopToMemOps[affineFor] = memOps;
   return memOps;
 }
 
-unsigned UnrollForLoopSchedule::getMinDepDistance(AffineForOp innermostLoop) {
-  auto memOps = loopToMemOps[innermostLoop];
-  unsigned minDistance = std::numeric_limits<unsigned>::max();
+// Find the limiting carried dependence and get its distance
+uint64_t UnrollForLoopSchedule::getMinDepDistance(AffineForOp affineFor) {
+  auto memOps = loopToMemOps[affineFor];
+  uint64_t minDistance = std::numeric_limits<uint64_t>::max();
   for (auto memOp : memOps) {
 
     ArrayRef<MemoryDependence> dependences =
@@ -87,48 +74,95 @@ unsigned UnrollForLoopSchedule::getMinDepDistance(AffineForOp innermostLoop) {
       if (!hasDependence(memoryDep.dependenceType))
         continue;
 
-      unsigned distance = *memoryDep.dependenceComponents.back().lb;
-      minDistance = std::min(minDistance, distance);
+      auto lb = memoryDep.dependenceComponents.back().lb;
+      if (!lb.has_value())
+        continue;
+      int64_t distanceComp = *memoryDep.dependenceComponents.back().lb;
+      minDistance =
+          std::min(minDistance, distanceComp < 0 ? (uint64_t)distanceComp * -1
+                                                 : (uint64_t)distanceComp);
     }
   }
 
   return minDistance;
 }
 
-// LogicalResult stToLdBypass(AffineStoreOp storeOp, AffineLoadOp loadOp) {
-//   loadOp->replaceAllUsesWith(storeOp.getValueToStore());
-//   if (storeOp->getUses().empty())
-//     storeOp->erase();
-//   loadOp->erase();
-//   return success();
-// }
+LogicalResult
+UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
+
+  // Get unroll factor from IR if it is there
+  auto unrollAttr = affineFor->getAttr("hls.unroll");
+  std::optional<uint64_t> maxUnrollFactor;
+  if (unrollAttr != nullptr && unrollAttr.isa<StringAttr>()) {
+    auto val = unrollAttr.cast<StringAttr>().getValue();
+    if (val == "full")
+      maxUnrollFactor = std::numeric_limits<uint64_t>::max();
+  } else if (unrollAttr != nullptr && unrollAttr.isa<IntegerAttr>()) {
+    maxUnrollFactor = unrollAttr.cast<IntegerAttr>().getUInt();
+  }
+  affineFor->removeAttr("hls.unroll");
+
+  // We are not checking for loop-carried dependencies
+  // Looking for perfect-nesting so just use max value
+  uint64_t unrollFactor =
+      maxUnrollFactor.value_or(std::numeric_limits<uint64_t>::max());
+
+  // If this loop nest is not perfectly nested return
+  SmallVector<AffineForOp> innerLoopCount(affineFor.getOps<AffineForOp>());
+  bool perfectlyNested =
+      innerLoopCount.size() == 1 && isPerfectlyNested(SmallVector<AffineForOp>(
+                                        {affineFor, innerLoopCount.back()}));
+  if (!perfectlyNested)
+    return success();
+
+  // We need to know if we are fully-unrolling, because then the body will get
+  // promoted to the containing region
+  auto *containingRegion = affineFor->getParentRegion();
+  bool unrollFull =
+      unrollFactor >= getConstantTripCount(affineFor).value_or(
+                          std::numeric_limits<uint64_t>::max() - 1);
+
+  if (loopUnrollUpToFactor(affineFor, unrollFactor).failed())
+    return failure();
+
+  SmallVector<AffineForOp> innerLoops;
+  // TODO(matth2k): If the loop got promoted, then we only want to grab the
+  // loops that are related together. This should be trivial, but I have no way
+  // to track which loops are clones. So this code will throw errors sometimes
+  if (unrollFull)
+    innerLoops.append(containingRegion->getOps<AffineForOp>().begin(),
+                      containingRegion->getOps<AffineForOp>().end());
+  else
+    innerLoops.append(affineFor.getOps<AffineForOp>().begin(),
+                      affineFor.getOps<AffineForOp>().end());
+
+  auto destLoop = innerLoops.pop_back_val();
+  OpBuilder builder(containingRegion);
+  IRRewriter rewriter(builder);
+
+  for (auto innerLoop : innerLoops) {
+    destLoop.getRegion().getBlocks().back().getTerminator()->erase();
+    rewriter.mergeBlocks(
+        &innerLoop.getRegion().getBlocks().back(),
+        &destLoop.getRegion().getBlocks().back(),
+        destLoop.getRegion().getBlocks().back().getArguments());
+  }
+
+  for (auto innerLoop : innerLoops)
+    innerLoop->erase();
+
+  return success();
+}
 
 void UnrollForLoopSchedule::runOnOperation() {
-  // Get loopNests in Function
-  for (auto rootForLoop :
-       getOperation().getFunctionBody().getOps<AffineForOp>())
-    nestedLoops.push_back(std::get<AffineForOp>(getDeepestNestedLoop(
-        std::tuple(std::numeric_limits<unsigned>::min(), rootForLoop))));
 
   // Gert scheduling analyses
   memDepAnalysis = &getAnalysis<MemoryDependenceAnalysis>();
 
-  for (auto innerLoop : nestedLoops) {
-    updateMemoryOps(innerLoop);
-    unsigned minDepDistance = getMinDepDistance(innerLoop);
-    if (minDepDistance == std::numeric_limits<unsigned>::max()) {
-      llvm::errs() << "unrolling by factor "
-                   << "full\n";
-      auto result = loopUnrollFull(innerLoop);
-      if (result.failed())
-        return signalPassFailure();
-    } else if (minDepDistance - 1 > 1) {
-      llvm::errs() << "unrolling by factor " << minDepDistance - 1 << "\n";
-      auto result = loopUnrollByFactor(innerLoop, minDepDistance - 1);
-      if (result.failed())
-        return signalPassFailure();
-    }
-  }
+  SmallVector<AffineForOp> rootForOps(getOperation().getOps<AffineForOp>());
+  for (auto loop : rootForOps)
+    if (unrollForDataParallel(loop).failed())
+      return signalPassFailure();
 }
 
 namespace circt {

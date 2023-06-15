@@ -45,6 +45,7 @@ private:
   getDeepestNestedForOp(std::pair<AffineForOp, unsigned> pair);
   LogicalResult unrollForPipelineParallel(AffineForOp affineFor);
   DenseMap<AffineForOp, DenseSet<AffineMapAccessInterface>> loopToMemOps;
+  DenseMap<Operation *, unsigned> approxASAP;
   MemoryDependenceAnalysis *memDepAnalysis;
 };
 } // namespace
@@ -157,6 +158,9 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   auto tmpFor = cloneIntoNewBlock(affineFor);
   auto *tmpBlk = tmpFor->getBlock();
 
+  if (unrollFactor <= 1)
+    return success();
+
   if (loopUnrollUpToFactor(tmpFor, unrollFactor).failed())
     return failure();
 
@@ -174,6 +178,9 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
 
   OpBuilder builder(affineFor);
   IRRewriter rewriter(builder);
+
+  // TODO:(matth2k) I have to check that dependence analysis checks out for loop
+  // fusion
 
   for (auto innerLoop : innerLoops) {
     destLoop.getRegion().getBlocks().back().getTerminator()->erase();
@@ -194,18 +201,35 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   return success();
 }
 
-// This looks for pipeline parallelism via unrolling to reduce II
-// TODO: this is not really the algorithm yet
+// This looks for pipeline parallelism via unrolling to increase the amount of
+// work per II
 LogicalResult
 UnrollForLoopSchedule::unrollForPipelineParallel(AffineForOp affineFor) {
   updateMemoryOps(affineFor);
-  uint64_t maxUnrollByDep = getMinDepDistance(affineFor) - 1;
-
+  uint64_t minDepDistance = getMinDepDistance(affineFor);
   std::optional<uint64_t> maxUnrollFactor = consumePragma(affineFor);
 
-  uint64_t unrollFactor =
-      std::min(maxUnrollByDep,
-               maxUnrollFactor.value_or(std::numeric_limits<uint64_t>::max()));
+  // Unroll factor is roughly the min recurrence II : Latency / Distance
+
+  // Latency is simply ASAP times, given a latency model for the operations
+  // However, latency can be bounded above by the number of ops for now
+  assert(affineFor.getOps<AffineForOp>().empty());
+  uint64_t largeLatencyBound = 0;
+  for (auto &op : affineFor.getOps())
+    if (isa<arith::MulIOp>(op))
+      largeLatencyBound += 3; // Mul will typically be longer latency
+    else
+      ++largeLatencyBound;
+
+  // Do ceiling division
+  uint64_t approxII = largeLatencyBound / minDepDistance +
+                      (largeLatencyBound % minDepDistance > 0);
+
+  uint64_t unrollFactor = std::min(
+      approxII, maxUnrollFactor.value_or(std::numeric_limits<uint64_t>::max()));
+
+  if (unrollFactor <= 1)
+    return success();
 
   if (loopUnrollUpToFactor(affineFor, unrollFactor).failed())
     return failure();

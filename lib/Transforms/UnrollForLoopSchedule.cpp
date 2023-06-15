@@ -38,7 +38,11 @@ struct UnrollForLoopSchedule
 private:
   DenseSet<AffineMapAccessInterface> updateMemoryOps(AffineForOp affineFor);
   uint64_t getMinDepDistance(AffineForOp affineFor);
+  std::optional<uint64_t> consumePragma(AffineForOp affineFor);
   LogicalResult unrollForDataParallel(AffineForOp affineFor);
+  std::pair<AffineForOp, unsigned>
+  getDeepestNestedForOp(std::pair<AffineForOp, unsigned> pair);
+  LogicalResult unrollForPipelineParallel(AffineForOp affineFor);
   DenseMap<AffineForOp, DenseSet<AffineMapAccessInterface>> loopToMemOps;
   MemoryDependenceAnalysis *memDepAnalysis;
 };
@@ -87,10 +91,9 @@ uint64_t UnrollForLoopSchedule::getMinDepDistance(AffineForOp affineFor) {
   return minDistance;
 }
 
-LogicalResult
-UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
-
-  // Get unroll factor from IR if it is there
+// Get unroll factor from IR if it is there
+std::optional<uint64_t>
+UnrollForLoopSchedule::consumePragma(AffineForOp affineFor) {
   auto unrollAttr = affineFor->getAttr("hls.unroll");
   std::optional<uint64_t> maxUnrollFactor;
   if (unrollAttr != nullptr && unrollAttr.isa<StringAttr>()) {
@@ -101,6 +104,14 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
     maxUnrollFactor = unrollAttr.cast<IntegerAttr>().getUInt();
   }
   affineFor->removeAttr("hls.unroll");
+  return maxUnrollFactor;
+}
+
+// Look for data-level parallelism towards the top level
+LogicalResult
+UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
+
+  std::optional<uint64_t> maxUnrollFactor = consumePragma(affineFor);
 
   // We are not checking for loop-carried dependencies
   // Looking for perfect-nesting so just use max value
@@ -154,6 +165,39 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   return success();
 }
 
+// This looks for pipeline parallelism via unrolling to reduce II
+// TODO: this is not really the algorithm yet
+LogicalResult
+UnrollForLoopSchedule::unrollForPipelineParallel(AffineForOp affineFor) {
+  updateMemoryOps(affineFor);
+  uint64_t maxUnrollByDep = getMinDepDistance(affineFor) - 1;
+
+  std::optional<uint64_t> maxUnrollFactor = consumePragma(affineFor);
+
+  uint64_t unrollFactor =
+      std::min(maxUnrollByDep,
+               maxUnrollFactor.value_or(std::numeric_limits<uint64_t>::max()));
+
+  if (loopUnrollUpToFactor(affineFor, unrollFactor).failed())
+    return failure();
+
+  return success();
+}
+
+std::pair<AffineForOp, unsigned> UnrollForLoopSchedule::getDeepestNestedForOp(
+    std::pair<AffineForOp, unsigned> pair) {
+  auto root = pair.first;
+  auto rootDepth = pair.second;
+  for (auto nested : root.getOps<AffineForOp>()) {
+    auto recur = getDeepestNestedForOp(std::pair(nested, rootDepth + 1));
+    if (recur.second > pair.second) {
+      pair.second = recur.second;
+      pair.first = recur.first;
+    }
+  }
+  return pair;
+}
+
 void UnrollForLoopSchedule::runOnOperation() {
 
   // Gert scheduling analyses
@@ -162,6 +206,14 @@ void UnrollForLoopSchedule::runOnOperation() {
   SmallVector<AffineForOp> rootForOps(getOperation().getOps<AffineForOp>());
   for (auto loop : rootForOps)
     if (unrollForDataParallel(loop).failed())
+      return signalPassFailure();
+
+  SmallVector<AffineForOp> opsToPipeline;
+  for (auto loop : getOperation().getOps<AffineForOp>())
+    opsToPipeline.push_back(getDeepestNestedForOp(std::pair(loop, 0)).first);
+
+  for (auto loop : opsToPipeline)
+    if (unrollForPipelineParallel(loop).failed())
       return signalPassFailure();
 }
 

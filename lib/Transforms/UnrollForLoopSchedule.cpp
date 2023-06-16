@@ -16,6 +16,7 @@
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Pass/Pass.h"
@@ -98,12 +99,18 @@ std::optional<uint64_t>
 UnrollForLoopSchedule::consumePragma(AffineForOp affineFor) {
   auto unrollAttr = affineFor->getAttr("hls.unroll");
   std::optional<uint64_t> maxUnrollFactor;
-  if (unrollAttr != nullptr && unrollAttr.isa<StringAttr>()) {
+  if (unrollAttr == nullptr)
+    return maxUnrollFactor;
+  if (unrollAttr.isa<UnitAttr>())
+    maxUnrollFactor = std::numeric_limits<uint64_t>::max();
+  if (unrollAttr.isa<StringAttr>()) {
     auto val = unrollAttr.cast<StringAttr>().getValue();
     if (val == "full")
       maxUnrollFactor = std::numeric_limits<uint64_t>::max();
-  } else if (unrollAttr != nullptr && unrollAttr.isa<IntegerAttr>()) {
-    maxUnrollFactor = unrollAttr.cast<IntegerAttr>().getUInt();
+  } else if (unrollAttr.isa<IntegerAttr>()) {
+    maxUnrollFactor = unrollAttr.cast<IntegerAttr>().getInt() <= 1
+                          ? std::numeric_limits<uint64_t>::max()
+                          : unrollAttr.cast<IntegerAttr>().getInt();
   }
   affineFor->removeAttr("hls.unroll");
   return maxUnrollFactor;
@@ -174,20 +181,17 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
     innerLoops.append(tmpFor.getOps<AffineForOp>().begin(),
                       tmpFor.getOps<AffineForOp>().end());
 
+  // TODO: Is this list guaranteed to be in reverse program order?
   auto destLoop = innerLoops.pop_back_val();
 
   OpBuilder builder(affineFor);
   IRRewriter rewriter(builder);
 
-  // TODO:(matth2k) I have to check that dependence analysis checks out for loop
-  // fusion
-
+  auto &destBlk = destLoop.getRegion().getBlocks().back();
   for (auto innerLoop : innerLoops) {
-    destLoop.getRegion().getBlocks().back().getTerminator()->erase();
-    rewriter.mergeBlocks(
-        &innerLoop.getRegion().getBlocks().back(),
-        &destLoop.getRegion().getBlocks().back(),
-        destLoop.getRegion().getBlocks().back().getArguments());
+    auto &srcBlk = innerLoop.getRegion().getBlocks().back();
+    destBlk.getTerminator()->erase();
+    rewriter.mergeBlocks(&srcBlk, &destBlk, destBlk.getArguments());
   }
 
   for (auto innerLoop : innerLoops)

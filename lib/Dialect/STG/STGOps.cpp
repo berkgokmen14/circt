@@ -27,8 +27,7 @@ using namespace circt::stg;
 // STGWhileOp
 //===----------------------------------------------------------------------===//
 
-ParseResult STGWhileOp::parse(OpAsmParser &parser,
-                                   OperationState &result) {
+ParseResult STGWhileOp::parse(OpAsmParser &parser, OperationState &result) {
   // Parse optional trip count.
   if (succeeded(parser.parseOptionalKeyword("trip_count"))) {
     IntegerAttr tripCount;
@@ -159,9 +158,9 @@ LogicalResult STGWhileOp::verify() {
 }
 
 void STGWhileOp::build(OpBuilder &builder, OperationState &state,
-                            TypeRange resultTypes,
-                            Optional<IntegerAttr> tripCount,
-                            ValueRange iterArgs) {
+                       TypeRange resultTypes,
+                       std::optional<IntegerAttr> tripCount,
+                       ValueRange iterArgs) {
   OpBuilder::InsertionGuard g(builder);
 
   state.addTypes(resultTypes);
@@ -184,19 +183,17 @@ void STGWhileOp::build(OpBuilder &builder, OperationState &state,
   scheduleBlock.addArguments(iterArgs.getTypes(), argLocs);
   builder.setInsertionPointToEnd(&scheduleBlock);
   builder.create<STGTerminatorOp>(builder.getUnknownLoc(), ValueRange(),
-                                       ValueRange());
+                                  ValueRange());
 }
 
 //===----------------------------------------------------------------------===//
 // STGStepOp
 //===----------------------------------------------------------------------===//
 
-LogicalResult STGStepOp::verify() {
-  return success();
-}
+LogicalResult STGStepOp::verify() { return success(); }
 
 void STGStepOp::build(OpBuilder &builder, OperationState &state,
-                                 TypeRange resultTypes) {
+                      TypeRange resultTypes) {
   OpBuilder::InsertionGuard g(builder);
 
   state.addTypes(resultTypes);
@@ -268,9 +265,9 @@ LogicalResult STGTerminatorOp::verify() {
 
   // Verify `iter_args` are defined by a control step.
   for (auto iterArg : iterArgs)
-    if (iterArg.getDefiningOp<STGStepOp>() == nullptr && !isa<BlockArgument>(iterArg))
-      return emitOpError(
-          "'iter_args' must be defined by a 'stg.step'");
+    if (iterArg.getDefiningOp<STGStepOp>() == nullptr &&
+        !isa<BlockArgument>(iterArg))
+      return emitOpError("'iter_args' must be defined by a 'stg.step'");
 
   // Verify stg terminates with the same result types as the stg.
   auto opResults = getResults();
@@ -283,9 +280,9 @@ LogicalResult STGTerminatorOp::verify() {
 
   // Verify `results` are defined by a control step.
   for (auto result : opResults)
-    if (result.getDefiningOp<STGStepOp>() == nullptr && !isa<BlockArgument>(result))
-      return emitOpError(
-          "'results' must be defined by a 'stg.step'");
+    if (result.getDefiningOp<STGStepOp>() == nullptr &&
+        !isa<BlockArgument>(result))
+      return emitOpError("'results' must be defined by a 'stg.step'");
 
   return success();
 }

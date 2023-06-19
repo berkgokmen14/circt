@@ -60,4 +60,21 @@ def UnrollForLoopSchedule : Pass<"unroll-for-loop-schedule", "::mlir::func::Func
   let dependentDialects = ["mlir::affine::AffineDialect", "mlir::func::FuncDialect"];
 }
 
+def MapArithToCombPass : InterfacePass<"map-arith-to-comb", "circt::hw::HWModuleLike"> {
+  let summary = "Map arith ops to combinational logic";
+  let description = [{
+    A pass which does a simple `arith` to `comb` mapping wherever possible.
+    This pass will not convert:  
+    * floating point operations
+    * operations using `vector`-typed values
+
+    This **does not** intend to be the definitive lowering/HLS pass of `arith`
+    operations in CIRCT (hence the name "map" instead of e.g. "lower").
+    Rather, it provides a simple way (mostly for testing purposes) to map
+    `arith` operations.
+  }];
+  let constructor = "circt::createMapArithToCombPass()";
+  let dependentDialects = ["circt::hw::HWDialect, mlir::arith::ArithDialect, circt::comb::CombDialect"];
+}
+
 #endif // CIRCT_TRANSFORMS_PASSES

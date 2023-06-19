@@ -76,7 +76,7 @@ private:
 
   CyclicSchedulingAnalysis *schedulingAnalysis;
   unsigned resII = 1;
-  Optional<Problem::OperatorType> limitingOpr;
+  std::optional<Problem::OperatorType> limitingOpr;
 };
 
 } // namespace

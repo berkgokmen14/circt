@@ -19,10 +19,13 @@
 
 namespace mlir {
 class MemrefDialect;
-
 // Forward declaration from Dialect.h
 template <typename ConcreteDialect>
 void registerDialect(DialectRegistry &registry);
+
+namespace arith {
+class ArithDialect;
+} // namespace arith
 
 namespace memref {
 class MemRefDialect;
@@ -38,6 +41,15 @@ class FuncDialect;
 } // end namespace mlir
 
 namespace circt {
+namespace hw {
+class HWModuleLike;
+class HWDialect;
+} // namespace hw
+
+namespace comb {
+class CombDialect;
+} // namespace comb
+
 #define GEN_PASS_CLASSES
 #include "circt/Transforms/Passes.h.inc"
 

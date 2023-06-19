@@ -15,6 +15,13 @@ with Context() as ctx, Location.unknown():
   module {
     om.class @Test(%param: i64) {
       om.class.field @field, %param : i64
+
+      %0 = om.object @Child() : () -> !om.class.type<@Child>
+      om.class.field @child, %0 : !om.class.type<@Child>
+    }
+    om.class @Child() {
+      %0 = om.constant 14 : i64
+      om.class.field @foo, %0 : i64
     }
   }
   """)
@@ -23,14 +30,8 @@ with Context() as ctx, Location.unknown():
 
 # Test instantiate failure.
 
-
-@dataclass
-class Test:
-  field: int
-
-
 try:
-  obj = evaluator.instantiate(Test)
+  obj = evaluator.instantiate("Test")
 except ValueError as e:
   # CHECK: actual parameter list length (0) does not match
   # CHECK: actual parameters:
@@ -40,14 +41,9 @@ except ValueError as e:
 
 # Test get field failure.
 
-
-@dataclass
-class Test:
-  foo: int
-
-
 try:
-  obj = evaluator.instantiate(Test, 42)
+  obj = evaluator.instantiate("Test", 42)
+  obj.foo
 except ValueError as e:
   # CHECK: field "foo" does not exist
   # CHECK: see current operation:
@@ -56,13 +52,9 @@ except ValueError as e:
 
 # Test instantiate success.
 
+obj = evaluator.instantiate("Test", 42)
 
-@dataclass
-class Test:
-  field: int
-
-
-obj = evaluator.instantiate(Test, 42)
-
-# CHECK: Test(field=42)
-print(obj)
+# CHECK: 42
+print(obj.field)
+# CHECK: 14
+print(obj.child.foo)

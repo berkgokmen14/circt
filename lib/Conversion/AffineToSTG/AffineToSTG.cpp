@@ -571,8 +571,8 @@ LogicalResult AffineToSTG::createWhileOpSTG(WhileOp &whileOp) {
   // auto condValue = builder.getIntegerAttr(builder.getIndexType(), 1);
   // auto cond = builder.create<arith::ConstantOp>(whileOp.getLoc(), condValue);
 
-  auto stgWhile = builder.create<stg::STGWhileOp>(whileOp.getLoc(), resultTypes,
-                                                  llvm::None, iterArgs);
+  auto stgWhile = builder.create<stg::STGWhileOp>(
+      whileOp.getLoc(), resultTypes, std::optional<IntegerAttr>(), iterArgs);
 
   // Maintain mappings of values in the loop body and results of stages,
   // initially populated with the iter args.

@@ -69,7 +69,7 @@ public:
     return getOperation().getCondBlock().getTerminator()->getOperand(0);
   }
 
-  Optional<uint64_t> getBound() override {
+  std::optional<uint64_t> getBound() override {
     return getOperation().getTripCount();
   }
 };
@@ -91,7 +91,7 @@ public:
     return getOperation().getCondBlock().getTerminator()->getOperand(0);
   }
 
-  Optional<uint64_t> getBound() override {
+  std::optional<uint64_t> getBound() override {
     return getOperation().getTripCount();
   }
 };
@@ -132,7 +132,7 @@ public:
   /// Returns the group registered for this sink value, and None
   /// otherwise.
   template <typename TGroupOp = calyx::GroupInterface>
-  Optional<TGroupOp> getSinkGroupFrom(Operation *op) {
+  std::optional<TGroupOp> getSinkGroupFrom(Operation *op) {
     auto it = operationToGroup.find(op);
     if (it == operationToGroup.end())
       return std::nullopt;

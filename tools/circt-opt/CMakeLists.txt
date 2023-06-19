@@ -54,6 +54,7 @@ target_link_libraries(circt-opt
   CIRCTHWTransforms
   CIRCTLoopSchedule
   CIRCTLoopScheduleToCalyx
+  CIRCTLTL
   CIRCTSCFToCalyx
   CIRCTSTGToCalyx
   CIRCTAffineToSTG
@@ -74,6 +75,7 @@ target_link_libraries(circt-opt
   CIRCTSystemC
   CIRCTSystemCTransforms
   CIRCTTransforms
+  CIRCTVerif
 
   MLIRIR
   MLIRLLVMDialect

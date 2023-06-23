@@ -208,13 +208,13 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
       unrollFactor >= getConstantTripCount(affineFor).value_or(
                           std::numeric_limits<uint64_t>::max() - 1);
 
+  if (unrollFactor <= 1)
+    return success();
+
   // Since the unrolled loop may be optimized/promoted away, I put the for
   // loop in its own block to isolated the new anchoring ForOp
   auto tmpFor = cloneIntoNewBlock(affineFor);
   auto *tmpBlk = tmpFor->getBlock();
-
-  if (unrollFactor <= 1)
-    return success();
 
   if (loopUnrollUpToFactor(tmpFor, unrollFactor).failed())
     return failure();

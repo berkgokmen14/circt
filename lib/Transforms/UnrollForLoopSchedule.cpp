@@ -159,25 +159,29 @@ UnrollForLoopSchedule::consumePragma(AffineForOp affineFor) {
 // Clone an affine loop into its own isolated block. Not all values in scope are
 // copied over
 AffineForOp UnrollForLoopSchedule::cloneIntoNewBlock(AffineForOp affineFor) {
+
   OpBuilder builder(affineFor);
   auto originalPt = builder.saveInsertionPoint();
   auto *originalBlk = originalPt.getBlock();
+
   SmallVector<Location> locs;
   for (auto arg : originalBlk->getArguments())
     locs.push_back(arg.getLoc());
   auto *tmpBlk =
       builder.createBlock(originalBlk, originalBlk->getArgumentTypes(), locs);
+
   IRMapping argsMapping;
   for (unsigned i = 0; i < originalBlk->getNumArguments(); ++i)
     argsMapping.map(originalBlk->getArgument(i), tmpBlk->getArgument(i));
-  AffineForOp returnValue = nullptr;
+
   for (auto &op : affineFor->getBlock()->getOperations()) {
     auto *clonedOp = builder.clone(op, argsMapping);
     if (isa<AffineForOp>(op) && cast<AffineForOp>(op) == affineFor)
-      returnValue = cast<AffineForOp>(*clonedOp);
+      return cast<AffineForOp>(*clonedOp);
   }
-  assert(returnValue != nullptr);
-  return returnValue;
+
+  assert(false && "unreachable");
+  return nullptr;
 }
 
 // Look for data-level parallelism towards the top level
@@ -275,11 +279,6 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
     rewriter.mergeBlocks(&srcBlk, &destBlk, destBlk.getArguments());
   }
 
-  // These ops should be deleted, because it can include a duplicate of
-  // the "return" op
-  for (auto *opToMove : operationsToMove)
-    opToMove->erase();
-
   // Get rid of ops whose bodies we relocated
   innerLoops.erase(innerLoops.begin());
   for (auto innerLoop : innerLoops)
@@ -288,7 +287,21 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   // Now we dump the fused-loop block in the location of the original loop
   rewriter.inlineBlockBefore(tmpBlk, affineFor,
                              affineFor->getBlock()->getArguments());
-  affineFor->erase();
+
+  // Finally, we have some cloned ops before the affineFor
+  SmallVector<Operation *> prologueToDelete;
+  for (auto &op : affineFor->getBlock()->getOperations()) {
+    if (isa<AffineForOp>(op) && cast<AffineForOp>(op) == destLoop) {
+      break;
+    }
+    if (op.getUses().empty())
+      prologueToDelete.push_back(&op);
+  }
+
+  for (auto *op : prologueToDelete)
+    op->erase();
+
+  affineFor.erase();
 
   return success();
 }

@@ -288,9 +288,12 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   rewriter.inlineBlockBefore(tmpBlk, affineFor,
                              affineFor->getBlock()->getArguments());
 
+  auto *containingBlk = affineFor->getBlock();
+  affineFor.erase();
+
   // Finally, we have some cloned ops before the affineFor
   SmallVector<Operation *> prologueToDelete;
-  for (auto &op : affineFor->getBlock()->getOperations()) {
+  for (auto &op : containingBlk->getOperations()) {
     if (isa<AffineForOp>(op) && cast<AffineForOp>(op) == destLoop) {
       break;
     }
@@ -300,8 +303,6 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
 
   for (auto *op : prologueToDelete)
     op->erase();
-
-  affineFor.erase();
 
   return success();
 }

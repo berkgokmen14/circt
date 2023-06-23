@@ -14,12 +14,14 @@
 #include "mlir/Dialect/Affine/Analysis/Utils.h"
 #include "mlir/Dialect/Affine/LoopFusionUtils.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
+#include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -37,6 +39,8 @@ struct UnrollForLoopSchedule
   void runOnOperation() override;
 
 private:
+  bool hasAllocDefinition(TypedValue<MemRefType> val);
+  bool usesLocalMemory(AffineForOp affineFor);
   DenseSet<AffineMapAccessInterface> updateMemoryOps(AffineForOp affineFor);
   uint64_t getMinDepDistance(AffineForOp affineFor);
   std::optional<uint64_t> consumePragma(AffineForOp affineFor);
@@ -50,6 +54,42 @@ private:
   MemoryDependenceAnalysis *memDepAnalysis;
 };
 } // namespace
+
+bool UnrollForLoopSchedule::hasAllocDefinition(TypedValue<MemRefType> val) {
+  Operation *definitionOp = val.getDefiningOp();
+  return definitionOp != nullptr && (isa<memref::AllocOp>(*definitionOp) ||
+                                     isa<memref::AllocaOp>(*definitionOp));
+};
+
+bool UnrollForLoopSchedule::usesLocalMemory(AffineForOp affineFor) {
+
+  WalkResult result = affineFor.getBody()->walk([&](Operation *op) {
+    return TypeSwitch<Operation *, WalkResult>(op)
+        .Case<AffineLoadOp>([&](Operation *op) {
+          return hasAllocDefinition(cast<AffineLoadOp>(*op).getMemref())
+                     ? WalkResult::interrupt()
+                     : WalkResult::advance();
+        })
+        .Case<AffineStoreOp>([&](Operation *op) {
+          return hasAllocDefinition(cast<AffineStoreOp>(*op).getMemref())
+                     ? WalkResult::interrupt()
+                     : WalkResult::advance();
+        })
+        .Case<memref::LoadOp>([&](Operation *op) {
+          return hasAllocDefinition(cast<memref::LoadOp>(*op).getMemref())
+                     ? WalkResult::interrupt()
+                     : WalkResult::advance();
+        })
+        .Case<memref::StoreOp>([&](Operation *op) {
+          return hasAllocDefinition(cast<memref::StoreOp>(*op).getMemref())
+                     ? WalkResult::interrupt()
+                     : WalkResult::advance();
+        })
+        .Default([&](Operation *op) { return WalkResult::advance(); });
+  });
+
+  return result.wasInterrupted();
+}
 
 // We need to keep track of memory ops in within the body to understand the
 // amount of pipeline parallelism that exists within
@@ -130,16 +170,23 @@ AffineForOp UnrollForLoopSchedule::cloneIntoNewBlock(AffineForOp affineFor) {
   IRMapping argsMapping;
   for (unsigned i = 0; i < originalBlk->getNumArguments(); ++i)
     argsMapping.map(originalBlk->getArgument(i), tmpBlk->getArgument(i));
-
-  return cast<AffineForOp>(
-      *builder.clone(*affineFor.getOperation(), argsMapping));
+  AffineForOp returnValue = nullptr;
+  for (auto &op : affineFor->getBlock()->getOperations()) {
+    auto *clonedOp = builder.clone(op, argsMapping);
+    if (isa<AffineForOp>(op) && cast<AffineForOp>(op) == affineFor)
+      returnValue = cast<AffineForOp>(*clonedOp);
+  }
+  assert(returnValue != nullptr);
+  return returnValue;
 }
 
 // Look for data-level parallelism towards the top level
 LogicalResult
 UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
-
   std::optional<uint64_t> maxUnrollFactor = consumePragma(affineFor);
+
+  if (!usesLocalMemory(affineFor))
+    return success();
 
   // We are not checking for loop-carried dependencies
   // Looking for perfect-nesting so just use max value
@@ -154,14 +201,15 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   if (!perfectlyNested)
     return success();
 
-  // We need to know if we are fully-unrolling, because then the loop body will
-  // get promoted to the containing region. And the anchoring ForOp will change.
+  // We need to know if we are fully-unrolling, because then the loop body
+  // will get promoted to the containing region. And the anchoring ForOp will
+  // change.
   bool loopIsPromoted =
       unrollFactor >= getConstantTripCount(affineFor).value_or(
                           std::numeric_limits<uint64_t>::max() - 1);
 
-  // Since the unrolled loop may be optimized/promoted away, I put the for loop
-  // in its own block to isolated the new anchoring ForOp
+  // Since the unrolled loop may be optimized/promoted away, I put the for
+  // loop in its own block to isolated the new anchoring ForOp
   auto tmpFor = cloneIntoNewBlock(affineFor);
   auto *tmpBlk = tmpFor->getBlock();
 
@@ -171,29 +219,68 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   if (loopUnrollUpToFactor(tmpFor, unrollFactor).failed())
     return failure();
 
-  SmallVector<AffineForOp> innerLoops;
   // Since we isolated the unrolled loop in its own block we have isolated all
   // the ops that can be trivially fused together
-  if (loopIsPromoted)
-    innerLoops.append(tmpBlk->getOps<AffineForOp>().begin(),
-                      tmpBlk->getOps<AffineForOp>().end());
-  else
-    innerLoops.append(tmpFor.getOps<AffineForOp>().begin(),
-                      tmpFor.getOps<AffineForOp>().end());
+  Block *blockToRead =
+      loopIsPromoted ? tmpBlk : &tmpFor.getLoopBody().getBlocks().front();
+  SmallVector<AffineForOp> innerLoops(blockToRead->getOps<AffineForOp>());
 
-  // TODO: Is this list guaranteed to be in reverse program order?
-  auto destLoop = innerLoops.pop_back_val();
+  // Check if memory dependencies limit fusion, if so abandon our work
+  auto *tmpDependence = &getAnalysis<MemoryDependenceAnalysis>();
+  for (auto loopI : innerLoops)
+    for (auto memOp : updateMemoryOps(loopI))
+      for (const auto &dep : tmpDependence->getDependences(memOp))
+        for (auto comp : dep.dependenceComponents)
+          for (auto loopJ : innerLoops)
+            if (loopJ->isAncestor(comp.op)) {
+              tmpBlk->erase();
+              return success();
+            }
 
+  // Now we do the merging/fusing of loops
+  auto destLoop = innerLoops.front();
+  auto &destBlk = destLoop.getRegion().getBlocks().back();
   OpBuilder builder(affineFor);
   IRRewriter rewriter(builder);
 
-  auto &destBlk = destLoop.getRegion().getBlocks().back();
-  for (auto innerLoop : innerLoops) {
-    auto &srcBlk = innerLoop.getRegion().getBlocks().back();
+  // First save operations in order, because we will be mutating them
+  SmallVector<Operation *> operations;
+  for (auto &op : blockToRead->getOperations())
+    operations.push_back(&op);
+
+  // Keep a running list of values that the loop body depends on, because
+  // they will need to be moved inorder to dominate the relocation of the
+  // loop body
+  SmallVector<Operation *> operationsToMove;
+  for (auto *op : operations) {
+    if (!isa<AffineForOp>(*op)) {
+      operationsToMove.push_back(op);
+      continue;
+    }
+
+    auto srcLoop = cast<AffineForOp>(*op);
+    if (srcLoop == destLoop)
+      continue;
+
+    // Move the dominating ops to above the destLoop
+    for (auto &opToMove : operationsToMove) {
+      builder.setInsertionPoint(destLoop);
+      opToMove->remove();
+      builder.insert(opToMove);
+    }
+    operationsToMove.clear();
+    auto &srcBlk = srcLoop.getRegion().getBlocks().back();
     destBlk.getTerminator()->erase();
     rewriter.mergeBlocks(&srcBlk, &destBlk, destBlk.getArguments());
   }
 
+  // These ops should be deleted, because it can include a duplicate of
+  // the "return" op
+  for (auto *opToMove : operationsToMove)
+    opToMove->erase();
+
+  // Get rid of ops whose bodies we relocated
+  innerLoops.erase(innerLoops.begin());
   for (auto innerLoop : innerLoops)
     innerLoop->erase();
 
@@ -209,6 +296,10 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
 // work per II
 LogicalResult
 UnrollForLoopSchedule::unrollForPipelineParallel(AffineForOp affineFor) {
+
+  if (!usesLocalMemory(affineFor))
+    return success();
+
   updateMemoryOps(affineFor);
   uint64_t minDepDistance = getMinDepDistance(affineFor);
   std::optional<uint64_t> maxUnrollFactor = consumePragma(affineFor);
@@ -226,6 +317,7 @@ UnrollForLoopSchedule::unrollForPipelineParallel(AffineForOp affineFor) {
       ++largeLatencyBound;
 
   // Do ceiling division
+  minDepDistance = std::max(1UL, minDepDistance);
   uint64_t approxII = largeLatencyBound / minDepDistance +
                       (largeLatencyBound % minDepDistance > 0);
 
@@ -256,11 +348,14 @@ std::pair<AffineForOp, unsigned> UnrollForLoopSchedule::getDeepestNestedForOp(
 }
 
 void UnrollForLoopSchedule::runOnOperation() {
-
   SmallVector<AffineForOp> rootForOps(getOperation().getOps<AffineForOp>());
   for (auto loop : rootForOps)
     if (unrollForDataParallel(loop).failed())
       return signalPassFailure();
+
+  // After we unroll and merge, get rid of redundant loads
+  affineScalarReplace(getOperation(), getAnalysis<DominanceInfo>(),
+                      getAnalysis<PostDominanceInfo>());
 
   SmallVector<AffineForOp> opsToPipeline;
   for (auto loop : getOperation().getOps<AffineForOp>())

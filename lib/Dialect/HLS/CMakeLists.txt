@@ -4,7 +4,7 @@
 ##
 ##===----------------------------------------------------------------------===//
 
-set(srcs
+set(CIRCT_HLS_Sources
   HLSDialect.cpp
   )
 
@@ -23,7 +23,7 @@ set(HLS_Deps
   )
 
 add_circt_dialect_library(CIRCTHLS
-  ${srcs}
+  ${CIRCT_HLS_Sources}
 
   DEPENDS
   ${HLS_Deps}

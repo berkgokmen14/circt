@@ -339,6 +339,9 @@ UnrollForLoopSchedule::unrollForPipelineParallel(AffineForOp affineFor) {
   uint64_t unrollFactor = std::min(
       approxII, maxUnrollFactor.value_or(std::numeric_limits<uint64_t>::max()));
 
+  OpBuilder builder(affineFor);
+  affineFor->setAttr("hls.pipeline", builder.getUnitAttr());
+
   if (unrollFactor <= 1)
     return success();
 
@@ -355,6 +358,8 @@ UnrollForLoopSchedule::getDeepestNestedForOps(
   auto rootDepth = pair.second;
   for (auto root : roots) {
     SmallVector<AffineForOp> nestedOps(root.getOps<AffineForOp>());
+    if (nestedOps.empty())
+      continue;
     auto recur = getDeepestNestedForOps(std::pair(nestedOps, rootDepth + 1));
     if (recur.second > pair.second) {
       pair.second = recur.second;

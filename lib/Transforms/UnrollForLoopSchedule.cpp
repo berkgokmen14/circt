@@ -46,8 +46,8 @@ private:
   std::optional<uint64_t> consumePragma(AffineForOp affineFor);
   AffineForOp cloneIntoNewBlock(AffineForOp affineFor);
   LogicalResult unrollForDataParallel(AffineForOp affineFor);
-  std::pair<AffineForOp, unsigned>
-  getDeepestNestedForOp(std::pair<AffineForOp, unsigned> pair);
+  std::pair<SmallVector<AffineForOp>, unsigned>
+  getDeepestNestedForOps(std::pair<SmallVector<AffineForOp>, unsigned> pair);
   LogicalResult unrollForPipelineParallel(AffineForOp affineFor);
   DenseMap<AffineForOp, DenseSet<AffineMapAccessInterface>> loopToMemOps;
   DenseMap<Operation *, unsigned> approxASAP;
@@ -333,12 +333,14 @@ UnrollForLoopSchedule::unrollForPipelineParallel(AffineForOp affineFor) {
   return success();
 }
 
-std::pair<AffineForOp, unsigned> UnrollForLoopSchedule::getDeepestNestedForOp(
-    std::pair<AffineForOp, unsigned> pair) {
-  auto root = pair.first;
+std::pair<SmallVector<AffineForOp>, unsigned>
+UnrollForLoopSchedule::getDeepestNestedForOps(
+    std::pair<SmallVector<AffineForOp>, unsigned> pair) {
+  auto roots = pair.first;
   auto rootDepth = pair.second;
-  for (auto nested : root.getOps<AffineForOp>()) {
-    auto recur = getDeepestNestedForOp(std::pair(nested, rootDepth + 1));
+  for (auto root : roots) {
+    SmallVector<AffineForOp> nestedOps(root.getOps<AffineForOp>());
+    auto recur = getDeepestNestedForOps(std::pair(nestedOps, rootDepth + 1));
     if (recur.second > pair.second) {
       pair.second = recur.second;
       pair.first = recur.first;
@@ -357,9 +359,12 @@ void UnrollForLoopSchedule::runOnOperation() {
   affineScalarReplace(getOperation(), getAnalysis<DominanceInfo>(),
                       getAnalysis<PostDominanceInfo>());
 
-  SmallVector<AffineForOp> opsToPipeline;
-  for (auto loop : getOperation().getOps<AffineForOp>())
-    opsToPipeline.push_back(getDeepestNestedForOp(std::pair(loop, 0)).first);
+  SmallVector<AffineForOp> opsToPipeline =
+      getDeepestNestedForOps(
+          std::pair(
+              SmallVector<AffineForOp>(getOperation().getOps<AffineForOp>()),
+              0))
+          .first;
 
   // Get scheduling analyses
   memDepAnalysis = &getAnalysis<MemoryDependenceAnalysis>();

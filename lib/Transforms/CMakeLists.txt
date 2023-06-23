@@ -8,14 +8,15 @@ add_circt_library(CIRCTTransforms
   ${CIRCT_MAIN_INCLUDE_DIR}/circt/Transforms
 
   LINK_LIBS PUBLIC
+  CIRCTComb
+  CIRCTHW
+  MLIRArithDialect
+  MLIRControlFlowDialect
+  MLIRFuncDialect
   MLIRIR
   MLIRMemRefDialect
-  MLIRFuncDialect
   MLIRSupport
   MLIRTransforms
-  MLIRArithDialect
-  CIRCTHW
-  CIRCTComb
 
   DEPENDS
   CIRCTTransformsPassIncGen

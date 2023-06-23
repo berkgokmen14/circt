@@ -420,6 +420,7 @@ module {
 
 module {
   // CHECK-LABEL: @RegExtracted_cover
+  // CHECK-SAME: %designAndTestCode
   // CHECK: %testCode1 = seq.firreg
   // CHECK: %testCode2 = seq.firreg
   // CHECK-NOT: seq.firreg
@@ -443,5 +444,24 @@ module {
     }
 
     hw.output %designAndTestCode : i1
+  }
+}
+
+// -----
+// Check that constants are cloned freely.
+
+module {
+  // CHECK-LABEL: @ConstantCloned_cover(%in: i1, %clock: i1)
+  // CHECK-NEXT:   %true = hw.constant true
+  // CHECK-NEXT:   comb.xor bin %in, %true : i1
+  hw.module @ConstantCloned(%clock: i1, %in: i1) -> (out: i1) {
+    %true = hw.constant true
+    %not = comb.xor bin %in, %true : i1
+
+    sv.always posedge %clock {
+      sv.cover %not, immediate
+    }
+
+    hw.output %true : i1
   }
 }

@@ -20,6 +20,7 @@
 #include "circt/Conversion/CalyxToHW.h"
 #include "circt/Conversion/CombToArith.h"
 #include "circt/Conversion/ConvertToArcs.h"
+#include "circt/Conversion/DCToHW.h"
 #include "circt/Conversion/ExportChiselInterface.h"
 #include "circt/Conversion/ExportVerilog.h"
 #include "circt/Conversion/FIRRTLToHW.h"

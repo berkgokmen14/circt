@@ -393,7 +393,7 @@ def IsTagOp : FIRRTLExprOp<"istag"> {
   let hasCustomAssemblyFormat = 1;
   let builders = [
     OpBuilder<(ins "Value":$input, "StringRef":$fieldName), [{
-      auto enumType = input.getType().cast<FEnumType>();
+      auto enumType = cast<FEnumType>(input.getType());
       auto fieldIndex = enumType.getElementIndex(fieldName);
       assert(fieldIndex.has_value() && "subtag operation to unknown field");
       return build($_builder, $_state, input, *fieldIndex);
@@ -403,13 +403,13 @@ def IsTagOp : FIRRTLExprOp<"istag"> {
   let firrtlExtraClassDeclaration = [{
     /// Return a `FieldRef` to the accessed field.
     FieldRef getAccessedField() {
-      return FieldRef(getInput(), getInput().getType().cast<FEnumType>()
+      return FieldRef(getInput(), cast<FEnumType>(getInput().getType())
                                             .getFieldID(getFieldIndex()));
     }
 
     /// Return the name of the accessed field.
     StringAttr getFieldNameAttr() {
-      return getInput().getType().cast<FEnumType>()
+      return cast<FEnumType>(getInput().getType())
         .getElementNameAttr(getFieldIndex());
     }
 
@@ -437,7 +437,7 @@ def SubtagOp : FIRRTLExprOp<"subtag"> {
 
   let builders = [
     OpBuilder<(ins "Value":$input, "StringRef":$fieldName), [{
-      auto enumType = input.getType().cast<FEnumType>();
+      auto enumType = cast<FEnumType>(input.getType());
       auto fieldIndex = enumType.getElementIndex(fieldName);
       assert(fieldIndex.has_value() && "subtag operation to unknown field");
       return build($_builder, $_state, input, *fieldIndex);
@@ -537,8 +537,8 @@ class BinaryPrimOp<string mnemonic, Type lhsType, Type rhsType, Type resultType,
     static FIRRTLType inferReturnType(ValueRange operands,
                                       ArrayRef<NamedAttribute> attrs,
                                       std::optional<Location> loc) {
-      return $_infer(operands[0].getType().cast<FIRRTLType>(),
-                     operands[1].getType().cast<FIRRTLType>(),
+      return $_infer(cast<FIRRTLType>(operands[0].getType()),
+                     cast<FIRRTLType>(operands[1].getType()),
                      loc);
     }
   }]);
@@ -654,7 +654,7 @@ class UnaryPrimOp<string mnemonic, Type srcType, Type resultType,
     static FIRRTLType inferReturnType(ValueRange operands,
                                       ArrayRef<NamedAttribute> attrs,
                                       std::optional<Location> loc) {
-      return $_infer(operands[0].getType().cast<FIRRTLType>(), loc);
+      return $_infer(cast<FIRRTLType>(operands[0].getType()), loc);
     }
   }]);
 
@@ -799,6 +799,49 @@ def TailPrimOp : PrimOp<"tail"> {
 
   let hasCanonicalizeMethod = true;
   let parseValidator = "impl::validateOneOperandOneConst";
+}
+
+//===----------------------------------------------------------------------===//
+// Target Specific Intrinsics
+//===----------------------------------------------------------------------===//
+
+def Mux2CellIntrinsicOp : PrimOp<"int.mux2cell"> {
+  let summary = [{
+    an intrinsic lowered into 2-to-1 MUX cell in synthesis tools.
+  }];
+
+  let description = [{
+    This intrinsic exposes a low-level API to use 2-to-1 MUX cell in backend
+    synthesis tool. At FIRRTL level, this operation participates
+    the inference process in the same way as a normal mux operation.
+  }];
+
+  let arguments = (ins UInt1OrUnsizedType:$sel, PassiveType:$high,
+                       PassiveType:$low);
+  let results = (outs PassiveType:$result);
+
+  let assemblyFormat =
+    "`(` operands `)` attr-dict `:` functional-type(operands, $result)";
+}
+
+def Mux4CellIntrinsicOp : PrimOp<"int.mux4cell"> {
+  let summary = [{
+    an intrinsic lowered into 4-to-1 MUX cell in synthesis tools.
+  }];
+
+  let description = [{
+    This intrinsic exposes a low-level API to use 4-to-1 MUX cell in backend
+    synthesis tool. At FIRRTL level, this operation participates
+    the inference process as a sugar of mux operation chains.
+  }];
+
+  let arguments = (ins UInt2OrUnsizedType:$sel, PassiveType:$v3,
+                       PassiveType:$v2, PassiveType:$v1,
+                       PassiveType:$v0);
+  let results = (outs PassiveType:$result);
+
+  let assemblyFormat =
+    "`(` operands `)` attr-dict `:` functional-type(operands, $result)";
 }
 
 //===----------------------------------------------------------------------===//

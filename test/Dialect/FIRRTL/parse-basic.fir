@@ -147,7 +147,7 @@ circuit MyModule :     ; CHECK: firrtl.circuit "MyModule" {
     ; CHECK-NOT: firrtl.strictconnect %reset
     reset is invalid
 
-    ; CHECK: %out_0 = firrtl.wire interesting_name : !firrtl.bundle<member: bundle<0: bundle<clock: clock, reset: uint<1>>>>
+    ; CHECK: %out_0 = firrtl.wire interesting_name : !firrtl.bundle<member: bundle<"0": bundle<clock: clock, reset: uint<1>>>>
     wire out_0 : { member : { 0 : { clock : Clock, reset : UInt<1>}}}
 
     ; CHECK: %_t_3 = firrtl.wire interesting_name : !firrtl.vector<uint<1>, 12>
@@ -1263,7 +1263,7 @@ circuit EnumTypes:
     ; CHECK: %[[AGG3:.+]] = firrtl.wire
     wire agg3 : const { a : UInt<1>, b : UInt }
     ; CHECK-NEXT: %[[AGG3_PROBE:.+]] = firrtl.ref.send %[[AGG3]]
-    ; CHECK-NEXT: %[[AGG3_PROBE_CAST:.+]] = firrtl.ref.cast %[[AGG3_PROBE]] : (!firrtl.probe<const.bundle<a: uint<1>, b: uint>>) -> !firrtl.probe<bundle<a: uint<1>, b: const.uint>> 
+    ; CHECK-NEXT: %[[AGG3_PROBE_CAST:.+]] = firrtl.ref.cast %[[AGG3_PROBE]] : (!firrtl.probe<const.bundle<a: uint<1>, b: uint>>) -> !firrtl.probe<bundle<a: uint<1>, b: const.uint>>
     ; CHECK-NEXT: ref.define %agg_out, %[[AGG3_PROBE_CAST]]
     define agg_out = probe(agg3)
 
@@ -1419,15 +1419,15 @@ circuit Foo_v3p0p0:
     regreset r: UInt<1>, clock, reset, UInt<1>(0)
 
   ; CHECK: module private @LiteralIdentifiers
-  ; CHECK-SAME: in %_0: !firrtl.bundle<1: uint<1>>
-  ; CHECK-SAME: out %_2: !firrtl.bundle<3: uint<1>>
+  ; CHECK-SAME: in %_0: !firrtl.bundle<"1": uint<1>>
+  ; CHECK-SAME: out %_2: !firrtl.bundle<"3": uint<1>>
   ; CHECK-SAME: portNames = ["0", "2"]
   module LiteralIdentifiers:
     input `0`: {`1`: UInt<1>}
     output `2`: {`3`: UInt<1>}
 
-    ; CHECK-NEXT: %0 = firrtl.subfield %_0["1"] : !firrtl.bundle<1: uint<1>>
-    ; CHECK-NEXT: %1 = firrtl.subfield %_2["3"] : !firrtl.bundle<3: uint<1>>
+    ; CHECK-NEXT: %0 = firrtl.subfield %_0["1"] : !firrtl.bundle<"1": uint<1>>
+    ; CHECK-NEXT: %1 = firrtl.subfield %_2["3"] : !firrtl.bundle<"3": uint<1>>
     ; CHECK-NEXT: firrtl.strictconnect %1, %0 : !firrtl.uint<1>
     `2`.`3` <= `0`.`1`
 
@@ -1456,8 +1456,8 @@ circuit Foo_v1p9p9:
     bundleWithAnalog <- bundleWithAnalog
 
 
-    ; CHECK: [[A:%.+]] = firrtl.subfield %out_0[member] : !firrtl.bundle<member: bundle<0: bundle<clock: clock, reset: uint<1>>>>
-    ; CHECK: [[B:%.+]] = firrtl.subfield [[A]]["0"] : !firrtl.bundle<0: bundle<clock: clock, reset: uint<1>>>
+    ; CHECK: [[A:%.+]] = firrtl.subfield %out_0[member] : !firrtl.bundle<member: bundle<"0": bundle<clock: clock, reset: uint<1>>>>
+    ; CHECK: [[B:%.+]] = firrtl.subfield [[A]]["0"] : !firrtl.bundle<"0": bundle<clock: clock, reset: uint<1>>>
     ; CHECK: [[C:%.+]] = firrtl.subfield [[B]][reset] : !firrtl.bundle<clock: clock, reset: uint<1>>
     ; CHECK: firrtl.strictconnect %auto, [[C]] : !firrtl.uint<1>
     wire out_0 : { member : { 0 : { clock : Clock, reset : UInt<1>}}}

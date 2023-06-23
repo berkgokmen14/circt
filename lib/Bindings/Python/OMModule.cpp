@@ -8,7 +8,6 @@
 
 #include "DialectModules.h"
 #include "circt-c/Dialect/OM.h"
-#include "circt/Support/LLVM.h"
 #include "mlir-c/BuiltinAttributes.h"
 #include "mlir-c/IR.h"
 #include "mlir/Bindings/Python/PybindAdaptors.h"
@@ -53,6 +52,21 @@ struct Object {
     // If the field was a primitive, return the Attribute.
     assert(omEvaluatorObjectValueIsAPrimitive(result));
     return omEvaluatorObjectValueGetPrimitive(result);
+  }
+
+  // Get a list with the names of all the fields in the Object.
+  std::vector<std::string> getFieldNames() {
+    MlirAttribute fieldNames = omEvaluatorObjectGetFieldNames(object);
+    intptr_t numFieldNames = mlirArrayAttrGetNumElements(fieldNames);
+
+    std::vector<std::string> pyFieldNames;
+    for (intptr_t i = 0; i < numFieldNames; ++i) {
+      MlirAttribute fieldName = mlirArrayAttrGetElement(fieldNames, i);
+      MlirStringRef fieldNameStr = mlirStringAttrGetValue(fieldName);
+      pyFieldNames.emplace_back(fieldNameStr.data, fieldNameStr.length);
+    }
+
+    return pyFieldNames;
   }
 
 private:
@@ -108,8 +122,16 @@ void circt::python::populateDialectOMSubmodule(py::module &m) {
       .def(py::init<Object>(), py::arg("object"))
       .def("__getattr__", &Object::getField, "Get a field from an Object",
            py::arg("name"))
+      .def_property_readonly("field_names", &Object::getFieldNames,
+                             "Get field names from an Object")
       .def_property_readonly("type", &Object::getType,
                              "The Type of the Object");
+
+  // Add the ReferenceAttr definition
+  mlir_attribute_subclass(m, "ReferenceAttr", omAttrIsAReferenceAttr)
+      .def_property_readonly("inner_ref", [](MlirAttribute self) {
+        return omReferenceAttrGetInnerRef(self);
+      });
 
   // Add the ClassType class definition.
   mlir_type_subclass(m, "ClassType", omTypeIsAClassType);

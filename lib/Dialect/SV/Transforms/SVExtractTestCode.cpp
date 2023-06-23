@@ -147,17 +147,20 @@ static StringAttr getNameForPort(Value val, ArrayAttr modulePorts) {
           return reg.getNameAttr();
       }
     } else if (auto inst = dyn_cast<hw::InstanceOp>(op)) {
-      for (auto [index, result] : llvm::enumerate(inst.getResults()))
-        if (result == val) {
-          SmallString<64> portName = inst.getInstanceName();
-          portName += ".";
-          auto resultName = inst.getResultName(index);
-          if (resultName && !resultName.getValue().empty())
-            portName += resultName.getValue();
-          else
-            Twine(index).toVector(portName);
-          return StringAttr::get(val.getContext(), portName);
-        }
+      auto index = val.cast<mlir::OpResult>().getResultNumber();
+      SmallString<64> portName = inst.getInstanceName();
+      portName += ".";
+      auto resultName = inst.getResultName(index);
+      if (resultName && !resultName.getValue().empty())
+        portName += resultName.getValue();
+      else
+        Twine(index).toVector(portName);
+      return StringAttr::get(val.getContext(), portName);
+    } else if (op->getNumResults() == 1) {
+      if (auto name = op->getAttrOfType<StringAttr>("name"))
+        return name;
+      if (auto namehint = op->getAttrOfType<StringAttr>("sv.namehint"))
+        return namehint;
     }
   }
 
@@ -555,9 +558,12 @@ private:
       return false;
 
     // Find the data-flow and structural ops to clone.  Result includes roots.
-    // Track dataflow until it reaches to design parts.
-    auto opsToClone = getBackwardSlice(
-        roots, [&](Operation *op) { return !opsInDesign.count(op); });
+    // Track dataflow until it reaches to design parts except for constants that
+    // can be cloned freely.
+    auto opsToClone = getBackwardSlice(roots, [&](Operation *op) {
+      return !opsInDesign.count(op) ||
+             op->hasTrait<mlir::OpTrait::ConstantLike>();
+    });
 
     // Find the dataflow into the clone set
     SetVector<Value> inputs;

@@ -232,7 +232,8 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
       for (const auto &dep : tmpDependence->getDependences(memOp))
         for (auto comp : dep.dependenceComponents)
           for (auto loopJ : innerLoops)
-            if (loopI != loopJ && loopJ->isAncestor(comp.op)) {
+            if (dep.dependenceType == DependenceResult::HasDependence &&
+                loopI != loopJ && loopJ->isAncestor(comp.op)) {
               tmpBlk->erase();
               return success();
             }

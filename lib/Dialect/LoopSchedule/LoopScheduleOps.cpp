@@ -387,7 +387,7 @@ LogicalResult LoopScheduleSequentialOp::verify() {
 
 void LoopScheduleSequentialOp::build(OpBuilder &builder, OperationState &state,
                             TypeRange resultTypes,
-                            Optional<IntegerAttr> tripCount,
+                            std::optional<IntegerAttr> tripCount,
                             ValueRange iterArgs) {
   OpBuilder::InsertionGuard g(builder);
 
@@ -482,38 +482,37 @@ LogicalResult LoopScheduleRegisterOp::verify() {
 //===----------------------------------------------------------------------===//
 
 LogicalResult LoopScheduleTerminatorOp::verify() {
-  LoopSchedulePipelineOp pipeline =
-      (*this)->getParentOfType<LoopSchedulePipelineOp>();
-
-  // Verify pipeline terminates with the same `iter_args` types as the pipeline.
+  // Verify loop terminates with the same `iter_args` types as the pipeline.
   auto iterArgs = getIterArgs();
   TypeRange terminatorArgTypes = iterArgs.getTypes();
-  TypeRange pipelineArgTypes = pipeline.getIterArgs().getTypes();
-  if (terminatorArgTypes != pipelineArgTypes)
+  TypeRange loopArgTypes = this->getIterArgs().getTypes();
+  if (terminatorArgTypes != loopArgTypes)
     return emitOpError("'iter_args' types (")
            << terminatorArgTypes << ") must match pipeline 'iter_args' types ("
-           << pipelineArgTypes << ")";
+           << loopArgTypes << ")";
 
-  // Verify `iter_args` are defined by a pipeline stage.
+  // Verify `iter_args` are defined by a pipeline stage or step.
   for (auto iterArg : iterArgs)
-    if (iterArg.getDefiningOp<LoopSchedulePipelineStageOp>() == nullptr)
+    if (iterArg.getDefiningOp<LoopSchedulePipelineStageOp>() == nullptr &&
+        iterArg.getDefiningOp<LoopScheduleStepOp>() == nullptr)
       return emitOpError(
-          "'iter_args' must be defined by a 'loopschedule.pipeline.stage'");
+          "'iter_args' must be defined by a 'loopschedule.pipeline.stage' or 'loopschedule.step'");
 
-  // Verify pipeline terminates with the same result types as the pipeline.
+  // Verify loop terminates with the same result types as the loop.
   auto opResults = getResults();
   TypeRange terminatorResultTypes = opResults.getTypes();
-  TypeRange pipelineResultTypes = pipeline.getResultTypes();
-  if (terminatorResultTypes != pipelineResultTypes)
+  TypeRange loopResultTypes = this->getResults().getTypes();
+  if (terminatorResultTypes != loopResultTypes)
     return emitOpError("'results' types (")
-           << terminatorResultTypes << ") must match pipeline result types ("
-           << pipelineResultTypes << ")";
+           << terminatorResultTypes << ") must match loop result types ("
+           << loopResultTypes << ")";
 
-  // Verify `results` are defined by a pipeline stage.
+  // Verify `results` are defined by a pipeline stage or step.
   for (auto result : opResults)
-    if (result.getDefiningOp<LoopSchedulePipelineStageOp>() == nullptr)
+    if (result.getDefiningOp<LoopSchedulePipelineStageOp>() == nullptr &&
+        result.getDefiningOp<LoopScheduleStepOp>() == nullptr)
       return emitOpError(
-          "'results' must be defined by a 'loopschedule.pipeline.stage'");
+          "'results' must be defined by a 'loopschedule.pipeline.stage' or 'loopschedule.step'");
 
   return success();
 }

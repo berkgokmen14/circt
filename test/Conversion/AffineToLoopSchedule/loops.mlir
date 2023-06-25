@@ -24,7 +24,7 @@ func.func @minimal(%arg0 : memref<10xindex>) {
 
   affine.for %arg1 = 0 to 10 {
     affine.store %arg1, %arg0[%arg1] : memref<10xindex>
-  }
+  } {hls.pipeline}
 
   return
 }
@@ -60,7 +60,7 @@ func.func @dot(%arg0: memref<64xi32>, %arg1: memref<64xi32>) -> i32 {
     %3 = arith.muli %1, %2 : i32
     %4 = arith.addi %arg3, %3 : i32
     affine.yield %4 : i32
-  }
+  } {hls.pipeline}
 
   return %0 : i32
 }
@@ -78,7 +78,7 @@ func.func @affine_symbol(%arg0: i32) -> i32 {
     %2 = arith.index_cast %arg1 : index to i32
     %3 = arith.addi %arg2, %2 : i32
     affine.yield %3 : i32
-  }
+  } {hls.pipeline}
   return %1 : i32
 }
 
@@ -95,7 +95,7 @@ func.func @affine_dimension(%arg0: i32) -> i32 {
     %2 = arith.index_cast %arg1 : index to i32
     %3 = arith.addi %arg2, %2 : i32
     affine.yield %3 : i32
-  }
+  } {hls.pipeline}
   return %1 : i32
 }
 
@@ -131,7 +131,7 @@ func.func @dot_mul_accumulate(%arg0: memref<64xi32>, %arg1: memref<64xi32>) -> i
     %3 = arith.muli %1, %2 : i32
     %4 = arith.muli %arg3, %3 : i32
     affine.yield %4 : i32
-  }
+  } {hls.pipeline}
 
   return %0 : i32
 }
@@ -174,7 +174,7 @@ func.func @dot_shared_mem(%arg0: memref<128xi32>) -> i32 {
     %3 = arith.muli %1, %2 : i32
     %4 = arith.addi %arg3, %3 : i32
     affine.yield %4 : i32
-  }
+  } {hls.pipeline}
 
   return %0 : i32
 }

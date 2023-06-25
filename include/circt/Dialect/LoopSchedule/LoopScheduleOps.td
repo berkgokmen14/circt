@@ -211,7 +211,7 @@ def LoopScheduleSequentialOp : LoopScheduleOp<"sequential"> {
   let skipDefaultBuilders = 1;
   let builders = [
     OpBuilder<(ins "mlir::TypeRange":$resultTypes,
-                   "llvm::Optional<IntegerAttr>": $tripCount,
+                   "std::optional<IntegerAttr>": $tripCount,
                    "mlir::ValueRange":$iterArgs)>
   ];
 
@@ -270,7 +270,7 @@ def LoopScheduleStepOp : LoopScheduleOp<"step",
 }
 
 def LoopScheduleRegisterOp : LoopScheduleOp<"register",
-    [ParentOneOf<["LoopSchedulePipelineOp", "LoopSchedulePipelineStageOp"]>, Terminator]> {
+    [ParentOneOf<["LoopSchedulePipelineOp", "LoopSchedulePipelineStageOp", "LoopScheduleSequentialOp", "LoopScheduleStepOp"]>, Terminator]> {
   let summary = "LoopSchedule dialect loop register.";
   let description = [{
     The `loopschedule.register` terminates a pipeline stage and
@@ -290,7 +290,7 @@ def LoopScheduleRegisterOp : LoopScheduleOp<"register",
 }
 
 def LoopScheduleTerminatorOp : LoopScheduleOp<"terminator",
-    [HasParent<"LoopSchedulePipelineOp">, Terminator, AttrSizedOperandSegments]> {
+    [ParentOneOf<["LoopSchedulePipelineOp", "LoopScheduleSequentialOp"]>, Terminator, AttrSizedOperandSegments]> {
   let summary = "LoopSchedule dialect terminator.";
   let description = [{
     The `loopschedule.terminator` operation represents the terminator of

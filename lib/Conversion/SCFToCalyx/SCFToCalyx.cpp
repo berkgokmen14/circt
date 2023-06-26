@@ -71,7 +71,7 @@ public:
 // Lowering state classes
 //===----------------------------------------------------------------------===//
 
-struct WhileScheduleable {
+struct WhileSchedulable {
   /// While operation to schedule.
   ScfWhileOp whileOp;
   /// The group(s) to schedule before the while operation These groups should
@@ -79,8 +79,8 @@ struct WhileScheduleable {
   SmallVector<calyx::GroupOp> initGroups;
 };
 
-/// A variant of types representing scheduleable operations.
-using Scheduleable = std::variant<calyx::GroupOp, WhileScheduleable>;
+/// A variant of types representing schedulable operations.
+using Schedulable = std::variant<calyx::GroupOp, WhileSchedulable>;
 
 /// Handles the current state of lowering of a Calyx component. It is mainly
 /// used as a key/value store for recording information during partial lowering,
@@ -88,7 +88,7 @@ using Scheduleable = std::variant<calyx::GroupOp, WhileScheduleable>;
 class ComponentLoweringState
     : public calyx::ComponentLoweringStateInterface,
       public calyx::LoopLoweringStateInterface<ScfWhileOp>,
-      public calyx::SchedulerInterface<Scheduleable> {
+      public calyx::SchedulerInterface<Schedulable> {
 public:
   ComponentLoweringState(calyx::ComponentOp component)
       : calyx::ComponentLoweringStateInterface(component) {}
@@ -249,7 +249,7 @@ private:
         getState<ComponentLoweringState>().getUniqueName(opName));
     // Operation pipelines are not combinational, so a GroupOp is required.
     auto group = createGroupForOp<calyx::GroupOp>(rewriter, op);
-    getState<ComponentLoweringState>().addBlockScheduleable(op->getBlock(),
+    getState<ComponentLoweringState>().addBlockSchedulable(op->getBlock(),
                                                             group);
 
     rewriter.setInsertionPointToEnd(group.getBodyBlock());
@@ -341,7 +341,7 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
         rewriter, group, getState<ComponentLoweringState>().getComponentOp(),
         reg, memoryInterface.readData());
     loadOp.getResult().replaceAllUsesWith(reg.getOut());
-    getState<ComponentLoweringState>().addBlockScheduleable(loadOp->getBlock(),
+    getState<ComponentLoweringState>().addBlockSchedulable(loadOp->getBlock(),
                                                             group);
   }
   return success();
@@ -353,9 +353,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
       storeOp.getMemref());
   auto group = createGroupForOp<calyx::GroupOp>(rewriter, storeOp);
 
-  // This is a sequential group, so register it as being scheduleable for the
+  // This is a sequential group, so register it as being schedulable for the
   // block.
-  getState<ComponentLoweringState>().addBlockScheduleable(storeOp->getBlock(),
+  getState<ComponentLoweringState>().addBlockSchedulable(storeOp->getBlock(),
                                                           group);
   assignAddressPorts(rewriter, storeOp.getLoc(), group, memoryInterface,
                      storeOp.getIndices());
@@ -541,7 +541,7 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
         reg, op.value());
   }
   /// Schedule group for execution for when executing the return op block.
-  getState<ComponentLoweringState>().addBlockScheduleable(retOp->getBlock(),
+  getState<ComponentLoweringState>().addBlockSchedulable(retOp->getBlock(),
                                                           groupOp);
   return success();
 }
@@ -909,8 +909,8 @@ class BuildWhileGroups : public calyx::FuncOpPartialLoweringPattern {
         initGroups.push_back(initGroupOp);
       }
 
-      getState<ComponentLoweringState>().addBlockScheduleable(
-          whileOp.getOperation()->getBlock(), WhileScheduleable{
+      getState<ComponentLoweringState>().addBlockSchedulable(
+          whileOp.getOperation()->getBlock(), WhileSchedulable{
                                                   whileOp,
                                                   initGroups,
                                               });
@@ -947,21 +947,21 @@ private:
                                    const DenseSet<Block *> &path,
                                    mlir::Block *parentCtrlBlock,
                                    mlir::Block *block) const {
-    auto compBlockScheduleables =
-        getState<ComponentLoweringState>().getBlockScheduleables(block);
+    auto compBlockSchedulables =
+        getState<ComponentLoweringState>().getBlockSchedulables(block);
     auto loc = block->front().getLoc();
 
-    if (compBlockScheduleables.size() > 1) {
+    if (compBlockSchedulables.size() > 1) {
       auto seqOp = rewriter.create<calyx::SeqOp>(loc);
       parentCtrlBlock = seqOp.getBodyBlock();
     }
 
-    for (auto &group : compBlockScheduleables) {
+    for (auto &group : compBlockSchedulables) {
       rewriter.setInsertionPointToEnd(parentCtrlBlock);
       if (auto groupPtr = std::get_if<calyx::GroupOp>(&group); groupPtr) {
         rewriter.create<calyx::EnableOp>(groupPtr->getLoc(),
                                          groupPtr->getSymName());
-      } else if (auto whileSchedPtr = std::get_if<WhileScheduleable>(&group);
+      } else if (auto whileSchedPtr = std::get_if<WhileSchedulable>(&group);
                  whileSchedPtr) {
         auto &whileOp = whileSchedPtr->whileOp;
 
@@ -987,7 +987,7 @@ private:
         if (res.failed())
           return res;
       } else
-        llvm_unreachable("Unknown scheduleable");
+        llvm_unreachable("Unknown schedulable");
     }
     return success();
   }

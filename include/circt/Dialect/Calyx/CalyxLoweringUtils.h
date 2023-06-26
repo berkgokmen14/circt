@@ -159,35 +159,35 @@ private:
 template <typename T>
 class SchedulerInterface {
 public:
-  /// Register 'scheduleable' as being generated through lowering 'block'.
+  /// Register 'schedulable' as being generated through lowering 'block'.
   ///
   /// TODO(mortbopet): Add a post-insertion check to ensure that the use-def
   /// ordering invariant holds for the groups. When the control schedule is
-  /// generated, scheduleables within a block are emitted sequentially based on
+  /// generated, schedulables within a block are emitted sequentially based on
   /// the order that this function was called during conversion.
   ///
   /// Currently, we assume this to always be true. Walking the FuncOp IR implies
   /// sequential iteration over operations within basic blocks.
-  void addBlockScheduleable(mlir::Block *block, const T &scheduleable) {
-    blockScheduleables[block].push_back(scheduleable);
+  void addBlockSchedulable(mlir::Block *block, const T &schedulable) {
+    blockSchedulables[block].push_back(schedulable);
   }
 
   /// Returns an ordered list of schedulables which registered themselves to be
   /// a result of lowering the block in the source program. The list order
-  /// follows def-use chains between the scheduleables in the block.
-  SmallVector<T> getBlockScheduleables(mlir::Block *block) {
-    if (auto it = blockScheduleables.find(block);
-        it != blockScheduleables.end())
+  /// follows def-use chains between the schedulables in the block.
+  SmallVector<T> getBlockSchedulables(mlir::Block *block) {
+    if (auto it = blockSchedulables.find(block);
+        it != blockSchedulables.end())
       return it->second;
     /// In cases of a block resulting in purely combinational logic, no
-    /// scheduleables registered themselves with the block.
+    /// schedulables registered themselves with the block.
     return {};
   }
 
 private:
-  /// BlockScheduleables is a list of scheduleables that should be
+  /// BlockSchedulables is a list of schedulables that should be
   /// sequentially executed when executing the associated basic block.
-  DenseMap<mlir::Block *, SmallVector<T>> blockScheduleables;
+  DenseMap<mlir::Block *, SmallVector<T>> blockSchedulables;
 };
 
 //===----------------------------------------------------------------------===//
@@ -373,7 +373,7 @@ private:
 
   /// Block arg groups is a list of groups that should be sequentially
   /// executed when passing control from the source to destination block.
-  /// Block arg groups are executed before blockScheduleables (akin to a
+  /// Block arg groups are executed before blockSchedulables (akin to a
   /// phi-node).
   DenseMap<Block *, DenseMap<Block *, SmallVector<calyx::GroupOp>>>
       blockArgGroups;

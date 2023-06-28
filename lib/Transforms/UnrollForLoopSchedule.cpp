@@ -40,7 +40,7 @@ struct UnrollForLoopSchedule
 
 private:
   bool hasAllocDefinition(TypedValue<MemRefType> val);
-  bool usesLocalMemory(AffineForOp affineFor);
+  bool usesExternalMemory(AffineForOp affineFor);
   DenseSet<AffineMapAccessInterface> updateMemoryOps(AffineForOp affineFor);
   uint64_t getMinDepDistance(AffineForOp affineFor);
   std::optional<uint64_t> consumePragma(AffineForOp affineFor);
@@ -61,29 +61,29 @@ bool UnrollForLoopSchedule::hasAllocDefinition(TypedValue<MemRefType> val) {
                                      isa<memref::AllocaOp>(*definitionOp));
 };
 
-bool UnrollForLoopSchedule::usesLocalMemory(AffineForOp affineFor) {
+bool UnrollForLoopSchedule::usesExternalMemory(AffineForOp affineFor) {
 
   WalkResult result = affineFor.getBody()->walk([&](Operation *op) {
     return TypeSwitch<Operation *, WalkResult>(op)
         .Case<AffineLoadOp>([&](Operation *op) {
           return hasAllocDefinition(cast<AffineLoadOp>(*op).getMemref())
-                     ? WalkResult::interrupt()
-                     : WalkResult::advance();
+                     ? WalkResult::advance()
+                     : WalkResult::interrupt();
         })
         .Case<AffineStoreOp>([&](Operation *op) {
           return hasAllocDefinition(cast<AffineStoreOp>(*op).getMemref())
-                     ? WalkResult::interrupt()
-                     : WalkResult::advance();
+                     ? WalkResult::advance()
+                     : WalkResult::interrupt();
         })
         .Case<memref::LoadOp>([&](Operation *op) {
           return hasAllocDefinition(cast<memref::LoadOp>(*op).getMemref())
-                     ? WalkResult::interrupt()
-                     : WalkResult::advance();
+                     ? WalkResult::advance()
+                     : WalkResult::interrupt();
         })
         .Case<memref::StoreOp>([&](Operation *op) {
           return hasAllocDefinition(cast<memref::StoreOp>(*op).getMemref())
-                     ? WalkResult::interrupt()
-                     : WalkResult::advance();
+                     ? WalkResult::advance()
+                     : WalkResult::interrupt();
         })
         .Default([&](Operation *op) { return WalkResult::advance(); });
   });
@@ -148,7 +148,7 @@ UnrollForLoopSchedule::consumePragma(AffineForOp affineFor) {
     if (val == "full")
       maxUnrollFactor = std::numeric_limits<uint64_t>::max();
   } else if (unrollAttr.isa<IntegerAttr>()) {
-    maxUnrollFactor = unrollAttr.cast<IntegerAttr>().getInt() <= 1
+    maxUnrollFactor = unrollAttr.cast<IntegerAttr>().getInt() < 1
                           ? std::numeric_limits<uint64_t>::max()
                           : unrollAttr.cast<IntegerAttr>().getInt();
   }
@@ -189,7 +189,7 @@ LogicalResult
 UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   std::optional<uint64_t> maxUnrollFactor = consumePragma(affineFor);
 
-  if (!usesLocalMemory(affineFor))
+  if (usesExternalMemory(affineFor))
     return success();
 
   // We are not checking for loop-carried dependencies
@@ -314,9 +314,6 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
 // work per II
 LogicalResult
 UnrollForLoopSchedule::unrollForPipelineParallel(AffineForOp affineFor) {
-
-  if (!usesLocalMemory(affineFor))
-    return success();
 
   updateMemoryOps(affineFor);
   uint64_t minDepDistance = getMinDepDistance(affineFor);

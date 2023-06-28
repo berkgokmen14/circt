@@ -44,7 +44,7 @@ private:
   DenseSet<AffineMapAccessInterface> updateMemoryOps(AffineForOp affineFor);
   uint64_t getMinDepDistance(AffineForOp affineFor);
   std::optional<uint64_t> consumePragma(AffineForOp affineFor);
-  AffineForOp cloneIntoNewBlock(AffineForOp affineFor);
+  AffineForOp cloneIntoNewBlock(AffineForOp affineFor, IRMapping &irMapping);
   LogicalResult unrollForDataParallel(AffineForOp affineFor);
   std::pair<SmallVector<AffineForOp>, unsigned>
   getDeepestNestedForOps(std::pair<SmallVector<AffineForOp>, unsigned> pair);
@@ -158,7 +158,8 @@ UnrollForLoopSchedule::consumePragma(AffineForOp affineFor) {
 
 // Clone an affine loop into its own isolated block. Not all values in scope are
 // copied over
-AffineForOp UnrollForLoopSchedule::cloneIntoNewBlock(AffineForOp affineFor) {
+AffineForOp UnrollForLoopSchedule::cloneIntoNewBlock(AffineForOp affineFor,
+                                                     IRMapping &irMapping) {
 
   OpBuilder builder(affineFor);
   auto originalPt = builder.saveInsertionPoint();
@@ -170,12 +171,11 @@ AffineForOp UnrollForLoopSchedule::cloneIntoNewBlock(AffineForOp affineFor) {
   auto *tmpBlk =
       builder.createBlock(originalBlk, originalBlk->getArgumentTypes(), locs);
 
-  IRMapping argsMapping;
   for (unsigned i = 0; i < originalBlk->getNumArguments(); ++i)
-    argsMapping.map(originalBlk->getArgument(i), tmpBlk->getArgument(i));
+    irMapping.map(originalBlk->getArgument(i), tmpBlk->getArgument(i));
 
   for (auto &op : affineFor->getBlock()->getOperations()) {
-    auto *clonedOp = builder.clone(op, argsMapping);
+    auto *clonedOp = builder.clone(op, irMapping);
     if (isa<AffineForOp>(op) && cast<AffineForOp>(op) == affineFor)
       return cast<AffineForOp>(*clonedOp);
   }
@@ -217,7 +217,8 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
 
   // Since the unrolled loop may be optimized/promoted away, I put the for
   // loop in its own block to isolated the new anchoring ForOp
-  auto tmpFor = cloneIntoNewBlock(affineFor);
+  IRMapping irMapping;
+  auto tmpFor = cloneIntoNewBlock(affineFor, irMapping);
   auto *tmpBlk = tmpFor->getBlock();
 
   if (loopUnrollUpToFactor(tmpFor, unrollFactor).failed())
@@ -268,16 +269,18 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
       continue;
 
     // Move the dominating ops to above the destLoop
-    for (auto &opToMove : operationsToMove) {
-      builder.setInsertionPoint(destLoop);
-      opToMove->remove();
-      builder.insert(opToMove);
-    }
+    for (auto &opToMove : operationsToMove)
+      opToMove->moveBefore(destLoop);
+
     operationsToMove.clear();
     auto &srcBlk = srcLoop.getRegion().getBlocks().back();
     destBlk.getTerminator()->erase();
     rewriter.mergeBlocks(&srcBlk, &destBlk, destBlk.getArguments());
   }
+
+  // Point old ops to the cloned & moved ones
+  for (auto opMapping : irMapping.getOperationMap())
+    opMapping.first->replaceAllUsesWith(opMapping.second->getResults());
 
   // Get rid of ops whose bodies we relocated
   innerLoops.erase(innerLoops.begin());
@@ -291,7 +294,7 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   auto *containingBlk = affineFor->getBlock();
   affineFor.erase();
 
-  // Finally, we have some cloned ops before the affineFor
+  // Now do cleanup of duplicate Ops from cloning step
   SmallVector<Operation *> prologueToDelete;
   for (auto &op : containingBlk->getOperations()) {
     if (isa<AffineForOp>(op) && cast<AffineForOp>(op) == destLoop) {

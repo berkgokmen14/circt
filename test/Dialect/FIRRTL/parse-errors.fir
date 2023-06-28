@@ -109,7 +109,7 @@ FIRRTL version 1.2.0
 circuit invalid_name :
   module invalid_name :
    input out_0 : { member : { 0 : { clock : Clock, reset : UInt<1>}}}
-   ; expected-error @+1 {{unknown field 'xx' in bundle type '!firrtl.bundle<member: bundle<0: bundle<clock: clock, reset: uint<1>>>>'}}
+   ; expected-error @+1 {{unknown field 'xx' in bundle type '!firrtl.bundle<member: bundle<"0": bundle<clock: clock, reset: uint<1>>>>'}}
    out_0.xx <- out_0.yy
 
 ;// -----
@@ -749,3 +749,31 @@ circuit UnsupportedStringEncodedIntegerLiterals:
     output foo: UInt<8>
     ; expected-error @below {{String-encoded integer literals are unsupported after FIRRTL 3.0.0}}
     connect foo, UInt("h2a")
+
+;// -----
+
+circuit UnknownTypeAlias:
+  module UnknownTypeAlias:
+    output x : Foo ; expected-error {{type identifier `Foo` is not declared}}
+
+;// -----
+
+circuit DuplicateAlias:
+  type Foo = UInt
+  type Foo = UInt; expected-error {{type alias `Foo` is already defined}}
+  module DuplicateAlias:
+
+;// -----
+; https://github.com/llvm/circt/issues/5494
+
+circuit BundleOfProps:
+  module BundleOfProps:
+    input x : {a : String}
+    ; expected-error @above {{type '!firrtl.string' cannot be used as field in a bundle}}
+
+;// -----
+
+circuit VecOfProps:
+  module VecOfProps:
+    input x : String[2]
+    ; expected-error @above {{type '!firrtl.string' cannot be used in a vector}}

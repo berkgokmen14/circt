@@ -113,12 +113,15 @@ static inline StringAttr getResetName(Value reset) {
 /// Construct a zero value of the given type using the given builder.
 static Value createZeroValue(ImplicitLocOpBuilder &builder, FIRRTLBaseType type,
                              SmallDenseMap<FIRRTLBaseType, Value> &cache) {
+  // The zero value's type is a const version of `type`.
+  type = type.getConstType(true);
   auto it = cache.find(type);
   if (it != cache.end())
     return it->second;
   auto nullBit = [&]() {
-    return createZeroValue(builder, UIntType::get(builder.getContext(), 1),
-                           cache);
+    return createZeroValue(
+        builder, UIntType::get(builder.getContext(), 1, /*isConst=*/true),
+        cache);
   };
   auto value =
       TypeSwitch<FIRRTLBaseType, Value>(type)
@@ -134,17 +137,19 @@ static Value createZeroValue(ImplicitLocOpBuilder &builder, FIRRTLBaseType type,
           })
           .Case<BundleType>([&](auto type) {
             auto wireOp = builder.create<WireOp>(type);
-            for (auto field : llvm::enumerate(type)) {
-              auto zero = createZeroValue(builder, field.value().type, cache);
-              auto acc = builder.create<SubfieldOp>(
-                  field.value().type, wireOp.getResult(), field.index());
+            for (unsigned i = 0, e = type.getNumElements(); i < e; ++i) {
+              auto fieldType = type.getElementTypePreservingConst(i);
+              auto zero = createZeroValue(builder, fieldType, cache);
+              auto acc =
+                  builder.create<SubfieldOp>(fieldType, wireOp.getResult(), i);
               builder.create<StrictConnectOp>(acc, zero);
             }
             return wireOp.getResult();
           })
           .Case<FVectorType>([&](auto type) {
             auto wireOp = builder.create<WireOp>(type);
-            auto zero = createZeroValue(builder, type.getElementType(), cache);
+            auto zero = createZeroValue(
+                builder, type.getElementTypePreservingConst(), cache);
             for (unsigned i = 0, e = type.getNumElements(); i < e; ++i) {
               auto acc = builder.create<SubindexOp>(zero.getType(),
                                                     wireOp.getResult(), i);
@@ -1072,7 +1077,7 @@ LogicalResult InferResetsPass::updateReset(ResetNetwork net, ResetKind kind) {
     Value value = signal.field.getValue();
     if (!isa<BlockArgument>(value) &&
         !isa_and_nonnull<WireOp, RegOp, RegResetOp, InstanceOp, InvalidValueOp,
-                         RefCastOp, UninferredResetCastOp>(
+                         ConstCastOp, RefCastOp, UninferredResetCastOp>(
             value.getDefiningOp()))
       continue;
     if (updateReset(signal.field, resetType)) {
@@ -1080,12 +1085,11 @@ LogicalResult InferResetsPass::updateReset(ResetNetwork net, ResetKind kind) {
         worklist.insert(user);
       if (auto blockArg = dyn_cast<BlockArgument>(value))
         moduleWorklist.insert(blockArg.getOwner()->getParentOp());
-      if (auto instOp = value.getDefiningOp<InstanceOp>())
+      else if (auto instOp = value.getDefiningOp<InstanceOp>()) {
         if (auto extmodule = dyn_cast<FExtModuleOp>(
                 *instanceGraph->getReferencedModule(instOp)))
           extmoduleWorklist.insert({extmodule, instOp});
-      if (auto uncast =
-              dyn_cast_or_null<UninferredResetCastOp>(value.getDefiningOp())) {
+      } else if (auto uncast = value.getDefiningOp<UninferredResetCastOp>()) {
         uncast.replaceAllUsesWith(uncast.getInput());
         uncast.erase();
       }
@@ -1125,17 +1129,6 @@ LogicalResult InferResetsPass::updateReset(ResetNetwork net, ResetKind kind) {
       uop.replaceAllUsesWith(uop.getInput());
       LLVM_DEBUG(llvm::dbgs() << "- Inferred " << uop << "\n");
       uop.erase();
-    } else if (auto constCastOp = dyn_cast<ConstCastOp>(wop)) {
-      // Propagate inferred reset types across const-casts of what was
-      // originally ResetType
-      if (isa<ResetType>(constCastOp.getResult().getType()) &&
-          !isa<ResetType>(constCastOp.getInput().getType())) {
-        auto result = constCastOp.getResult();
-        result.setType(constCastOp.getInput().getType().getConstType(false));
-        for (auto *user : result.getUsers())
-          worklist.insert(user);
-        LLVM_DEBUG(llvm::dbgs() << "- Inferred " << constCastOp << "\n");
-      }
     }
   }
 

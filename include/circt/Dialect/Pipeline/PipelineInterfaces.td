@@ -6,12 +6,12 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This describes the Pipeline operation interfaces.
+// This describes the Pipeline dialect operation interfaces.
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef CIRCT_DIALECT_Pipeline_PipelineInterfaces
-#define CIRCT_DIALECT_Pipeline_PipelineInterfaces
+#ifndef CIRCT_DIALECT_PIPELINE_PIPELINEINTERFACES_TD
+#define CIRCT_DIALECT_PIPELINE_PIPELINEINTERFACES_TD
 
 include "mlir/IR/OpBase.td"
 
@@ -50,7 +50,13 @@ def PipelineLike : OpInterface<"PipelineLike"> {
       /*methodBody=*/"",
       /*defaultImplementation=*/[{
         Block* firstStage = $_op.getEntryStage();        
-        return firstStage->getArguments().take_front($_op.getInputs().size());
+        auto inputs = $_op.getInputs();
+        if(inputs.empty())
+          return ValueRange();
+        
+        return firstStage->getArguments().slice(
+          inputs.getBeginOperandIndex(),
+          inputs.size());
       }]
     >,
     InterfaceMethod<"Returns the pipeline external inputs",
@@ -62,7 +68,13 @@ def PipelineLike : OpInterface<"PipelineLike"> {
       /*methodBody=*/"",
       /*defaultImplementation=*/[{
         Block* firstStage = $_op.getEntryStage();
-        return firstStage->getArguments().take_back($_op.getExtInputs().size());
+        auto extInputs = $_op.getExtInputs();
+        if(extInputs.empty())
+          return ValueRange();
+
+        return firstStage->getArguments().slice(
+          extInputs.getBeginOperandIndex(),
+          extInputs.size());
       }]
      >,
     InterfaceMethod<"Returns the first stage in the pipeline",
@@ -77,4 +89,4 @@ def PipelineLike : OpInterface<"PipelineLike"> {
   ];
 }
 
-#endif
+#endif // CIRCT_DIALECT_PIPELINE_PIPELINEINTERFACES_TD

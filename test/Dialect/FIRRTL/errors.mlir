@@ -1261,6 +1261,34 @@ firrtl.circuit "PropertyDoubleDrive" {
   }
 }
 
+// -----
+// Check that you can't connect property types.
+
+firrtl.circuit "PropertyConnect" {
+  firrtl.module @PropertyConnect(out %out: !firrtl.string) {
+    %0 = firrtl.string "hello"
+    // expected-error @below {{must be a passive base type}}
+    firrtl.strictconnect %out, %0 : !firrtl.string
+  }
+}
+
+// -----
+// Property aggregates can only contain properties.
+// Check list.
+
+firrtl.circuit "ListOfHW" {
+  // expected-error @below {{expected property type, found '!firrtl.uint<2>'}}
+  firrtl.module @MapOfHW(in %in: !firrtl.list<uint<2>>) {}
+}
+
+// -----
+// Property aggregates can only contain properties.
+// Check map.
+
+firrtl.circuit "MapOfHW" {
+  // expected-error @below {{expected property type, found '!firrtl.uint<4>'}}
+  firrtl.module @MapOfHW(in %in: !firrtl.map<string,uint<4>>) {}
+}
 
 // -----
 // Issue 4174-- handle duplicate module names.
@@ -1685,4 +1713,36 @@ firrtl.circuit "EnumAnalog" {
 firrtl.circuit "NonConstEnumConstElements" {
 // expected-error @+1 {{enum with 'const' elements must be 'const'}}
 firrtl.module @NonConstEnumConstElements(in %a: !firrtl.enum<None: uint<0>, Some: const.uint<1>>) {}
+}
+
+// -----
+// No const with probes within.
+
+firrtl.circuit "ConstOpenVector" {
+  // expected-error @below {{vector cannot be const with references}}
+  firrtl.extmodule @ConstOpenVector(out out : !firrtl.const.openvector<probe<uint<1>>, 2>)
+}
+
+// -----
+// Elements must support FieldID's.
+
+firrtl.circuit "OpenVectorNotFieldID" {
+  // expected-error @below {{vector element type does not support fieldID's, type: '!firrtl.string'}}
+  firrtl.extmodule @OpenVectorNotFieldID(out out : !firrtl.openvector<string, 2>)
+}
+
+// -----
+// No const with probes within.
+
+firrtl.circuit "ConstOpenBundle" {
+  // expected-error @below {{'const' bundle cannot have references, but element "x" has type '!firrtl.probe<uint<1>>'}}
+  firrtl.extmodule @ConstOpenBundle(out out : !firrtl.const.openbundle<x: probe<uint<1>>>)
+}
+
+// -----
+// Elements must support FieldID's.
+
+firrtl.circuit "OpenBundleNotFieldID" {
+  // expected-error @below {{bundle element "a" has unsupported type that does not support fieldID's: '!firrtl.string'}}
+  firrtl.extmodule @OpenBundleNotFieldID(out out : !firrtl.openbundle<a: string>)
 }

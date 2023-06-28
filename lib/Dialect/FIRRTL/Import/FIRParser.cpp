@@ -80,6 +80,9 @@ struct SharedParserConstants {
   /// this.  Do not use `annotationMap[key]`, use `aM.lookup(key)` instead.
   llvm::StringMap<ArrayAttr> annotationMap;
 
+  /// A map from identifiers to type aliases.
+  llvm::StringMap<FIRRTLType> aliasMap;
+
   /// An empty array attribute.
   const ArrayAttr emptyArrayAttr;
 
@@ -172,6 +175,13 @@ struct FIRParser {
     return emitError(getToken().getLoc(), message);
   }
   InFlightDiagnostic emitError(SMLoc loc, const Twine &message = {});
+
+  /// Emit a warning.
+  InFlightDiagnostic emitWarning(const Twine &message = {}) {
+    return emitWarning(getToken().getLoc(), message);
+  }
+
+  InFlightDiagnostic emitWarning(SMLoc loc, const Twine &message = {});
 
   //===--------------------------------------------------------------------===//
   // Location Handling
@@ -313,6 +323,10 @@ InFlightDiagnostic FIRParser::emitError(SMLoc loc, const Twine &message) {
   return diag;
 }
 
+InFlightDiagnostic FIRParser::emitWarning(SMLoc loc, const Twine &message) {
+  return mlir::emitWarning(translateLocation(loc), message);
+}
+
 //===----------------------------------------------------------------------===//
 // Token Parsing
 //===----------------------------------------------------------------------===//
@@ -366,8 +380,21 @@ public:
     LocationAttr loc;
     if (failed(parser->parseOptionalInfoLocator(loc)))
       return failure();
-    if (loc)
-      infoLoc = loc;
+    if (loc) {
+      using ILH = FIRParserOptions::InfoLocHandling;
+      switch (parser->constants.options.infoLocatorHandling) {
+      case ILH::IgnoreInfo:
+        assert(0 && "Should not return info locations if ignoring");
+        break;
+      case ILH::PreferInfo:
+        infoLoc = loc;
+        break;
+      case ILH::FusedInfo:
+        infoLoc = FusedLoc::get(loc.getContext(),
+                                {loc, parser->translateLocation(firLoc)});
+        break;
+      }
+    }
     return success();
   }
 
@@ -401,8 +428,10 @@ ParseResult FIRParser::parseOptionalInfoLocator(LocationAttr &result) {
   consumeToken(FIRToken::fileinfo);
 
   auto locationPair = maybeStringToLocation(
-      spelling, constants.options.ignoreInfoLocators, locatorFilenameCache,
-      fileLineColLocCache, getContext());
+      spelling,
+      constants.options.infoLocatorHandling ==
+          FIRParserOptions::InfoLocHandling::IgnoreInfo,
+      locatorFilenameCache, fileLineColLocCache, getContext());
 
   // If parsing failed, then indicate that a weird info was found.
   if (!locationPair.first) {
@@ -413,7 +442,8 @@ ParseResult FIRParser::parseOptionalInfoLocator(LocationAttr &result) {
 
   // If the parsing succeeded, but we are supposed to drop locators, then just
   // return.
-  if (locationPair.first && constants.options.ignoreInfoLocators)
+  if (locationPair.first && constants.options.infoLocatorHandling ==
+                                FIRParserOptions::InfoLocHandling::IgnoreInfo)
     return success();
 
   // Otherwise, set the location attribute and return.
@@ -807,6 +837,7 @@ ParseResult FIRParser::parseEnumType(FIRRTLType &result) {
 ///      ::= 'RWProbe' '<' type '>'
 ///      ::= 'const' type
 ///      ::= 'String'
+///      ::= id
 ///
 /// field: 'flip'? fieldId ':' type
 ///
@@ -892,9 +923,17 @@ ParseResult FIRParser::parseType(FIRRTLType &result, const Twine &message) {
           StringRef fieldName;
           FIRRTLType type;
           if (parseFieldId(fieldName, "expected bundle field name") ||
-              parseToken(FIRToken::colon, "expected ':' in bundle") ||
-              parseType(type, "expected bundle field type"))
+              parseToken(FIRToken::colon, "expected ':' in bundle"))
             return failure();
+          auto loc = getToken().getLoc();
+          if (parseType(type, "expected bundle field type"))
+            return failure();
+
+          // We require that elements of aggregates themselves
+          // support notion of FieldID, reject if the type does not.
+          if (!isa<hw::FieldIDTypeInterface>(type))
+            return emitError(loc, "type ")
+                   << type << " cannot be used as field in a bundle";
 
           elements.push_back(
               {StringAttr::get(getContext(), fieldName), isFlipped, type});
@@ -916,11 +955,25 @@ ParseResult FIRParser::parseType(FIRRTLType &result, const Twine &message) {
     break;
   }
 
-  case FIRToken::l_brace_bar:
+  case FIRToken::l_brace_bar: {
     if (parseEnumType(result))
       return failure();
     break;
+  }
 
+  case FIRToken::identifier: {
+    StringRef id;
+    auto loc = getToken().getLoc();
+    if (parseId(id, "expected a type alias name"))
+      return failure();
+    auto it = constants.aliasMap.find(id);
+    if (it == constants.aliasMap.end()) {
+      emitError(loc) << "type identifier `" << id << "` is not declared";
+      return failure();
+    }
+    result = it->second;
+    break;
+  }
   case FIRToken::kw_const: {
     consumeToken(FIRToken::kw_const);
     auto nextToken = getToken();
@@ -961,6 +1014,12 @@ ParseResult FIRParser::parseType(FIRRTLType &result, const Twine &message) {
 
     if (size < 0)
       return emitError(sizeLoc, "invalid size specifier"), failure();
+
+    // We require that elements of aggregates themselves
+    // support notion of FieldID, reject if the type does not.
+    if (!isa<hw::FieldIDTypeInterface>(result))
+      return emitError(sizeLoc, "type ")
+             << result << " cannot be used in a vector";
 
     auto baseType = dyn_cast<FIRRTLBaseType>(result);
     if (baseType)
@@ -1309,8 +1368,25 @@ struct LazyLocationListener : public OpBuilder::Listener {
 
     // If we have a symbolic location, apply it to any subOps specified.
     if (infoLoc) {
-      for (auto opAndSMLoc : subOps)
-        opAndSMLoc.first->setLoc(infoLoc);
+      for (auto opAndSMLoc : subOps) {
+        // Follow user preference to either only use @info locations,
+        // or apply a fused location with @info and file loc.
+        using ILH = FIRParserOptions::InfoLocHandling;
+        switch (parser.getConstants().options.infoLocatorHandling) {
+        case ILH::IgnoreInfo:
+          // Shouldn't have an infoLoc, but if we do ignore it.
+          opAndSMLoc.first->setLoc(parser.translateLocation(opAndSMLoc.second));
+          break;
+        case ILH::PreferInfo:
+          opAndSMLoc.first->setLoc(infoLoc);
+          break;
+        case ILH::FusedInfo:
+          opAndSMLoc.first->setLoc(FusedLoc::get(
+              infoLoc.getContext(),
+              {infoLoc, parser.translateLocation(opAndSMLoc.second)}));
+          break;
+        }
+      }
     } else {
       // If we don't, translate all the individual SMLoc's to Location objects
       // in the .fir file.
@@ -3735,6 +3811,8 @@ private:
                             SmallVectorImpl<SMLoc> &resultPortLocs,
                             unsigned indent);
 
+  ParseResult parseTypeDecl();
+
   struct DeferredModuleToParse {
     FModuleOp moduleOp;
     SmallVector<SMLoc> portLocs;
@@ -3969,7 +4047,8 @@ ParseResult FIRCircuitParser::parseModule(CircuitOp circuit,
       case FIRToken::error:
         return success();
 
-        // If we got to the next module, then we're done.
+      // If we got to the next module or a type declaration, then we're done.
+      case FIRToken::kw_type:
       case FIRToken::kw_module:
       case FIRToken::kw_extmodule:
       case FIRToken::kw_intmodule:
@@ -4151,6 +4230,32 @@ ParseResult FIRCircuitParser::parseModule(CircuitOp circuit,
   return success();
 }
 
+// Parse a type declaration.
+ParseResult FIRCircuitParser::parseTypeDecl() {
+  StringRef id;
+  FIRRTLType type;
+  consumeToken();
+  auto loc = getToken().getLoc();
+  if (parseId(id, "expected type name") ||
+      parseToken(FIRToken::equal, "expected '=' in type decl") ||
+      parseType(type, "expected a type"))
+    return failure();
+  auto name = StringAttr::get(type.getContext(), id);
+  // Create type alias only for base types. Otherwise just pass through the
+  // type.
+  if (auto base = dyn_cast<FIRRTLBaseType>(type))
+    type = BaseTypeAliasType::get(name, base);
+  else
+    emitWarning(loc)
+        << "type alias for non-base type " << type
+        << " is currently not supported. Type alias is stripped immediately";
+
+  if (!getConstants().aliasMap.insert({id, type}).second)
+    return emitError(loc) << "type alias `" << name.getValue()
+                          << "` is already defined";
+  return success();
+}
+
 // Parse the body of this module.
 ParseResult
 FIRCircuitParser::parseModuleBody(DeferredModuleToParse &deferredModule) {
@@ -4317,6 +4422,12 @@ ParseResult FIRCircuitParser::parseCircuit(
     default:
       emitError("unexpected token in circuit");
       return failure();
+
+    case FIRToken::kw_type: {
+      if (parseTypeDecl())
+        return failure();
+      break;
+    }
 
     case FIRToken::kw_module:
     case FIRToken::kw_extmodule:

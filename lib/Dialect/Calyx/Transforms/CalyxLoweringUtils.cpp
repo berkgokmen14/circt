@@ -128,6 +128,28 @@ bool noStoresToMemory(Value memoryReference) {
   });
 }
 
+bool singleLoadFromMemoryInBlock(Value memoryReference, Block *block) {
+  return llvm::count_if(memoryReference.getUses(), [&block](OpOperand &user) {
+           auto res = block->walk([&](mlir::memref::LoadOp op) {
+             if (op.getOperation() == user.getOwner())
+               return WalkResult::interrupt();
+             return WalkResult::advance();
+           });
+           return res.wasInterrupted();
+         }) <= 1;
+}
+
+bool noStoresToMemoryInBlock(Value memoryReference, Block *block) {
+  return llvm::none_of(memoryReference.getUses(), [&block](OpOperand &user) {
+    auto res = block->walk([&](mlir::memref::StoreOp op) {
+      if (op.getOperation() == user.getOwner())
+        return WalkResult::interrupt();
+      return WalkResult::advance();
+    });
+    return res.wasInterrupted();
+  });
+}
+
 Value getComponentOutput(calyx::ComponentOp compOp, unsigned outPortIdx) {
   size_t index = compOp.getInputPortInfo().size() + outPortIdx;
   assert(index < compOp.getNumArguments() &&
@@ -141,18 +163,36 @@ Type convIndexType(OpBuilder &builder, Type type) {
   return type;
 }
 
+// Creates a new calyx::StaticGroupOp group within compOp.
+StaticGroupOp createStaticGroup(OpBuilder &builder, calyx::ComponentOp compOp,
+                                Location loc, Twine uniqueName,
+                                uint64_t latency) {
+  mlir::IRRewriter::InsertionGuard guard(builder);
+  builder.setInsertionPointToEnd(compOp.getWiresOp().getBodyBlock());
+  return builder.create<StaticGroupOp>(loc, uniqueName.str(), latency);
+}
+
+unsigned getBitWidth(Type t) {
+  if (t.isIndex()) {
+    return 32;
+  }
+
+  return t.getIntOrFloatBitWidth();
+}
+
 void buildAssignmentsForRegisterWrite(OpBuilder &builder,
-                                      calyx::GroupOp groupOp,
+                                      calyx::GroupInterface groupOp,
                                       calyx::ComponentOp componentOp,
                                       calyx::RegisterOp &reg,
                                       Value inputValue) {
   mlir::IRRewriter::InsertionGuard guard(builder);
   auto loc = inputValue.getLoc();
-  builder.setInsertionPointToEnd(groupOp.getBodyBlock());
+  builder.setInsertionPointToEnd(groupOp.getBody());
   builder.create<calyx::AssignOp>(loc, reg.getIn(), inputValue);
   builder.create<calyx::AssignOp>(
       loc, reg.getWriteEn(), createConstant(loc, builder, componentOp, 1, 1));
-  builder.create<calyx::GroupDoneOp>(loc, reg.getDone());
+  if (!llvm::isa<StaticGroupOp>(groupOp))
+    builder.create<calyx::GroupDoneOp>(loc, reg.getDone());
 }
 
 //===----------------------------------------------------------------------===//
@@ -231,12 +271,12 @@ ComponentLoweringStateInterface::getBlockArgRegs(Block *block) {
   return blockArgRegs[block];
 }
 
-void ComponentLoweringStateInterface::addBlockArgGroup(Block *from, Block *to,
-                                                       calyx::GroupOp grp) {
+void ComponentLoweringStateInterface::addBlockArgGroup(
+    Block *from, Block *to, calyx::GroupInterface grp) {
   blockArgGroups[from][to].push_back(grp);
 }
 
-ArrayRef<calyx::GroupOp>
+ArrayRef<calyx::GroupInterface>
 ComponentLoweringStateInterface::getBlockArgGroups(Block *from, Block *to) {
   return blockArgGroups[from][to];
 }
@@ -555,7 +595,7 @@ void InlineCombGroups::recurseInlineCombGroups(
         isa<calyx::RegisterOp, calyx::MemoryOp, hw::ConstantOp,
             mlir::arith::ConstantOp, calyx::MultPipeLibOp, calyx::DivUPipeLibOp,
             calyx::DivSPipeLibOp, calyx::RemSPipeLibOp, calyx::RemUPipeLibOp,
-            mlir::scf::WhileOp>(src.getDefiningOp()))
+            mlir::scf::WhileOp, calyx::CycleOp>(src.getDefiningOp()))
       continue;
 
     auto srcCombGroup = dyn_cast<calyx::CombGroupOp>(
@@ -584,8 +624,8 @@ RewriteMemoryAccesses::partiallyLower(calyx::AssignOp assignOp,
     return success();
 
   Value src = assignOp.getSrc();
-  unsigned srcBits = src.getType().getIntOrFloatBitWidth();
-  unsigned dstBits = dest.getType().getIntOrFloatBitWidth();
+  unsigned srcBits = getBitWidth(src.getType());
+  unsigned dstBits = getBitWidth(dest.getType());
   if (srcBits == dstBits)
     return success();
 

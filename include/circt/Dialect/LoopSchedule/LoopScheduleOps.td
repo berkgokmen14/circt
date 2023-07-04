@@ -17,11 +17,12 @@ include "mlir/IR/OpBase.td"
 include "mlir/IR/SymbolInterfaces.td"
 include "mlir/IR/RegionKindInterface.td"
 include "circt/Dialect/LoopSchedule/LoopSchedule.td"
+include "circt/Dialect/LoopSchedule/LoopScheduleInterfaces.td"
 
 class LoopScheduleOp<string mnemonic, list<Trait> traits = []> :
   Op<LoopSchedule_Dialect, mnemonic, traits>;
 
-def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", []> {
+def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
   let summary = "LoopSchedule dialect pipeline-loop.";
   let description = [{
     The `loopschedule.pipeline` operation represents a statically scheduled
@@ -90,11 +91,33 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", []> {
   let extraClassDeclaration = [{
     Block &getCondBlock() { return getCondition().front(); }
     Block &getStagesBlock() { return getStages().front(); }
+
+    Block::BlockArgListType getBodyArgs() {
+      return getStagesBlock().getArguments();
+    }
+    Block *getBodyBlock() {
+      return &getStagesBlock();
+    }
+    Block *getConditionBlock() {
+      return &getCondBlock();
+    }
+    Value getConditionValue() {
+      return getCondBlock().getTerminator()->getOperand(0);
+    }
+    std::optional<uint64_t> getBound() {
+      return getTripCount();
+    }
+    bool isPipelined() {
+      return true;
+    }
+
+    uint64_t getBodyLatency();
   }];
 }
 
 def LoopSchedulePipelineStageOp : LoopScheduleOp<"pipeline.stage",
-    [HasParent<"LoopSchedulePipelineOp">]> {
+    [HasParent<"LoopSchedulePipelineOp">,
+     PhaseOpInterface]> {
   let summary = "LoopSchedule dialect pipeline stage.";
   let description = [{
     This operation has a single-block region which dictates the operations that
@@ -122,7 +145,8 @@ def LoopSchedulePipelineStageOp : LoopScheduleOp<"pipeline.stage",
   }];
 
   let arguments = (ins
-    SI64Attr:$start,
+    I64Attr:$start,
+    I64Attr:$end,
     Optional<I1>:$when
   );
 
@@ -135,23 +159,34 @@ def LoopSchedulePipelineStageOp : LoopScheduleOp<"pipeline.stage",
   );
 
   let assemblyFormat = [{
-    `start` `=` $start (`when` $when^)? $body (`:` qualified(type($results))^)? attr-dict
+    `start` `=` $start `end` `=` $end (`when` $when^)? $body (`:` qualified(type($results))^)? attr-dict
   }];
 
   let hasVerifier = 1;
 
   let skipDefaultBuilders = 1;
   let builders = [
-    OpBuilder<(ins "mlir::TypeRange":$resultTypes, "mlir::IntegerAttr":$start)>
+    OpBuilder<(ins "mlir::TypeRange":$resultTypes, "mlir::IntegerAttr":$start,
+               "mlir::IntegerAttr":$end)>
   ];
 
   let extraClassDeclaration = [{
     Block &getBodyBlock() { return getBody().front(); }
     unsigned getStageNumber();
+
+    std::string getRegisterNamePrefix() {
+      return "stage_" + getStageNumber();
+    }
+    bool isStatic() {
+      return true;
+    }
+    std::optional<uint64_t> getStartTime() {
+      return getStart();
+    }
   }];
 }
 
-def LoopScheduleSequentialOp : LoopScheduleOp<"sequential"> {
+def LoopScheduleSequentialOp : LoopScheduleOp<"sequential", [LoopOpInterface]> {
   let summary = "LoopSchedule dialect sequential while-loop.";
   let description = [{
     The `loopschedule.sequential` operation represents a statically scheduled
@@ -218,14 +253,31 @@ def LoopScheduleSequentialOp : LoopScheduleOp<"sequential"> {
   let extraClassDeclaration = [{
     Block &getCondBlock() { return getCondition().front(); }
     Block &getScheduleBlock() { return getSchedule().front(); }
-    /* LoopScheduleTerminatorOp getTerminator() { */
-    /*   return llvm::cast<LoopScheduleTerminatorOp>(getScheduleBlock().getTerminator()); */    
-    /* } */
+    Block::BlockArgListType getBodyArgs() {
+      return getScheduleBlock().getArguments();
+    }
+    Block *getBodyBlock() {
+      return &getScheduleBlock();
+    }
+    Block *getConditionBlock() {
+      return &getCondBlock();
+    }
+    Value getConditionValue() {
+      return getCondBlock().getTerminator()->getOperand(0);
+    }
+    std::optional<uint64_t> getBound() {
+      return getTripCount();
+    }
+    bool isPipelined() {
+      return false;
+    }
   }];
 }
 
 def LoopScheduleStepOp : LoopScheduleOp<"step",
-    [ParentOneOf<["LoopScheduleSequentialOp", "mlir::func::FuncOp"]>]> {
+    [ParentOneOf<["LoopScheduleSequentialOp", "mlir::func::FuncOp"]>,
+     SingleBlockImplicitTerminator<"LoopScheduleRegisterOp">,
+     PhaseOpInterface]> {
   let summary = "LoopSchedule dialect schedule step.";
   let description = [{
     This operation has a single-block region which dictates the operations that
@@ -266,6 +318,16 @@ def LoopScheduleStepOp : LoopScheduleOp<"step",
   let extraClassDeclaration = [{
     Block &getBodyBlock() { return getBody().front(); }
     unsigned getStepNumber();
+
+    std::string getRegisterNamePrefix() {
+      return "step_" + getStepNumber();
+    }
+    bool isStatic() {
+      return false;
+    }
+    std::optional<uint64_t> getStartTime() {
+      return std::nullopt;
+    }
   }];
 }
 
@@ -285,6 +347,8 @@ def LoopScheduleRegisterOp : LoopScheduleOp<"register",
   let assemblyFormat = [{
     $operands (`:` qualified(type($operands))^)? attr-dict
   }];
+
+  let builders = [OpBuilder<(ins), [{ return; }]>];
 
   let hasVerifier = 1;
 }

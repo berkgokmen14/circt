@@ -70,16 +70,14 @@ IntegerAttr direction::packAttribute(MLIRContext *ctx, size_t nIns,
 //===----------------------------------------------------------------------===//
 
 /// This pattern collapses a calyx.seq or calyx.par operation when it
-/// contains exactly one calyx.enable operation.
+/// contains exactly one operation.
 template <typename CtrlOp>
 struct CollapseUnaryControl : mlir::OpRewritePattern<CtrlOp> {
   using mlir::OpRewritePattern<CtrlOp>::OpRewritePattern;
   LogicalResult matchAndRewrite(CtrlOp ctrlOp,
                                 PatternRewriter &rewriter) const override {
     auto &ops = ctrlOp.getBodyBlock()->getOperations();
-    bool isUnaryControl =
-        (ops.size() == 1) && isa<EnableOp>(ops.front()) &&
-        isa<SeqOp, ParOp, StaticSeqOp, StaticParOp>(ctrlOp->getParentOp());
+    bool isUnaryControl = (ops.size() == 1);
     if (!isUnaryControl)
       return failure();
 

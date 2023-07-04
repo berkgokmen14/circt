@@ -22,6 +22,8 @@
 
 #include "circt/Dialect/LoopSchedule/LoopScheduleDialect.h"
 
+#include "circt/Dialect/LoopSchedule/LoopScheduleInterfaces.h.inc"
+
 #define GET_OP_CLASSES
 #include "circt/Dialect/LoopSchedule/LoopSchedule.h.inc"
 

@@ -58,6 +58,14 @@ bool singleLoadFromMemory(Value memoryReference);
 // memory.
 bool noStoresToMemory(Value memoryReference);
 
+// Returns true if there exists only a single memref::LoadOp which loads from
+// the memory referenced by loadOp.
+bool singleLoadFromMemoryInBlock(Value memoryReference, Block *block);
+
+// Returns true if there are no memref::StoreOp uses with the referenced
+// memory.
+bool noStoresToMemoryInBlock(Value memoryReference, Block *block);
+
 // Get the index'th output port of compOp.
 Value getComponentOutput(calyx::ComponentOp compOp, unsigned outPortIdx);
 
@@ -74,10 +82,17 @@ TGroup createGroup(OpBuilder &builder, calyx::ComponentOp compOp, Location loc,
   return builder.create<TGroup>(loc, uniqueName.str());
 }
 
+// Creates a new calyx::StaticGroupOp group within compOp.
+StaticGroupOp createStaticGroup(OpBuilder &builder, calyx::ComponentOp compOp,
+                                Location loc, Twine uniqueName,
+                                uint64_t latency);
+
+unsigned getBitWidth(Type t);
+
 /// Creates register assignment operations within the provided groupOp.
 /// The component operation will house the constants.
 void buildAssignmentsForRegisterWrite(OpBuilder &builder,
-                                      calyx::GroupOp groupOp,
+                                      calyx::GroupInterface groupOp,
                                       calyx::ComponentOp componentOp,
                                       calyx::RegisterOp &reg, Value inputValue);
 
@@ -195,9 +210,11 @@ private:
 
 // Handles state during the lowering of a loop. It will be used for
 // several lowering patterns.
-template <typename Loop>
+template <typename Loop, typename Group>
 class LoopLoweringStateInterface {
   static_assert(std::is_base_of_v<LoopInterface, Loop>);
+  static_assert(std::is_same<GroupOp, Group>() ||
+                std::is_same<StaticGroupOp, Group>());
 
 public:
   ~LoopLoweringStateInterface() = default;
@@ -226,7 +243,7 @@ public:
   }
 
   /// Registers grp to be the loop latch group of `op`.
-  void setLoopLatchGroup(Loop op, calyx::GroupOp group) {
+  void setLoopLatchGroup(Loop op, Group group) {
     Operation *operation = op.getOperation();
     assert(loopLatchGroups.count(operation) == 0 &&
            "A latch group was already set for this loopOp");
@@ -234,24 +251,30 @@ public:
   }
 
   /// Retrieve the loop latch group registered for `op`.
-  calyx::GroupOp getLoopLatchGroup(Loop op) {
+  Group getLoopLatchGroup(Loop op) {
     auto it = loopLatchGroups.find(op.getOperation());
     assert(it != loopLatchGroups.end() &&
            "No loop latch group was set for this loopOp");
-    return it->second;
+    return cast<Group>(it->second);
   }
 
   /// Creates a new group that assigns the 'ops' values to the iter arg
   /// registers of the loop operation.
-  calyx::GroupOp buildLoopIterArgAssignments(OpBuilder &builder, Loop op,
-                                             calyx::ComponentOp componentOp,
-                                             Twine uniqueSuffix,
-                                             MutableArrayRef<OpOperand> ops) {
+  Group buildLoopIterArgAssignments(OpBuilder &builder, Loop op,
+                                    calyx::ComponentOp componentOp,
+                                    Twine uniqueSuffix,
+                                    MutableArrayRef<OpOperand> ops) {
     /// Pass iteration arguments through registers. This follows closely
     /// to what is done for branch ops.
     std::string groupName = "assign_" + uniqueSuffix.str();
-    auto groupOp = calyx::createGroup<calyx::GroupOp>(builder, componentOp,
-                                                      op.getLoc(), groupName);
+    GroupInterface groupOp;
+    if (std::is_same<StaticGroupOp, Group>()) {
+      groupOp = calyx::createStaticGroup(builder, componentOp, op.getLoc(),
+                                         groupName, 1);
+    } else {
+      groupOp = calyx::createGroup<GroupOp>(builder, componentOp, op.getLoc(),
+                                            groupName);
+    }
     /// Create register assignment for each iter_arg. a calyx::GroupDone signal
     /// is created for each register. These will be &'ed together in
     /// MultipleGroupDonePattern.
@@ -260,7 +283,7 @@ public:
       buildAssignmentsForRegisterWrite(builder, groupOp, componentOp, reg,
                                        arg.get());
     }
-    return groupOp;
+    return cast<Group>(groupOp);
   }
 
 private:
@@ -270,7 +293,7 @@ private:
   /// A loop latch group is a group that should be sequentially executed when
   /// finishing a loop body. The execution of this group will write the
   /// yield'ed loop body values to the iteration argument registers.
-  DenseMap<Operation *, calyx::GroupOp> loopLatchGroups;
+  DenseMap<Operation *, calyx::GroupInterface> loopLatchGroups;
 };
 
 // Handles state during the lowering of a Calyx component. This provides common
@@ -294,11 +317,11 @@ public:
 
   /// Register 'grp' as a group which performs block argument
   /// register transfer when transitioning from basic block 'from' to 'to'.
-  void addBlockArgGroup(Block *from, Block *to, calyx::GroupOp grp);
+  void addBlockArgGroup(Block *from, Block *to, calyx::GroupInterface grp);
 
   /// Returns a list of groups to be evaluated to perform the block argument
   /// register assignments when transitioning from basic block 'from' to 'to'.
-  ArrayRef<calyx::GroupOp> getBlockArgGroups(Block *from, Block *to);
+  ArrayRef<calyx::GroupInterface> getBlockArgGroups(Block *from, Block *to);
 
   /// Returns a unique name within compOp with the provided prefix.
   std::string getUniqueName(StringRef prefix);
@@ -374,7 +397,7 @@ private:
   /// executed when passing control from the source to destination block.
   /// Block arg groups are executed before blockSchedulables (akin to a
   /// phi-node).
-  DenseMap<Block *, DenseMap<Block *, SmallVector<calyx::GroupOp>>>
+  DenseMap<Block *, DenseMap<Block *, SmallVector<calyx::GroupInterface>>>
       blockArgGroups;
 
   /// A mapping of string prefixes and the current uniqueness counter for that

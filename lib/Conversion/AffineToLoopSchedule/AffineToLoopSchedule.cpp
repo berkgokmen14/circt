@@ -685,34 +685,30 @@ AffineToLoopSchedule::solveSharedOperatorsProblem(Region &region,
 LogicalResult
 AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
                                          ModuloProblem &problem) {
-  // Scheduling analyis only considers the innermost loop nest for now.
-  auto forOp = loop;
-
-  auto innerLoop = loop;
   ImplicitLocOpBuilder builder(loop.getLoc(), loop);
 
   // Create Values for the loop's lower and upper bounds.
-  Value lowerBound = lowerAffineLowerBound(innerLoop, builder);
-  Value upperBound = lowerAffineUpperBound(innerLoop, builder);
-  int64_t stepValue = innerLoop.getStep();
+  Value lowerBound = lowerAffineLowerBound(loop, builder);
+  Value upperBound = lowerAffineUpperBound(loop, builder);
+  int64_t stepValue = loop.getStep();
   auto step = builder.create<arith::ConstantOp>(
       IntegerAttr::get(builder.getIndexType(), stepValue));
 
   // Create the pipeline op, with the same result types as the inner loop. An
   // iter arg is created for the induction variable.
-  TypeRange resultTypes = innerLoop.getResultTypes();
+  TypeRange resultTypes = loop.getResultTypes();
 
   auto ii = builder.getI64IntegerAttr(problem.getInitiationInterval().value());
 
   SmallVector<Value> iterArgs;
   iterArgs.push_back(lowerBound);
-  iterArgs.append(innerLoop.getIterOperands().begin(),
-                  innerLoop.getIterOperands().end());
+  iterArgs.append(loop.getIterOperands().begin(),
+                  loop.getIterOperands().end());
 
   // If possible, attach a constant trip count attribute. This could be
   // generalized to support non-constant trip counts by supporting an AffineMap.
   std::optional<IntegerAttr> tripCountAttr;
-  if (auto tripCount = getConstantTripCount(forOp))
+  if (auto tripCount = getConstantTripCount(loop))
     tripCountAttr = builder.getI64IntegerAttr(*tripCount);
 
   auto pipeline =
@@ -740,9 +736,9 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
   // initially populated with the iter args.
   IRMapping valueMap;
   // Nested loops are not supported yet.
-  assert(iterArgs.size() == forOp.getBody()->getNumArguments());
+  assert(iterArgs.size() == loop.getBody()->getNumArguments());
   for (size_t i = 0; i < iterArgs.size(); ++i)
-    valueMap.map(forOp.getBody()->getArgument(i),
+    valueMap.map(loop.getBody()->getArgument(i),
                  pipeline.getStagesBlock().getArgument(i));
 
   // Create the stages.
@@ -772,8 +768,8 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
 
     // Collect the return types for this stage. Operations whose results are not
     // used within this stage are returned.
-    auto isLoopTerminator = [forOp](Operation *op) {
-      return isa<AffineYieldOp>(op) && op->getParentOp() == forOp;
+    auto isLoopTerminator = [loop](Operation *op) {
+      return isa<AffineYieldOp>(op) && op->getParentOp() == loop;
     };
 
     // Initialize set of registers up until this point in time
@@ -836,6 +832,16 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
     llvm::sort(group,
                [&](Operation *a, Operation *b) { return dom.dominates(a, b); });
     auto stageTypes = registerTypes[startTime];
+    uint64_t largestLatency = 1;
+    for (auto *op : group) {
+      auto oprType = problem.getLinkedOperatorType(op).value();
+      uint64_t latency = problem.getLatency(oprType).value();
+      if (latency > largestLatency) {
+        largestLatency = latency;
+      }
+    }
+    uint64_t endTime = startTime + largestLatency;
+
     // Add the induction variable increment in the first stage.
     if (startTime == 0)
       stageTypes.push_back(lowerBound.getType());
@@ -843,9 +849,11 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
     // Create the stage itself.
     builder.setInsertionPoint(stagesBlock.getTerminator());
     auto startTimeAttr = builder.getIntegerAttr(
-        builder.getIntegerType(64, /*isSigned=*/true), startTime);
+        builder.getIntegerType(64), startTime);
+    auto endTimeAttr = builder.getIntegerAttr(
+        builder.getIntegerType(64), endTime);
     auto stage =
-        builder.create<LoopSchedulePipelineStageOp>(stageTypes, startTimeAttr);
+        builder.create<LoopSchedulePipelineStageOp>(stageTypes, startTimeAttr, endTimeAttr);
     auto &stageBlock = stage.getBodyBlock();
     auto *stageTerminator = stageBlock.getTerminator();
     builder.setInsertionPointToStart(&stageBlock);
@@ -901,7 +909,7 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
   termIterArgs.push_back(
       stagesBlock.front().getResult(stagesBlock.front().getNumResults() - 1));
 
-  for (auto value : forOp.getBody()->getTerminator()->getOperands()) {
+  for (auto value : loop.getBody()->getTerminator()->getOperands()) {
     unsigned lookupTime = std::min((unsigned)(stageValueMaps.size() - 1),
                                    pipeTimes[value.getDefiningOp()].second);
 
@@ -913,8 +921,8 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
   stagesTerminator.getResultsMutable().append(termResults);
 
   // Replace loop results with pipeline results.
-  for (size_t i = 0; i < forOp.getNumResults(); ++i)
-    forOp.getResult(i).replaceAllUsesWith(pipeline.getResult(i));
+  for (size_t i = 0; i < loop.getNumResults(); ++i)
+    loop.getResult(i).replaceAllUsesWith(pipeline.getResult(i));
 
   // Remove the loop nest from the IR.
   loop.walk([](Operation *op) {

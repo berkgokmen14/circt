@@ -16,6 +16,8 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/FunctionImplementation.h"
+#include "mlir/IR/Value.h"
+#include "mlir/IR/Visitors.h"
 
 using namespace mlir;
 using namespace circt;
@@ -83,11 +85,11 @@ ParseResult LoopSchedulePipelineOp::parse(OpAsmParser &parser,
 
 void LoopSchedulePipelineOp::print(OpAsmPrinter &p) {
   // Print the initiation interval.
-  p << " II = " << ' ' << getII();
+  p << " II = " << getII();
 
   // Print the optional tripCount.
   if (getTripCount())
-    p << " trip_count = " << ' ' << *getTripCount();
+    p << " trip_count = " << *getTripCount();
 
   // Print iter_args assignment list.
   p << " iter_args(";
@@ -154,7 +156,7 @@ LogicalResult LoopSchedulePipelineOp::verify() {
   if (stagesBlock.getOperations().size() < 2)
     return emitOpError("stages must contain at least one stage");
 
-  int64_t lastStartTime = -1;
+  std::optional<uint64_t> lastStartTime;
   for (Operation &inner : stagesBlock) {
     // Verify the stages block contains only `loopschedule.pipeline.stage` and
     // `loopschedule.terminator` ops.
@@ -166,14 +168,14 @@ LogicalResult LoopSchedulePipelineOp::verify() {
 
     // Verify the stage start times are monotonically increasing.
     if (auto stage = dyn_cast<LoopSchedulePipelineStageOp>(inner)) {
-      if (lastStartTime == -1) {
+      if (!lastStartTime.has_value()) {
         lastStartTime = stage.getStart();
         continue;
       }
 
       if (lastStartTime >= stage.getStart())
         return stage.emitOpError("'start' must be after previous 'start' (")
-               << lastStartTime << ')';
+               << lastStartTime.value() << ')';
 
       lastStartTime = stage.getStart();
     }
@@ -212,25 +214,54 @@ void LoopSchedulePipelineOp::build(OpBuilder &builder, OperationState &state,
                                            ValueRange(), ValueRange());
 }
 
+uint64_t LoopSchedulePipelineOp::getBodyLatency() {
+  auto stages = this->getStagesBlock().getOps<LoopSchedulePipelineStageOp>();
+  uint64_t bodyLatency = 0;
+  for (auto stage : stages) {
+    if (stage.getEnd() > bodyLatency)
+      bodyLatency = stage.getEnd();
+  }
+  return bodyLatency;
+}
+
 //===----------------------------------------------------------------------===//
 // PipelineStageOp
 //===----------------------------------------------------------------------===//
 
-LogicalResult LoopSchedulePipelineStageOp::verify() {
-  if (getStart() < 0)
-    return emitOpError("'start' must be non-negative");
+LogicalResult LoopSchedulePipelineStageOp::verify() { 
+  // if (getStart() == 0)
+  //   return success();
 
-  return success();
+  // WalkResult res = this->walk([&](Operation *op) {
+  //   auto operands = op->getOpOperands();
+  //   for (auto &operand : operands) {
+  //     Value v = operand.get();
+  //     if (auto blockArg = dyn_cast<BlockArgument>(v)) {
+  //       auto *definingOp = blockArg.getOwner()->getParentOp();
+  //       if (isa<LoopSchedulePipelineOp>(definingOp)) {
+  //         return WalkResult::interrupt();
+  //       }
+  //     }
+  //   }
+  //   return WalkResult::advance();
+  // });
+  // if (res.wasInterrupted()) {
+  //   emitOpError("Pipeline iter_args can only be accessed in first cycle");
+  //   return failure();
+  // }
+  return success(); 
 }
 
 void LoopSchedulePipelineStageOp::build(OpBuilder &builder,
                                         OperationState &state,
                                         TypeRange resultTypes,
-                                        IntegerAttr start) {
+                                        IntegerAttr start,
+                                        IntegerAttr end) {
   OpBuilder::InsertionGuard g(builder);
 
   state.addTypes(resultTypes);
   state.addAttribute("start", start);
+  state.addAttribute("end", end);
 
   Region *region = state.addRegion();
   Block &block = region->emplaceBlock();
@@ -516,6 +547,8 @@ LogicalResult LoopScheduleTerminatorOp::verify() {
 
   return success();
 }
+
+#include "circt/Dialect/LoopSchedule/LoopScheduleInterfaces.cpp.inc"
 
 #define GET_OP_CLASSES
 #include "circt/Dialect/LoopSchedule/LoopSchedule.cpp.inc"

@@ -87,7 +87,7 @@ using Schedulable = std::variant<calyx::GroupOp, WhileSchedulable>;
 /// which is required at later lowering passes.
 class ComponentLoweringState
     : public calyx::ComponentLoweringStateInterface,
-      public calyx::LoopLoweringStateInterface<ScfWhileOp>,
+      public calyx::LoopLoweringStateInterface<ScfWhileOp, calyx::GroupOp>,
       public calyx::SchedulerInterface<Schedulable> {
 public:
   ComponentLoweringState(calyx::ComponentOp component)
@@ -1008,7 +1008,7 @@ private:
     rewriter.setInsertionPointToEnd(preSeqOp.getBodyBlock());
     for (auto barg :
          getState<ComponentLoweringState>().getBlockArgGroups(from, to))
-      rewriter.create<calyx::EnableOp>(barg.getLoc(), barg.getSymName());
+      rewriter.create<calyx::EnableOp>(barg.getLoc(), barg.symName());
 
     return buildCFGControl(path, rewriter, parentCtrlBlock, from, to);
   }

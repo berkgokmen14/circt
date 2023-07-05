@@ -841,7 +841,6 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
       }
     }
     uint64_t endTime = startTime + largestLatency;
-
     // Add the induction variable increment in the first stage.
     if (startTime == 0)
       stageTypes.push_back(lowerBound.getType());

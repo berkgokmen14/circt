@@ -109,6 +109,12 @@ UnrollForLoopSchedule::updateMemoryOps(AffineForOp affineFor) {
 
 // Find the limiting carried dependence and get its distance
 uint64_t UnrollForLoopSchedule::getMinDepDistance(AffineForOp affineFor) {
+
+  // We don't have real dependence analysis on scf/memref ops so this is good
+  // enough for now
+  if (!affineFor.getOps<memref::StoreOp>().empty())
+    return 1;
+
   auto memOps = loopToMemOps[affineFor];
   uint64_t minDistance = std::numeric_limits<uint64_t>::max();
   for (auto memOp : memOps) {
@@ -142,16 +148,18 @@ UnrollForLoopSchedule::consumePragma(AffineForOp affineFor) {
   std::optional<uint64_t> maxUnrollFactor;
   if (unrollAttr == nullptr)
     return maxUnrollFactor;
-  if (unrollAttr.isa<UnitAttr>())
-    maxUnrollFactor = std::numeric_limits<uint64_t>::max();
   if (unrollAttr.isa<StringAttr>()) {
     auto val = unrollAttr.cast<StringAttr>().getValue();
     if (val == "full")
       maxUnrollFactor = std::numeric_limits<uint64_t>::max();
+    else if (val == "none")
+      maxUnrollFactor = std::numeric_limits<uint64_t>::min();
   } else if (unrollAttr.isa<IntegerAttr>()) {
     maxUnrollFactor = unrollAttr.cast<IntegerAttr>().getInt() < 1
                           ? std::numeric_limits<uint64_t>::max()
                           : unrollAttr.cast<IntegerAttr>().getInt();
+  } else if (unrollAttr.isa<UnitAttr>()) {
+    maxUnrollFactor = std::numeric_limits<uint64_t>::max();
   }
   affineFor->removeAttr("hls.unroll");
   return maxUnrollFactor;
@@ -191,6 +199,10 @@ UnrollForLoopSchedule::cloneIntoNewBlock(AffineForOp affineFor,
 // Look for data-level parallelism towards the top level
 LogicalResult
 UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
+
+  if (affineFor.getOps<AffineForOp>().empty())
+    return success();
+
   std::optional<uint64_t> maxUnrollFactor = consumePragma(affineFor);
 
   if (usesExternalMemory(affineFor))
@@ -371,7 +383,9 @@ UnrollForLoopSchedule::getDeepestNestedForOps(
     if (nestedOps.empty())
       continue;
     auto recur = getDeepestNestedForOps(std::pair(nestedOps, rootDepth + 1));
-    if (recur.second > pair.second) {
+    if (recur.second > pair.second ||
+        (recur.second == pair.second &&
+         recur.first.size() > pair.first.size())) {
       pair.second = recur.second;
       pair.first = recur.first;
     }

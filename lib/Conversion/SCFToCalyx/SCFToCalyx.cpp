@@ -56,9 +56,7 @@ public:
 
   Block *getBodyBlock() override { return &getOperation().getAfter().front(); }
 
-  Block *getConditionBlock() override {
-    return &getOperation().getBefore().front();
-  }
+  Block *getConditionBlock() { return &getOperation().getBefore().front(); }
 
   Value getConditionValue() override {
     return getOperation().getConditionOp().getOperand(0);
@@ -1044,7 +1042,7 @@ private:
         /// Wrap each branch inside an if/else.
         auto cond = brOp->getOperand(0);
         auto condGroup = getState<ComponentLoweringState>()
-                             .getEvaluatingGroup<calyx::CombGroupOp>(cond);
+                             .getEvaluatingGroup<calyx::CombGroupOp>(cond).value();
         auto symbolAttr = FlatSymbolRefAttr::get(
             StringAttr::get(getContext(), condGroup.getSymName()));
 
@@ -1094,7 +1092,7 @@ private:
     /// Insert the while op itself.
     auto cond = whileOp.getConditionValue();
     auto condGroup = getState<ComponentLoweringState>()
-                         .getEvaluatingGroup<calyx::CombGroupOp>(cond);
+                         .getEvaluatingGroup<calyx::CombGroupOp>(cond).value();
     auto symbolAttr = FlatSymbolRefAttr::get(
         StringAttr::get(getContext(), condGroup.getSymName()));
     return rewriter.create<calyx::WhileOp>(loc, cond, symbolAttr);

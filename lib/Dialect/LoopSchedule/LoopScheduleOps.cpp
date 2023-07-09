@@ -103,54 +103,12 @@ void LoopSchedulePipelineOp::print(OpAsmPrinter &p) {
                                 getResultTypes());
   p.printType(type);
 
-  // Print condition region.
-  p << ' ';
-  p.printRegion(getCondition(), /*printEntryBlockArgs=*/false);
-  p << " do";
-
   // Print stages region.
   p << ' ';
   p.printRegion(getStages(), /*printEntryBlockArgs=*/false);
 }
 
 LogicalResult LoopSchedulePipelineOp::verify() {
-  // Verify the condition block is "combinational" based on an allowlist of
-  // Arithmetic ops.
-  Block &conditionBlock = getCondition().front();
-  Operation *nonCombinational;
-  WalkResult conditionWalk = conditionBlock.walk([&](Operation *op) {
-    if (isa<LoopScheduleDialect>(op->getDialect()))
-      return WalkResult::advance();
-
-    if (!isa<arith::AddIOp, arith::AndIOp, arith::BitcastOp, arith::CmpIOp,
-             arith::ConstantOp, arith::IndexCastOp, arith::MulIOp, arith::OrIOp,
-             arith::SelectOp, arith::ShLIOp, arith::ExtSIOp, arith::CeilDivSIOp,
-             arith::DivSIOp, arith::FloorDivSIOp, arith::RemSIOp,
-             arith::ShRSIOp, arith::SubIOp, arith::TruncIOp, arith::DivUIOp,
-             arith::RemUIOp, arith::ShRUIOp, arith::XOrIOp, arith::ExtUIOp>(
-            op)) {
-      nonCombinational = op;
-      return WalkResult::interrupt();
-    }
-
-    return WalkResult::advance();
-  });
-
-  if (conditionWalk.wasInterrupted())
-    return emitOpError("condition must have a combinational body, found ")
-           << *nonCombinational;
-
-  // Verify the condition block terminates with a value of type i1.
-  TypeRange conditionResults =
-      conditionBlock.getTerminator()->getOperandTypes();
-  if (conditionResults.size() != 1)
-    return emitOpError("condition must terminate with a single result, found ")
-           << conditionResults;
-
-  if (conditionResults.front() != IntegerType::get(getContext(), 1))
-    return emitOpError("condition must terminate with an i1 result, found ")
-           << conditionResults.front();
-
   // Verify the stages block contains at least one stage and a terminator.
   Block &stagesBlock = getStages().front();
   if (stagesBlock.getOperations().size() < 2)
@@ -181,6 +139,13 @@ LogicalResult LoopSchedulePipelineOp::verify() {
     }
   }
 
+  // If no trip count is set, termintor must have condition
+  if (!getTripCount().has_value()) {
+    if (!getConditionValue().has_value())
+      return emitOpError(
+          "pipeline terminator must have conditon if trip count is not set");
+  }
+
   return success();
 }
 
@@ -196,15 +161,9 @@ void LoopSchedulePipelineOp::build(OpBuilder &builder, OperationState &state,
     state.addAttribute("tripCount", *tripCount);
   state.addOperands(iterArgs);
 
-  Region *condRegion = state.addRegion();
-  Block &condBlock = condRegion->emplaceBlock();
-
   SmallVector<Location, 4> argLocs;
   for (auto arg : iterArgs)
     argLocs.push_back(arg.getLoc());
-  condBlock.addArguments(iterArgs.getTypes(), argLocs);
-  builder.setInsertionPointToEnd(&condBlock);
-  builder.create<LoopScheduleRegisterOp>(builder.getUnknownLoc(), ValueRange());
 
   Region *stagesRegion = state.addRegion();
   Block &stagesBlock = stagesRegion->emplaceBlock();
@@ -337,7 +296,7 @@ ParseResult LoopScheduleSequentialOp::parse(OpAsmParser &parser,
 void LoopScheduleSequentialOp::print(OpAsmPrinter &p) {
   // Print the optional tripCount.
   if (getTripCount())
-    p << " trip_count = " << ' ' << *getTripCount();
+    p << " trip_count = " << *getTripCount();
 
   // Print iter_args assignment list.
   p << " iter_args(";
@@ -351,54 +310,12 @@ void LoopScheduleSequentialOp::print(OpAsmPrinter &p) {
                                 getResultTypes());
   p.printType(type);
 
-  // Print condition region.
-  p << ' ';
-  p.printRegion(getCondition(), /*printEntryBlockArgs=*/false);
-  p << " do";
-
   // Print stages region.
   p << ' ';
   p.printRegion(getSchedule(), /*printEntryBlockArgs=*/false);
 }
 
 LogicalResult LoopScheduleSequentialOp::verify() {
-  // Verify the condition block is "combinational" based on an allowlist of
-  // Arithmetic ops.
-  Block &conditionBlock = getCondition().front();
-  Operation *nonCombinational;
-  WalkResult conditionWalk = conditionBlock.walk([&](Operation *op) {
-    if (isa<LoopScheduleDialect>(op->getDialect()))
-      return WalkResult::advance();
-
-    if (!isa<arith::AddIOp, arith::AndIOp, arith::BitcastOp, arith::CmpIOp,
-             arith::ConstantOp, arith::IndexCastOp, arith::MulIOp, arith::OrIOp,
-             arith::SelectOp, arith::ShLIOp, arith::ExtSIOp, arith::CeilDivSIOp,
-             arith::DivSIOp, arith::FloorDivSIOp, arith::RemSIOp,
-             arith::ShRSIOp, arith::SubIOp, arith::TruncIOp, arith::DivUIOp,
-             arith::RemUIOp, arith::ShRUIOp, arith::XOrIOp, arith::ExtUIOp>(
-            op)) {
-      nonCombinational = op;
-      return WalkResult::interrupt();
-    }
-
-    return WalkResult::advance();
-  });
-
-  if (conditionWalk.wasInterrupted())
-    return emitOpError("condition must have a combinational body, found ")
-           << *nonCombinational;
-
-  // Verify the condition block terminates with a value of type i1.
-  TypeRange conditionResults =
-      conditionBlock.getTerminator()->getOperandTypes();
-  if (conditionResults.size() != 1)
-    return emitOpError("condition must terminate with a single result, found ")
-           << conditionResults;
-
-  if (conditionResults.front() != IntegerType::get(getContext(), 1))
-    return emitOpError("condition must terminate with an i1 result, found ")
-           << conditionResults.front();
-
   // Verify the stages block contains at least one stage and a terminator.
   Block &scheduleBlock = getSchedule().front();
   if (scheduleBlock.getOperations().size() < 2)
@@ -411,6 +328,15 @@ LogicalResult LoopScheduleSequentialOp::verify() {
       return emitOpError("stages may only contain 'stg.step' or "
                          "'stg.terminator' ops, found ")
              << inner;
+  }
+
+  // If no trip count is set, terminator must have condition
+  if (!getTripCount().has_value()) {
+    auto term =
+        cast<LoopScheduleTerminatorOp>(getScheduleBlock().getTerminator());
+    if (!term.getCondition().has_value())
+      return emitOpError(
+          "pipeline terminator must have conditon if trip count is not set");
   }
 
   return success();
@@ -427,15 +353,9 @@ void LoopScheduleSequentialOp::build(OpBuilder &builder, OperationState &state,
     state.addAttribute("tripCount", *tripCount);
   state.addOperands(iterArgs);
 
-  Region *condRegion = state.addRegion();
-  Block &condBlock = condRegion->emplaceBlock();
-
   SmallVector<Location, 4> argLocs;
   for (auto arg : iterArgs)
     argLocs.push_back(arg.getLoc());
-  condBlock.addArguments(iterArgs.getTypes(), argLocs);
-  builder.setInsertionPointToEnd(&condBlock);
-  builder.create<LoopScheduleRegisterOp>(builder.getUnknownLoc(), ValueRange());
 
   Region *scheduleRegion = state.addRegion();
   Block &scheduleBlock = scheduleRegion->emplaceBlock();
@@ -511,6 +431,15 @@ LogicalResult LoopScheduleRegisterOp::verify() {
 //===----------------------------------------------------------------------===//
 // LoopScheduleTerminatorOp
 //===----------------------------------------------------------------------===//
+
+void LoopScheduleTerminatorOp::build(OpBuilder &builder, OperationState &state,
+                                     ValueRange iterArgs, ValueRange results) {
+  OpBuilder::InsertionGuard g(builder);
+
+  state.addOperands(iterArgs);
+  state.addOperands(results);
+  state.addAttribute(getOperandSegmentSizesAttrName(state.name), builder.getDenseI32ArrayAttr({(0), static_cast<int32_t>(iterArgs.size()), static_cast<int32_t>(results.size())}));
+}
 
 LogicalResult LoopScheduleTerminatorOp::verify() {
   // Verify loop terminates with the same `iter_args` types as the pipeline.

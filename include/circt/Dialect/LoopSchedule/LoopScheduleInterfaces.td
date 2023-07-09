@@ -31,12 +31,8 @@ def LoopOpInterface : OpInterface<"LoopInterface"> {
       "Block*",
       "getBodyBlock">,
     InterfaceMethod<
-      "Get a pointer to the condition block.",
-      "Block*",
-      "getConditionBlock">,
-    InterfaceMethod<
       "Get the SSA value corresponding to the loop condition.",
-      "Value",
+      "std::optional<Value>",
       "getConditionValue">,
     InterfaceMethod<
       "Get the number of times a loop will run, if known statically.",

@@ -180,6 +180,30 @@ unsigned getBitWidth(Type t) {
   return t.getIntOrFloatBitWidth();
 }
 
+Value buildCombAndTree(OpBuilder &builder, ComponentLoweringStateInterface &state, Location loc, SmallVector<Value> values) {
+  if (values.size() == 1)
+    return values.front();
+
+  auto type = builder.getI1Type();
+  std::optional<Value> finalVal;
+  for (Value v : values) {
+    auto bitwidth = v.getType().getIntOrFloatBitWidth();
+    assert(bitwidth == 1);
+    if (!finalVal.has_value()) {
+      finalVal = v;
+      continue;
+    }
+    auto andOp =
+        state.getNewLibraryOpInstance<calyx::AndLibOp>(
+            builder, loc, {type, type, type});
+    builder.create<calyx::AssignOp>(loc, andOp.getLeft(), v);
+    builder.create<calyx::AssignOp>(loc, andOp.getRight(), finalVal.value());
+    finalVal = andOp.getOut();
+  }
+
+  return finalVal.value();
+}
+
 void buildAssignmentsForRegisterWrite(OpBuilder &builder,
                                       calyx::GroupInterface groupOp,
                                       calyx::ComponentOp componentOp,
@@ -301,6 +325,11 @@ void ComponentLoweringStateInterface::setUniqueName(Operation *op,
   opNames[op] = getUniqueName(prefix);
 }
 
+// void ComponentLoweringStateInterface::registerStartGroup(
+//     Value v, calyx::StaticGroupOp group) {
+//   valueStartGroups[v] = group;
+// }
+
 void ComponentLoweringStateInterface::registerEvaluatingGroup(
     Value v, calyx::GroupInterface group) {
   valueGroupAssigns[v] = group;
@@ -359,6 +388,9 @@ unsigned ComponentLoweringStateInterface::getFuncOpResultMapping(
   return it->second;
 }
 
+// calyx::StaticGroupOp ComponentLoweringStateInterface::getStartGroup(Value v) {
+//   return valueStartGroups[v];
+// }
 //===----------------------------------------------------------------------===//
 // CalyxLoweringState
 //===----------------------------------------------------------------------===//
@@ -593,13 +625,19 @@ void InlineCombGroups::recurseInlineCombGroups(
     //   LateSSAReplacement)
     if (src.isa<BlockArgument>() ||
         isa<calyx::RegisterOp, calyx::MemoryOp, hw::ConstantOp,
-            mlir::arith::ConstantOp, calyx::MultPipeLibOp, calyx::DivUPipeLibOp,
-            calyx::DivSPipeLibOp, calyx::RemSPipeLibOp, calyx::RemUPipeLibOp,
-            mlir::scf::WhileOp, calyx::CycleOp>(src.getDefiningOp()))
+            mlir::arith::ConstantOp, hw::ConstantOp, calyx::MultPipeLibOp, 
+            calyx::DivUPipeLibOp, calyx::DivSPipeLibOp, calyx::RemSPipeLibOp, 
+            calyx::RemUPipeLibOp, mlir::scf::WhileOp, 
+            calyx::CycleOp>(src.getDefiningOp()))
       continue;
 
+    auto evalGroupOpt = state.getEvaluatingGroup(src);
+    if (!evalGroupOpt.has_value()) {
+      continue;
+    }
+    auto evalGroup = evalGroupOpt.value();
     auto srcCombGroup = dyn_cast<calyx::CombGroupOp>(
-        state.getEvaluatingGroup(src).getOperation());
+        evalGroup.getOperation());
     if (!srcCombGroup)
       continue;
     if (inlinedGroups.count(srcCombGroup))

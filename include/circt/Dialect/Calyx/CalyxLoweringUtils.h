@@ -89,6 +89,7 @@ StaticGroupOp createStaticGroup(OpBuilder &builder, calyx::ComponentOp compOp,
 
 unsigned getBitWidth(Type t);
 
+
 /// Creates register assignment operations within the provided groupOp.
 /// The component operation will house the constants.
 void buildAssignmentsForRegisterWrite(OpBuilder &builder,
@@ -135,9 +136,6 @@ public:
 
   // Returns body of this loop operation.
   virtual Block *getBodyBlock() = 0;
-
-  // Returns the Block in which the condition exists.
-  virtual Block *getConditionBlock() = 0;
 
   // Returns the condition as a Value.
   virtual Value getConditionValue() = 0;
@@ -332,6 +330,10 @@ public:
   /// Registers a unique name for a given operation using a provided prefix.
   void setUniqueName(Operation *op, StringRef prefix);
 
+  /// Register group to start evaluation of value v, only applies to
+  /// sequential ops.
+  // void registerStartGroup(Value v, calyx::StaticGroupOp group);
+
   /// Register value v as being evaluated when scheduling group.
   void registerEvaluatingGroup(Value v, calyx::GroupInterface group);
 
@@ -361,12 +363,18 @@ public:
   /// the original function maps to.
   unsigned getFuncOpResultMapping(unsigned funcReturnIdx);
 
+  /// Return the start group for value v.
+  // calyx::StaticGroupOp getStartGroup(Value v);
+
   /// Return the group which evaluates the value v. Optionally, caller may
   /// specify the expected type of the group.
   template <typename TGroupOp = calyx::GroupInterface>
-  TGroupOp getEvaluatingGroup(Value v) {
+  std::optional<TGroupOp> getEvaluatingGroup(Value v) {
+    if (!valueGroupAssigns.contains(v)) {
+      return std::nullopt;
+    }
     auto it = valueGroupAssigns.find(v);
-    assert(it != valueGroupAssigns.end() && "No group evaluating value!");
+    // assert(it != valueGroupAssigns.end() && "No group evaluating value!");
     if constexpr (std::is_same_v<TGroupOp, calyx::GroupInterface>)
       return it->second;
     else {
@@ -407,6 +415,9 @@ private:
   /// A mapping from Operations and previously assigned unique name of the op.
   std::map<Operation *, std::string> opNames;
 
+  /// A mapping between SSA values and their start group.
+  DenseMap<Value, calyx::StaticGroupOp> valueStartGroups;
+
   /// A mapping between SSA values and the groups which assign them.
   DenseMap<Value, calyx::GroupInterface> valueGroupAssigns;
 
@@ -420,6 +431,9 @@ private:
   /// output port indices of this componentOp.
   DenseMap<unsigned, unsigned> funcOpResultMapping;
 };
+
+Value buildCombAndTree(OpBuilder &builder, calyx::ComponentLoweringStateInterface &state, 
+                       Location loc, SmallVector<Value> values);
 
 /// An interface for conversion passes that lower Calyx programs. This handles
 /// state during the lowering of a Calyx program.

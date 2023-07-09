@@ -73,7 +73,6 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
   );
 
   let regions = (region
-    SizedRegion<1>:$condition,
     SizedRegion<1>:$stages
   );
 
@@ -89,7 +88,6 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
   ];
 
   let extraClassDeclaration = [{
-    Block &getCondBlock() { return getCondition().front(); }
     Block &getStagesBlock() { return getStages().front(); }
 
     Block::BlockArgListType getBodyArgs() {
@@ -98,12 +96,7 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
     Block *getBodyBlock() {
       return &getStagesBlock();
     }
-    Block *getConditionBlock() {
-      return &getCondBlock();
-    }
-    Value getConditionValue() {
-      return getCondBlock().getTerminator()->getOperand(0);
-    }
+    std::optional<Value> getConditionValue();
     std::optional<uint64_t> getBound() {
       return getTripCount();
     }
@@ -112,6 +105,13 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
     }
 
     uint64_t getBodyLatency();
+  }];
+
+  let extraClassDefinition = [{
+    std::optional<Value> $cppClass::getConditionValue() {
+      auto term = cast<LoopScheduleTerminatorOp>(getStagesBlock().getTerminator());
+      return term.getCondition();
+    }
   }];
 }
 
@@ -175,7 +175,7 @@ def LoopSchedulePipelineStageOp : LoopScheduleOp<"pipeline.stage",
     unsigned getStageNumber();
 
     std::string getRegisterNamePrefix() {
-      return "stage_" + getStageNumber();
+      return "stage_" + std::to_string(getStageNumber());
     }
     bool isStatic() {
       return true;
@@ -235,7 +235,6 @@ def LoopScheduleSequentialOp : LoopScheduleOp<"sequential", [LoopOpInterface]> {
   );
 
   let regions = (region
-    SizedRegion<1>:$condition,
     SizedRegion<1>:$schedule
   );
 
@@ -251,7 +250,6 @@ def LoopScheduleSequentialOp : LoopScheduleOp<"sequential", [LoopOpInterface]> {
   ];
 
   let extraClassDeclaration = [{
-    Block &getCondBlock() { return getCondition().front(); }
     Block &getScheduleBlock() { return getSchedule().front(); }
     Block::BlockArgListType getBodyArgs() {
       return getScheduleBlock().getArguments();
@@ -259,17 +257,19 @@ def LoopScheduleSequentialOp : LoopScheduleOp<"sequential", [LoopOpInterface]> {
     Block *getBodyBlock() {
       return &getScheduleBlock();
     }
-    Block *getConditionBlock() {
-      return &getCondBlock();
-    }
-    Value getConditionValue() {
-      return getCondBlock().getTerminator()->getOperand(0);
-    }
+    std::optional<Value> getConditionValue();
     std::optional<uint64_t> getBound() {
       return getTripCount();
     }
     bool isPipelined() {
       return false;
+    }
+  }];
+
+  let extraClassDefinition = [{
+    std::optional<Value> $cppClass::getConditionValue() {
+      auto term = cast<LoopScheduleTerminatorOp>(getScheduleBlock().getTerminator());
+      return term.getCondition();
     }
   }];
 }
@@ -320,7 +320,7 @@ def LoopScheduleStepOp : LoopScheduleOp<"step",
     unsigned getStepNumber();
 
     std::string getRegisterNamePrefix() {
-      return "step_" + getStepNumber();
+      return "step_" + std::to_string(getStepNumber());
     }
     bool isStatic() {
       return false;
@@ -372,14 +372,30 @@ def LoopScheduleTerminatorOp : LoopScheduleOp<"terminator",
   }];
 
   let arguments = (ins
+    Optional<I1>:$cond,
     Variadic<AnyType>:$iter_args,
     Variadic<AnyType>:$results
   );
 
   let assemblyFormat = [{
+    (`cond` `(` $cond^ `)` `,`)?
     `iter_args` `(` $iter_args `)` `,`
     `results` `(` $results `)` `:`
     functional-type($iter_args, $results) attr-dict
+  }];
+
+  let builders = [
+    OpBuilder<(ins "mlir::ValueRange":$iterArgs,
+                   "mlir::ValueRange":$results)>
+  ];
+
+  let extraClassDeclaration=[{
+    bool hasCondition() { return !!getCond(); }
+    std::optional<Value> getCondition() {
+      if (!hasCondition())
+        return std::nullopt;
+      return getCond();
+    }
   }];
 
   let hasVerifier = 1;

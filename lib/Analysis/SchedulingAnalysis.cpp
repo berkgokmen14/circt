@@ -171,13 +171,13 @@ circt::analysis::SharedOperatorsSchedulingAnalysis::
     SharedOperatorsSchedulingAnalysis(Operation *op, AnalysisManager &am)
     : memoryAnalysis(am.getAnalysis<MemoryDependenceAnalysis>()) {}
 
-void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
-    WhileOp whileOp, MemoryDependenceAnalysis memoryAnalysis) {
+void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeForOp(
+    AffineForOp forOp, MemoryDependenceAnalysis memoryAnalysis) {
   // Create a cyclic scheduling problem.
-  SharedOperatorsProblem problem = SharedOperatorsProblem::get(whileOp);
+  SharedOperatorsProblem problem = SharedOperatorsProblem::get(forOp);
 
   // Insert memory dependences into the problem.
-  whileOp.getAfter().walk([&](Operation *op) {
+  forOp.getLoopBody().walk([&](Operation *op) {
     if (op->getParentOfType<LoopScheduleSequentialOp>() != nullptr ||
         op->getParentOfType<LoopSchedulePipelineOp>() != nullptr)
       return;
@@ -202,7 +202,7 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
     }
   });
 
-  whileOp.getAfter().walk([&](Operation *op) {
+  forOp.getLoopBody().walk([&](Operation *op) {
     if (!isa<scf::WhileOp>(op))
       return WalkResult::advance();
 
@@ -218,7 +218,7 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
   });
 
   // Insert conditional dependences into the problem.
-  whileOp.getAfter().walk([&](Operation *op) {
+  forOp.getLoopBody().walk([&](Operation *op) {
     if (op->getParentOfType<LoopScheduleSequentialOp>() != nullptr ||
         op->getParentOfType<LoopSchedulePipelineOp>() != nullptr)
       return WalkResult::advance();
@@ -257,8 +257,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
 
   // Set the anchor for scheduling. Insert dependences from all stores to the
   // terminator to ensure the problem schedules them before the terminator.
-  auto *anchor = whileOp.getAfter().back().getTerminator();
-  whileOp.getAfter().walk([&](Operation *op) {
+  auto *anchor = forOp.getLoopBody().back().getTerminator();
+  forOp.getLoopBody().walk([&](Operation *op) {
     if (op->getParentOfType<LoopScheduleSequentialOp>() != nullptr ||
         op->getParentOfType<LoopSchedulePipelineOp>() != nullptr)
       return;
@@ -272,7 +272,7 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeWhileOp(
 
   // Store the partially complete problem.
   problems.insert(
-      std::pair<Operation *, SharedOperatorsProblem>(whileOp, problem));
+      std::pair<Operation *, SharedOperatorsProblem>(forOp, problem));
 }
 
 void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
@@ -386,8 +386,8 @@ circt::analysis::SharedOperatorsSchedulingAnalysis::getProblem(Operation *op) {
   if (problem != problems.end()) {
     return problem->second;
   }
-  if (auto whileOp = dyn_cast<WhileOp>(op); whileOp)
-    analyzeWhileOp(whileOp, this->memoryAnalysis);
+  if (auto forOp = dyn_cast<AffineForOp>(op); forOp)
+    analyzeForOp(forOp, this->memoryAnalysis);
   else if (auto funcOp = dyn_cast<func::FuncOp>(op); funcOp)
     analyzeFuncOp(funcOp, this->memoryAnalysis);
   else

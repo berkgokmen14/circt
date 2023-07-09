@@ -59,7 +59,7 @@ struct SharedOperatorsSchedulingAnalysis {
   SharedOperatorsProblem &getProblem(Operation *op);
 
 private:
-  void analyzeWhileOp(scf::WhileOp whileOp, MemoryDependenceAnalysis memoryAnalysis);
+  void analyzeForOp(affine::AffineForOp forOp, MemoryDependenceAnalysis memoryAnalysis);
   void analyzeFuncOp(func::FuncOp funcOp, MemoryDependenceAnalysis memoryAnalysis);
 
   MemoryDependenceAnalysis &memoryAnalysis;

@@ -369,7 +369,7 @@ LogicalResult AffineToSTG::populateOperatorTypes(Operation *op) {
           auto limitOpt = loadOp.getLimit();
           assert(latencyOpt.has_value() && "Load op must have latency");
           Problem::OperatorType portOpr =
-              problem.getOrInsertOperatorType(loadOp.getUnqiueId());
+              problem.getOrInsertOperatorType(loadOp.getUniqueId());
           problem.setLatency(portOpr, latencyOpt.value());
           problem.setLimit(portOpr, limitOpt.value());
           // if (limitOpt.has_value())
@@ -384,7 +384,7 @@ LogicalResult AffineToSTG::populateOperatorTypes(Operation *op) {
           auto limitOpt = storeOp.getLimit();
           assert(latencyOpt.has_value() && "Store op must have latency");
           Problem::OperatorType portOpr =
-              problem.getOrInsertOperatorType(storeOp.getUnqiueId());
+              problem.getOrInsertOperatorType(storeOp.getUniqueId());
           problem.setLatency(portOpr, latencyOpt.value());
           problem.setLimit(portOpr, limitOpt.value());
           // if (limitOpt.has_value())

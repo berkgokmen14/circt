@@ -45,7 +45,7 @@ def LoadOpInterface : OpInterface<"LoadInterface"> {
     InterfaceMethod<
       "This returns the unique identifier of the associated memory",
       "std::string",
-      "getUnqiueId",
+      "getUniqueId",
       (ins)>
     /* InterfaceMethod< */
     /*   "This returns the value of the associated memory", */
@@ -93,7 +93,7 @@ def StoreOpInterface : OpInterface<"StoreInterface"> {
     InterfaceMethod<
       "This returns the unique identifier of the associated memory",
       "std::string",
-      "getUnqiueId",
+      "getUniqueId",
       (ins)>
     /* InterfaceMethod< */
     /*   "This returns the value of the associated memory", */

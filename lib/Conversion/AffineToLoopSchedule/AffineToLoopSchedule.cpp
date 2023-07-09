@@ -1099,8 +1099,9 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
     // Collect the return types for this stage. Operations whose results are not
     // used within this stage are returned.
     auto isLoopTerminator = [loop](Operation *op) {
-      return isa<YieldOp>(op) && op->getParentOp() == loop;
+      return isa<AffineYieldOp>(op) && op->getParentOp() == loop;
     };
+
     SmallVector<Type> stepTypes;
     DenseSet<Operation *> opsWithReturns;
     for (auto *op : group) {

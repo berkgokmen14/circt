@@ -235,6 +235,15 @@ public:
     return it->second;
   }
 
+  void setLoopCondReg(Loop op, calyx::RegisterOp reg) {
+    loopCondRegs[op] = reg;
+  }
+
+  calyx::RegisterOp getLoopCondReg(Loop op) {
+    assert(loopCondRegs.contains(op));
+    return loopCondRegs[op];
+  }
+
   /// Return a mapping of block argument indices to block argument.
   const DenseMap<unsigned, calyx::RegisterOp> &getLoopIterRegs(Loop op) {
     return loopIterRegs[op.getOperation()];
@@ -287,6 +296,9 @@ public:
 private:
   /// A mapping from loop ops to iteration argument registers.
   DenseMap<Operation *, DenseMap<unsigned, calyx::RegisterOp>> loopIterRegs;
+
+  /// A mapping from loop ops to condition registers.
+  DenseMap<Operation *, calyx::RegisterOp> loopCondRegs;
 
   /// A loop latch group is a group that should be sequentially executed when
   /// finishing a loop body. The execution of this group will write the

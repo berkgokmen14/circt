@@ -31,8 +31,12 @@ def LoopOpInterface : OpInterface<"LoopInterface"> {
       "Block*",
       "getBodyBlock">,
     InterfaceMethod<
+      "Get a pointer to the condition block.",
+      "Block*",
+      "getConditionBlock">,
+    InterfaceMethod<
       "Get the SSA value corresponding to the loop condition.",
-      "std::optional<Value>",
+      "Value",
       "getConditionValue">,
     InterfaceMethod<
       "Get the number of times a loop will run, if known statically.",
@@ -43,6 +47,8 @@ def LoopOpInterface : OpInterface<"LoopInterface"> {
       "bool",
       "isPipelined">
   ];
+
+  let verify = [{ return verifyLoop(op); }];
 }
 
 // Op interface for ops that describes a phase of the schedule.

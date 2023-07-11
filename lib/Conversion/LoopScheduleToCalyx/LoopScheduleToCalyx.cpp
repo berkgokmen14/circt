@@ -28,6 +28,7 @@
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Value.h"
 #include "mlir/IR/Visitors.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -62,10 +63,12 @@ public:
 
   Block *getBodyBlock() override { return getOperation().getBodyBlock(); }
 
+  Block *getConditionBlock() override {
+    return getOperation().getConditionBlock();
+  }
+
   Value getConditionValue() override {
-    auto cond = getOperation().getConditionValue();
-    assert(cond.has_value());
-    return cond.value();
+    return getOperation().getConditionValue();
   }
 
   std::optional<uint64_t> getBound() override {
@@ -121,6 +124,24 @@ public:
     return initGroups[loop];
   }
 
+  void setCondReg(LoopInterface loop, calyx::RegisterOp reg) {
+    condRegs[loop] = reg;
+  }
+
+  calyx::RegisterOp getCondReg(LoopInterface loop) {
+    assert(condRegs.contains(loop));
+    return condRegs[loop];
+  }
+
+  void setCondGroup(LoopInterface loop, calyx::StaticGroupOp group) {
+    condGroups[loop] = group;
+  }
+
+  calyx::StaticGroupOp getCondGroup(LoopInterface loop) {
+    assert(condGroups.contains(loop));
+    return condGroups[loop];
+  }
+
   void setIncrGroup(LoopSchedulePipelineOp loop, calyx::StaticGroupOp group) {
     incrGroup[loop] = group;
   }
@@ -144,6 +165,10 @@ private:
   DenseMap<Operation *, DenseMap<unsigned, PhaseRegister>> phaseRegs;
 
   DenseMap<LoopInterface, Value> loopIterValues;
+
+  DenseMap<LoopInterface, calyx::RegisterOp> condRegs;
+
+  DenseMap<LoopInterface, calyx::StaticGroupOp> condGroups;
 
   /// The group(s) to schedule before the while operation These groups should
   /// set the initial value(s) of the loop init_args register(s).
@@ -329,7 +354,7 @@ private:
     // Pass the result from the Operation to the Calyx primitive.
     op.getResult().replaceAllUsesWith(out);
     PhaseInterface parent = cast<PhaseInterface>(op->getParentOp());
-    auto latency = parent.isStatic() ? 1 : 3;
+    auto latency = parent.isStatic() ? 1 : 4;
     auto group = createStaticGroupForOp(rewriter, op, latency);
     // getState<ComponentLoweringState>().addBlockSchedulable(op->getBlock(),
     //                                                         group);
@@ -520,8 +545,6 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      LoopInterface op) const {
   LoopWrapper loop(op);
 
-  getState<ComponentLoweringState>().setUniqueName(op.getOperation(), "loop");
-
   /// Create iteration argument registers.
   /// The iteration argument registers will be referenced:
   /// - In the "before" part of the while loop, calculating the conditional,
@@ -536,18 +559,12 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
     auto reg = createRegister(arg.value().getLoc(), rewriter, getComponent(),
                               calyx::getBitWidth(arg.value().getType()), name);
     getState<ComponentLoweringState>().addLoopIterReg(loop, reg, arg.index());
+
     arg.value().replaceAllUsesWith(reg.getOut());
 
-    Block *block = op->getBlock();
-    auto groupName = getState<ComponentLoweringState>().getUniqueName(
-        loweringState().blockName(block));
-    // auto group = calyx::createGroup<calyx::CombGroupOp>(
-    //     rewriter, getState<ComponentLoweringState>().getComponentOp(),
-    //     op->getLoc(), groupName);
-
-    // // Register the values for the pipeline.
-    // getState<ComponentLoweringState>().registerEvaluatingGroup(reg.getOut(),
-    //                                                            group);
+    loop.getConditionBlock()
+        ->getArgument(arg.index())
+        .replaceAllUsesWith(reg.getOut());
   }
 
   /// Create iter args initial value assignment group(s), one per register.
@@ -798,6 +815,89 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   return res;
 }
 
+/// Builds condition checks for each loop.
+class BuildConditionChecks : public calyx::FuncOpPartialLoweringPattern {
+  using FuncOpPartialLoweringPattern::FuncOpPartialLoweringPattern;
+
+  LogicalResult
+  partiallyLowerFuncToComp(FuncOp funcOp,
+                           PatternRewriter &rewriter) const override {
+    funcOp.walk([&](LoopInterface loop) {
+      getState<ComponentLoweringState>().setUniqueName(loop, "loop");
+
+      if (loop.isPipelined()) {
+        return;
+      }
+
+      /// Create condition register.
+      auto condValue = loop.getConditionValue();
+      std::string name = getState<ComponentLoweringState>()
+                             .getUniqueName(loop.getOperation())
+                             .str() +
+                         "_cond";
+      auto condReg =
+          createRegister(condValue.getLoc(), rewriter, getComponent(), 1, name);
+      getState<ComponentLoweringState>().setCondReg(loop, condReg);
+
+      // Create condition init group.
+      auto initGroupName =
+          getState<ComponentLoweringState>().getUniqueName("cond_init");
+      auto initGroup = calyx::createStaticGroup(
+          rewriter, getState<ComponentLoweringState>().getComponentOp(),
+          loop->getLoc(), initGroupName, 1);
+      rewriter.setInsertionPointToEnd(initGroup.getBodyBlock());
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getIn(),
+                                       condValue);
+      auto one =
+          calyx::createConstant(loop.getLoc(), rewriter, getComponent(), 1, 1);
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getWriteEn(),
+                                       one);
+      getState<ComponentLoweringState>().addInitGroup(loop, initGroup);
+
+      auto term =
+          cast<LoopScheduleTerminatorOp>(loop.getBodyBlock()->getTerminator());
+
+      auto termArg = term.getIterArgs()[0];
+      auto phase = termArg.getDefiningOp<PhaseInterface>();
+      auto result = termArg.cast<OpResult>();
+      auto *phaseTerm = phase.getBodyBlock().getTerminator();
+      auto newIterArg = phaseTerm->getOpOperand(result.getResultNumber()).get();
+      Value newCondValue;
+      for (auto &op : loop.getConditionBlock()->getOperations()) {
+        if (!isa<LoopScheduleRegisterOp>(op)) {
+          auto *clonedOp = rewriter.clone(op);
+          clonedOp->moveBefore(phaseTerm);
+          newCondValue = clonedOp->getResult(0);
+        }
+      }
+      auto condArg = loop.getConditionBlock()->getArgument(0);
+      rewriter.replaceUsesWithIf(condArg, newIterArg, [&](OpOperand &operand) {
+        return operand.getOwner()->getParentOp() == phase;
+      });
+
+      // Create cond group
+      auto groupName = getState<ComponentLoweringState>().getUniqueName("cond");
+      auto condGroup = calyx::createStaticGroup(
+          rewriter, getState<ComponentLoweringState>().getComponentOp(),
+          loop->getLoc(), groupName, 1);
+      rewriter.setInsertionPointToEnd(condGroup.getBodyBlock());
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getIn(),
+                                       newCondValue);
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getWriteEn(),
+                                       one);
+      getState<ComponentLoweringState>().setCondGroup(loop, condGroup);
+
+      // Add condition eval to first phase
+      getState<ComponentLoweringState>().addBlockSchedulable(
+          &phase.getBodyBlock(), condGroup);
+
+      return;
+    });
+    llvm::errs() << "done building cond\n";
+    return success();
+  }
+};
+
 /// Creates a new Calyx component for each FuncOp in the program.
 struct FuncOpConversion : public calyx::FuncOpPartialLoweringPattern {
   using FuncOpPartialLoweringPattern::FuncOpPartialLoweringPattern;
@@ -913,6 +1013,7 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
       // Create a register for each phase.
       for (auto &operand : op->getOpOperands()) {
         Value value = operand.get();
+        // value.dump();
         unsigned i = operand.getOperandNumber();
         // Iter args are created in BuildWhileGroups, so just mark the iter arg
         // register as the appropriate pipeline register.
@@ -920,8 +1021,7 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
         bool isIterArg = false;
         for (auto &use : phaseResult.getUses()) {
           if (auto term = dyn_cast<LoopScheduleTerminatorOp>(use.getOwner())) {
-            bool isCond = term.hasCondition() && use.getOperandNumber() == 0;
-            if (!isCond && use.getOperandNumber() < term.getIterArgs().size()) {
+            if (use.getOperandNumber() < term.getIterArgs().size()) {
               LoopWrapper loop(dyn_cast<LoopInterface>(phase->getParentOp()));
               auto reg = getState<ComponentLoweringState>().getLoopIterReg(
                   loop, use.getOperandNumber());
@@ -993,9 +1093,20 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
     // getComponent()->getParentOfType<ModuleOp>().dump();
     auto res = funcOp.walk([&](LoopInterface loop) {
       auto *bodyBlock = loop.getBodyBlock();
-      for (auto phase : bodyBlock->getOps<PhaseInterface>())
-        if (failed(buildPhaseGroups(loop, bodyBlock, phase, rewriter)))
+      auto condValue = loop.getConditionValue();
+      std::optional<calyx::CombGroupOp> condGroup;
+
+      if (!loop.isPipelined()) {
+        condGroup = getState<ComponentLoweringState>()
+                        .getEvaluatingGroup<calyx::CombGroupOp>(condValue);
+      }
+
+      for (auto phase : bodyBlock->getOps<PhaseInterface>()) {
+        if (failed(
+                buildPhaseGroups(loop, bodyBlock, phase, condGroup, rewriter)))
           return WalkResult::interrupt();
+        condGroup = std::nullopt;
+      }
       return WalkResult::advance();
     });
 
@@ -1005,7 +1116,8 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
     // Build groups for all top-level phases, should be only steps
     auto *funcBlock = &funcOp.getBlocks().front();
     for (auto phase : funcOp.getOps<PhaseInterface>()) {
-      if (failed(buildPhaseGroups(funcOp, funcBlock, phase, rewriter)))
+      if (failed(buildPhaseGroups(funcOp, funcBlock, phase, std::nullopt,
+                                  rewriter)))
         return failure();
     }
 
@@ -1014,6 +1126,7 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
 
   LogicalResult buildPhaseGroups(Operation *op, Block *block,
                                  PhaseInterface phase,
+                                 std::optional<calyx::CombGroupOp> condGroup,
                                  PatternRewriter &rewriter) const {
     // Collect pipeline registers for stage.
     auto pipelineRegisters =
@@ -1043,19 +1156,13 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
 
     MutableArrayRef<OpOperand> operands =
         phase.getBodyBlock().getTerminator()->getOpOperands();
-    // Covers the case where there are ops without values that need to be passed
-    // through to the next stage, e.g., some intermediary store.
-    // for (auto &op : phase.getBodyBlock())
-    //   if (auto group = getState<ComponentLoweringState>()
-    //                        .getSinkGroupFrom<calyx::StaticGroupOp>(&op))
-    //     addBodyGroup(*group);
+
     for (auto &operand : operands) {
       unsigned i = operand.getOperandNumber();
       Value value = operand.get();
 
       // Get the pipeline register for that result.
       auto reg = pipelineRegisters[i];
-
 
       if (auto *valuePtr = std::get_if<Value>(&reg); valuePtr) {
         auto evaluatingGroup =
@@ -1086,59 +1193,35 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
         evaluatingGroup = newGroup;
       }
 
-      // Remember the final group for this stage result.
-      calyx::StaticGroupOp group;
-
       assert(isa<calyx::CombGroupOp>(evaluatingGroup.value().getOperation()));
       // Stitch the register in, depending on whether the group was
       // combinational or sequential.
-      if (auto combGroup =
-              dyn_cast<calyx::CombGroupOp>(evaluatingGroup.value().getOperation())) {
-        group =
-            convertCombToSeqGroup(combGroup, pipelineRegister, value, rewriter);
-      } else {
-        // llvm::errs() << "replace group reg\n";
-        // value.dump();
-        // group =
-        //     replaceGroupRegister(evaluatingGroup.value(), pipelineRegister, rewriter);
-      }
+      calyx::StaticGroupOp group =
+          buildRegisterGroup(phase.getLoc(), pipelineRegister, value, rewriter);
 
       // Replace the stage result uses with the register out.
       phase->getResult(i).replaceAllUsesWith(pipelineRegister.getOut());
-      getState<ComponentLoweringState>()
-        .registerEvaluatingGroup(pipelineRegister.getOut(), group);
 
       addBodyGroup(group);
     }
 
-    // Append the stage to the list of stages if any groups
-    // were added for this stage. We append a list of groups for each stage, so
-    // we can group by stage later, when we generate the schedule.
-
-    auto startTime = phase.getStartTime();
-
-    if (!bodyGroups.empty()) {
-      // getState<ComponentLoweringState>().addOpPhase(op, startTime,
-      // bodyGroups);
+    // If cond group was given, add to phase
+    if (condGroup.has_value()) {
     }
 
     return success();
   }
 
-  calyx::StaticGroupOp convertCombToSeqGroup(calyx::CombGroupOp combGroup,
-                                             calyx::RegisterOp pipelineRegister,
-                                             Value value,
-                                             PatternRewriter &rewriter) const {
+  calyx::StaticGroupOp buildRegisterGroup(Location loc,
+                                          calyx::RegisterOp pipelineRegister,
+                                          Value value,
+                                          PatternRewriter &rewriter) const {
     // Create a sequential group and replace the comb group.
     PatternRewriter::InsertionGuard g(rewriter);
-    rewriter.setInsertionPoint(combGroup);
     auto groupName =
-        getState<ComponentLoweringState>().getUniqueName(combGroup.getName());
+        getState<ComponentLoweringState>().getUniqueName("phase_reg");
     auto group =
-        rewriter.create<calyx::StaticGroupOp>(combGroup.getLoc(), groupName, 1);
-    rewriter.cloneRegionBefore(combGroup.getBodyRegion(),
-                               &group.getBody().front());
-    group.getBodyRegion().back().erase();
+        calyx::createStaticGroup(rewriter, getComponent(), loc, groupName, 1);
 
     // Stitch evaluating group to register.
     calyx::buildAssignmentsForRegisterWrite(
@@ -1146,14 +1229,16 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
         pipelineRegister, value);
 
     // Mark the new group as the evaluating group.
-    for (auto assign : group.getOps<calyx::AssignOp>()) {
-      auto *src = assign.getSrc().getDefiningOp();
-      if (!isa<calyx::CellInterface>(*src) ||
-          dyn_cast<calyx::CellInterface>(*src).isCombinational()) {
-        getState<ComponentLoweringState>().registerEvaluatingGroup(
-            assign.getSrc(), group);
-      }
-    }
+    // for (auto assign : group.getOps<calyx::AssignOp>()) {
+    //   auto *src = assign.getSrc().getDefiningOp();
+    //   if (!isa<calyx::CellInterface>(*src)
+    //       // ||
+    //       // dyn_cast<calyx::CellInterface>(*src).isCombinational()
+    //       ) {
+    //     getState<ComponentLoweringState>().registerEvaluatingGroup(
+    //         assign.getSrc(), group);
+    //   }
+    // }
 
     return group;
   }
@@ -1453,10 +1538,12 @@ private:
 
     /// Insert while iter arg initialization group(s). Emit a
     /// parallel group to assign one or more registers all at once.
-    calyx::StaticParOp parOp;
+    calyx::StaticSeqOp seqOp;
     {
       PatternRewriter::InsertionGuard g(rewriter);
-      parOp = rewriter.create<calyx::StaticParOp>(loc);
+      seqOp = rewriter.create<calyx::StaticSeqOp>(loc);
+      rewriter.setInsertionPointToEnd(seqOp.getBodyBlock());
+      auto parOp = rewriter.create<calyx::StaticParOp>(loc);
       rewriter.setInsertionPointToEnd(parOp.getBodyBlock());
       for (calyx::StaticGroupOp group : initGroups)
         rewriter.create<calyx::EnableOp>(group.getLoc(), group.getName());
@@ -1474,21 +1561,9 @@ private:
     }
 
     /// Get condition for while loop
-    auto cond = loopOp.getConditionValue();
-
-    /// Get evaluating group for condition value
-    auto condGroup = getState<ComponentLoweringState>()
-                         .getEvaluatingGroup(cond);
-    assert(condGroup.has_value());
-    auto group = cast<calyx::StaticGroupOp>(condGroup.value());
-    getState<ComponentLoweringState>().addInitGroup(loopOp.getOperation(), group);
-
-    /// Add conditon value evaluating op to init groups
-    {
-      PatternRewriter::InsertionGuard g(rewriter);
-      rewriter.setInsertionPointToEnd(parOp.getBodyBlock());
-      rewriter.create<calyx::EnableOp>(group.getLoc(), group.getName());
-    }
+    auto cond = getState<ComponentLoweringState>()
+                    .getCondReg(loopOp.getOperation())
+                    .getOut();
 
     /// Build WhileOp with condition
     auto whileCtrlOp = rewriter.create<calyx::WhileOp>(loc, cond);
@@ -1718,6 +1793,10 @@ void LoopScheduleToCalyxPass::runOnOperation() {
   addOncePattern<calyx::BuildReturnRegs>(loweringPatterns, patternState,
                                          funcMap, *loweringState);
 
+  /// This pattern .
+  addOncePattern<BuildConditionChecks>(loweringPatterns, patternState, funcMap,
+                                       *loweringState);
+
   /// This pattern converts operations within basic blocks to Calyx library
   /// operators. Combinational operations are assigned inside a
   /// calyx::CombGroupOp, and sequential inside calyx::StaticGroupOps.
@@ -1733,39 +1812,39 @@ void LoopScheduleToCalyxPass::runOnOperation() {
                                         *loweringState);
 
   /// This pattern creates groups for all pipeline stages.
-  // addOncePattern<BuildPhaseGroups>(loweringPatterns, patternState, funcMap,
-  //                                  *loweringState);
+  addOncePattern<BuildPhaseGroups>(loweringPatterns, patternState, funcMap,
+                                   *loweringState);
 
-  // /// This pattern traverses the CFG of the program and generates a control
-  // /// schedule based on the calyx::StaticGroupOp's which were registered for
-  // /// each basic block in the source function.
-  // addOncePattern<BuildControl>(loweringPatterns, patternState, funcMap,
-  //                              *loweringState);
+  /// This pattern traverses the CFG of the program and generates a control
+  /// schedule based on the calyx::StaticGroupOp's which were registered for
+  /// each basic block in the source function.
+  addOncePattern<BuildControl>(loweringPatterns, patternState, funcMap,
+                               *loweringState);
 
-  // /// This pass recursively inlines use-def chains of combinational logic (from
-  // /// non-stateful groups) into groups referenced in the control schedule.
-  // addOncePattern<calyx::InlineCombGroups>(loweringPatterns, patternState,
-  //                                         *loweringState);
+  /// This pass recursively inlines use-def chains of combinational logic (from
+  /// non-stateful groups) into groups referenced in the control schedule.
+  addOncePattern<calyx::InlineCombGroups>(loweringPatterns, patternState,
+                                          *loweringState);
 
-  // /// This pattern performs various SSA replacements that must be done
-  // /// after control generation.
-  // addOncePattern<LateSSAReplacement>(loweringPatterns, patternState, funcMap,
-  //                                    *loweringState);
+  /// This pattern performs various SSA replacements that must be done
+  /// after control generation.
+  addOncePattern<LateSSAReplacement>(loweringPatterns, patternState, funcMap,
+                                     *loweringState);
 
-  // /// Eliminate any unused combinational groups. This is done before
-  // /// calyx::RewriteMemoryAccesses to avoid inferring slice components for
-  // /// groups that will be removed.
-  // addGreedyPattern<calyx::EliminateUnusedCombGroups>(loweringPatterns);
+  /// Eliminate any unused combinational groups. This is done before
+  /// calyx::RewriteMemoryAccesses to avoid inferring slice components for
+  /// groups that will be removed.
+  addGreedyPattern<calyx::EliminateUnusedCombGroups>(loweringPatterns);
 
-  // /// This pattern rewrites accesses to memories which are too wide due to
-  // /// index types being converted to a fixed-width integer type.
-  // addOncePattern<calyx::RewriteMemoryAccesses>(loweringPatterns, patternState,
-  //                                              *loweringState);
+  /// This pattern rewrites accesses to memories which are too wide due to
+  /// index types being converted to a fixed-width integer type.
+  addOncePattern<calyx::RewriteMemoryAccesses>(loweringPatterns, patternState,
+                                               *loweringState);
 
-  // /// This pattern removes the source FuncOp which has now been converted into
-  // /// a Calyx component.
-  // addOncePattern<CleanupFuncOps>(loweringPatterns, patternState, funcMap,
-  //                                *loweringState);
+  /// This pattern removes the source FuncOp which has now been converted into
+  /// a Calyx component.
+  addOncePattern<CleanupFuncOps>(loweringPatterns, patternState, funcMap,
+                                 *loweringState);
 
   /// Sequentially apply each lowering pattern.
   for (auto &pat : loweringPatterns) {
@@ -1773,7 +1852,6 @@ void LoopScheduleToCalyxPass::runOnOperation() {
         pat.pattern,
         /*runOnce=*/pat.strategy == LoweringPattern::Strategy::Once);
     if (succeeded(partialPatternRes)) {
-      // getOperation().dump();
       continue;
     }
     signalPassFailure();

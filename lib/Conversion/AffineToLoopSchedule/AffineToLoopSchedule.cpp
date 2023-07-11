@@ -717,6 +717,15 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
   auto pipeline =
       builder.create<LoopSchedulePipelineOp>(resultTypes, ii, tripCountAttr, iterArgs);
 
+  // Create the condition, which currently just compares the induction variable
+  // to the upper bound.
+  Block &condBlock = pipeline.getCondBlock();
+  builder.setInsertionPointToStart(&condBlock);
+  auto cmpResult = builder.create<arith::CmpIOp>(
+      builder.getI1Type(), arith::CmpIPredicate::ult, condBlock.getArgument(0),
+      upperBound);
+  condBlock.getTerminator()->insertOperands(0, {cmpResult});
+
   // Add the non-yield operations to their start time groups.
   DenseMap<unsigned, SmallVector<Operation *>> startGroups;
   for (auto *op : problem.getOperations()) {
@@ -987,7 +996,7 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
   Value lowerBound = lowerAffineLowerBound(loop, builder);
   Value upperBound = lowerAffineUpperBound(loop, builder);
   int64_t stepValue = loop.getStep();
-  auto step = builder.create<arith::ConstantOp>(
+  auto incr = builder.create<arith::ConstantOp>(
       IntegerAttr::get(builder.getIndexType(), stepValue));
 
   auto *anchor = loop.getBody()->getTerminator();
@@ -1022,6 +1031,15 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
   auto sequential = builder.create<LoopScheduleSequentialOp>(loop.getLoc(), resultTypes,
                                                   tripCountAttr, iterArgs);
 
+  // Create the condition, which currently just compares the induction variable
+  // to the upper bound.
+  Block &condBlock = sequential.getCondBlock();
+  builder.setInsertionPointToStart(&condBlock);
+  auto cmpResult = builder.create<arith::CmpIOp>(
+      builder.getI1Type(), arith::CmpIPredicate::ult, condBlock.getArgument(0),
+      upperBound);
+  condBlock.getTerminator()->insertOperands(0, {cmpResult});
+
   // Maintain mappings of values in the loop body and results of stages,
   // initially populated with the iter args.
   IRMapping valueMap;
@@ -1029,7 +1047,7 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
   //   valueMap.map(loop.getBefore().getArgument(i),
   //                stgWhile.getCondBlock().getArgument(i));
 
-  // builder.setInsertionPointToStart(&stgWhile.getCondBlock());
+  // builder.setInsertionPointToStart(&sequential.getCondBlock());
 
   // // auto condConst = builder.create<arith::ConstantOp>(loop.getLoc(),
   // // builder.getIntegerAttr(builder.getI1Type(), 1));
@@ -1088,8 +1106,6 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
     startTimes.push_back(group.first);
   llvm::sort(startTimes);
 
-  LoopScheduleStepOp lastStep;
-
   DominanceInfo dom(getOperation());
   for (auto i : enumerate(startTimes)) {
     auto startTime = i.value();
@@ -1116,20 +1132,16 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
       }
     }
 
-    if (i.index() == startTimes.size() - 1) {
-      // Add index increment to last step
+    if (startTime == 0) {
+      // Add index increment to first step
       stepTypes.push_back(builder.getIndexType());
-    
-      // Add condition check to last step
-      stepTypes.push_back(builder.getI1Type());
     }
 
-    // Create the stage itself.
-    auto stage = builder.create<LoopScheduleStepOp>(stepTypes);
-    lastStep = stage;
-    auto &stageBlock = stage.getBodyBlock();
-    auto *stageTerminator = stageBlock.getTerminator();
-    builder.setInsertionPointToStart(&stageBlock);
+    // Create the step itself.
+    auto step = builder.create<LoopScheduleStepOp>(stepTypes);
+    auto &stepBlock = step.getBodyBlock();
+    auto *stepTerminator = stepBlock.getTerminator();
+    builder.setInsertionPointToStart(&stepBlock);
 
     // Sort the group according to original dominance.
     llvm::sort(group,
@@ -1138,35 +1150,31 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
     // Move over the operations and add their results to the terminator.
     SmallVector<std::tuple<Operation *, Operation *, unsigned>> movedOps;
     for (auto *op : group) {
-      unsigned resultIndex = stageTerminator->getNumOperands();
+      unsigned resultIndex = stepTerminator->getNumOperands();
       auto *newOp = builder.clone(*op, valueMap);
       if (opsWithReturns.contains(op)) {
-        stageTerminator->insertOperands(resultIndex, newOp->getResults());
+        stepTerminator->insertOperands(resultIndex, newOp->getResults());
         movedOps.emplace_back(op, newOp, resultIndex);
       }
     }
 
-    // Add the stage results to the value map for the original op.
+    // Add the step results to the value map for the original op.
     for (auto tuple : movedOps) {
       Operation *op = std::get<0>(tuple);
       Operation *newOp = std::get<1>(tuple);
       unsigned resultIndex = std::get<2>(tuple);
       for (size_t i = 0; i < newOp->getNumResults(); ++i) {
-        auto newValue = stage->getResult(resultIndex + i);
+        auto newValue = step->getResult(resultIndex + i);
         auto oldValue = op->getResult(i);
         valueMap.map(oldValue, newValue);
       }
     }
 
-    if (i.index() == startTimes.size() - 1) {
+    if (startTime == 0) {
       auto incResult =
-          builder.create<arith::AddIOp>(scheduleBlock.getArgument(0), step);
-      stageTerminator->insertOperands(stageTerminator->getNumOperands(),
-                                      incResult->getResults());
-      auto condResult =
-          builder.create<arith::CmpIOp>(CmpIPredicate::ult, scheduleBlock.getArgument(0), upperBound);
-      stageTerminator->insertOperands(stageTerminator->getNumOperands(),
-                                      condResult->getResults());
+          builder.create<arith::AddIOp>(scheduleBlock.getArgument(0), incr);
+      stepTerminator->insertOperands(stepTerminator->getNumOperands(),
+                                     incResult->getResults());
     }
   }
 
@@ -1178,10 +1186,8 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
   // mapped values that were originally yielded.
   SmallVector<Value> termIterArgs;
   SmallVector<Value> termResults;
-  termIterArgs.push_back(
-      lastStep.getResult(lastStep.getNumResults() -
-      2));
-  auto cond = lastStep.getResult(lastStep.getNumResults() - 1);
+  termIterArgs.push_back(scheduleBlock.front().getResult(
+      scheduleBlock.front().getNumResults() - 1));
   for (int i = 0, vals = anchor->getNumOperands(); i < vals;
        ++i) {
     auto value = anchor->getOperand(i);
@@ -1196,7 +1202,6 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
 
   scheduleTerminator.getIterArgsMutable().append(termIterArgs);
   scheduleTerminator.getResultsMutable().append(termResults);
-  scheduleTerminator.getCondMutable().append(cond);
 
   // Replace loop results with while results.
   auto resultNum = 0;

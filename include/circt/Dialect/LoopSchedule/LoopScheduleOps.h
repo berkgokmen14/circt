@@ -22,6 +22,14 @@
 
 #include "circt/Dialect/LoopSchedule/LoopScheduleDialect.h"
 
+namespace circt {
+namespace loopschedule {
+
+LogicalResult verifyLoop(Operation *op);
+
+} // namespace loopschedule
+} // namespace circt
+
 #include "circt/Dialect/LoopSchedule/LoopScheduleInterfaces.h.inc"
 
 #define GET_OP_CLASSES

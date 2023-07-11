@@ -73,6 +73,7 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
   );
 
   let regions = (region
+    SizedRegion<1>:$condition,
     SizedRegion<1>:$stages
   );
 
@@ -88,6 +89,7 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
   ];
 
   let extraClassDeclaration = [{
+    Block &getCondBlock() { return getCondition().front(); }
     Block &getStagesBlock() { return getStages().front(); }
 
     Block::BlockArgListType getBodyArgs() {
@@ -96,7 +98,12 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
     Block *getBodyBlock() {
       return &getStagesBlock();
     }
-    std::optional<Value> getConditionValue();
+    Block *getConditionBlock() {
+      return &getCondBlock();
+    }
+    Value getConditionValue() {
+      return getCondBlock().getTerminator()->getOperand(0);
+    }
     std::optional<uint64_t> getBound() {
       return getTripCount();
     }
@@ -105,13 +112,6 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
     }
 
     uint64_t getBodyLatency();
-  }];
-
-  let extraClassDefinition = [{
-    std::optional<Value> $cppClass::getConditionValue() {
-      auto term = cast<LoopScheduleTerminatorOp>(getStagesBlock().getTerminator());
-      return term.getCondition();
-    }
   }];
 }
 
@@ -235,6 +235,7 @@ def LoopScheduleSequentialOp : LoopScheduleOp<"sequential", [LoopOpInterface]> {
   );
 
   let regions = (region
+    SizedRegion<1>:$condition,
     SizedRegion<1>:$schedule
   );
 
@@ -250,6 +251,7 @@ def LoopScheduleSequentialOp : LoopScheduleOp<"sequential", [LoopOpInterface]> {
   ];
 
   let extraClassDeclaration = [{
+    Block &getCondBlock() { return getCondition().front(); }
     Block &getScheduleBlock() { return getSchedule().front(); }
     Block::BlockArgListType getBodyArgs() {
       return getScheduleBlock().getArguments();
@@ -257,19 +259,17 @@ def LoopScheduleSequentialOp : LoopScheduleOp<"sequential", [LoopOpInterface]> {
     Block *getBodyBlock() {
       return &getScheduleBlock();
     }
-    std::optional<Value> getConditionValue();
+    Block *getConditionBlock() {
+      return &getCondBlock();
+    }
+    Value getConditionValue() {
+      return getCondBlock().getTerminator()->getOperand(0);
+    }
     std::optional<uint64_t> getBound() {
       return getTripCount();
     }
     bool isPipelined() {
       return false;
-    }
-  }];
-
-  let extraClassDefinition = [{
-    std::optional<Value> $cppClass::getConditionValue() {
-      auto term = cast<LoopScheduleTerminatorOp>(getScheduleBlock().getTerminator());
-      return term.getCondition();
     }
   }];
 }
@@ -372,30 +372,14 @@ def LoopScheduleTerminatorOp : LoopScheduleOp<"terminator",
   }];
 
   let arguments = (ins
-    Optional<I1>:$cond,
     Variadic<AnyType>:$iter_args,
     Variadic<AnyType>:$results
   );
 
   let assemblyFormat = [{
-    (`cond` `(` $cond^ `)` `,`)?
     `iter_args` `(` $iter_args `)` `,`
     `results` `(` $results `)` `:`
     functional-type($iter_args, $results) attr-dict
-  }];
-
-  let builders = [
-    OpBuilder<(ins "mlir::ValueRange":$iterArgs,
-                   "mlir::ValueRange":$results)>
-  ];
-
-  let extraClassDeclaration=[{
-    bool hasCondition() { return !!getCond(); }
-    std::optional<Value> getCondition() {
-      if (!hasCondition())
-        return std::nullopt;
-      return getCond();
-    }
   }];
 
   let hasVerifier = 1;

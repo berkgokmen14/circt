@@ -152,7 +152,7 @@ void LoopSchedulePipelineOp::print(OpAsmPrinter &p) {
   // Print iter_args assignment list.
   p << " iter_args(";
   llvm::interleaveComma(
-      llvm::zip(getStages().getArguments(), getIterArgs()), p,
+      llvm::zip(getStages().getArguments(), getInits()), p,
       [&](auto it) { p << std::get<0>(it) << " = " << std::get<1>(it); });
   p << ") : ";
 
@@ -360,7 +360,7 @@ void LoopScheduleSequentialOp::print(OpAsmPrinter &p) {
   // Print iter_args assignment list.
   p << " iter_args(";
   llvm::interleaveComma(
-      llvm::zip(getSchedule().getArguments(), getIterArgs()), p,
+      llvm::zip(getSchedule().getArguments(), getInits()), p,
       [&](auto it) { p << std::get<0>(it) << " = " << std::get<1>(it); });
   p << ") : ";
 

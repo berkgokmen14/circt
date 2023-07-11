@@ -39,12 +39,13 @@ circt::analysis::CyclicSchedulingAnalysis::CyclicSchedulingAnalysis(
   MemoryDependenceAnalysis &memoryAnalysis =
       am.getAnalysis<MemoryDependenceAnalysis>();
 
-  // Only consider innermost loops of perfectly nested AffineForOps.
-  for (auto root : funcOp.getOps<AffineForOp>()) {
-    SmallVector<AffineForOp> nestedLoops;
-    getPerfectlyNestedLoops(nestedLoops, root);
-    analyzeForOp(nestedLoops.back(), memoryAnalysis);
-  }
+  // Only consider loops marked with pipeline attribute.
+  op->walk<WalkOrder::PreOrder>([&](AffineForOp op) {
+    if (!op->hasAttr("hls.pipeline"))
+      return;
+
+    analyzeForOp(op, memoryAnalysis);
+  });
 }
 
 void circt::analysis::CyclicSchedulingAnalysis::analyzeForOp(

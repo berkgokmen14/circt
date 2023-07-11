@@ -37,35 +37,35 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
     not isolated from above, but could be if this is helpful. A pipeline
     contains two regions: `condition` and `stages`.
 
-    The pipeline may accept an optional `iter_args`, similar to the SCF dialect,
+    The pipeline may accept an optional `inits`, similar to the SCF dialect,
     for representing loop-carried values like induction variables or reductions.
-    When the pipeline starts execution, the registers indicated as `iter_args`
+    When the pipeline starts execution, the registers indicated as `inits`
     by `loopschedule.terminator` should be initialized to the initial
-    values specified in the `iter_args` section here. The `iter_args` relate to
+    values specified in the `inits` section here. The `inits` relate to
     the initiation interval of the loop. The maximum distance in stages between
-    where an `iter_arg` is used and where that `iter_arg` is registered must be
+    where an `init` is used and where that `init` is registered must be
     less than the loop's initiation interval. For example, with II=1, each
-    `iter_arg` must be used and registered in the same stage.
+    `init` must be used and registered in the same stage.
 
     The single-block `condition` region dictates the condition under which the
     pipeline should execute. It has a `register` terminator, and the
     pipeline initiates new iterations while the registered value is `true : i1`.
-    It may access SSA values dominating the pipeline, as well as `iter_args`,
+    It may access SSA values dominating the pipeline, as well as `inits`,
     which are block arguments. The body of the block may only contain
     "combinational" operations, which are currently defined to be simple
     arithmetic, comparisons, and selects from the `Standard` dialect.
 
     The single-block `stages` region wraps `loopschedule.pipeline.stage`
     operations. It has a `loopschedule.terminator` terminator, which can
-    both return results from the pipeline and register `iter_args`. Stages may
-    access SSA values dominating the pipeline, as well as `iter_args`, which are
+    both return results from the pipeline and register `inits`. Stages may
+    access SSA values dominating the pipeline, as well as `inits`, which are
     block arguments.
   }];
 
   let arguments = (ins
     I64Attr:$II,
     OptionalAttr<I64Attr>:$tripCount,
-    Variadic<AnyType>:$iterArgs
+    Variadic<AnyType>:$inits
   );
 
   let results = (outs
@@ -85,7 +85,7 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
   let builders = [
     OpBuilder<(ins "mlir::TypeRange":$resultTypes, "mlir::IntegerAttr":$II,
                    "std::optional<IntegerAttr>": $tripCount,
-                   "mlir::ValueRange":$iterArgs)>
+                   "mlir::ValueRange":$inits)>
   ];
 
   let extraClassDeclaration = [{
@@ -134,11 +134,11 @@ def LoopSchedulePipelineStageOp : LoopScheduleOp<"pipeline.stage",
     It has a `register` terminator, which passes the concurrently
     computed values forward to the next stage.
 
-    Any stage may access `iter_args`. If a stage accesses an `iter_arg` after
+    Any stage may access `inits`. If a stage accesses an `init` after
     the stage in which it is defined, it is up to lowering passes to preserve
     this value until the last stage that needs it.
 
-    Other than `iter_args`, stages may only access SSA values dominating the
+    Other than `inits`, stages may only access SSA values dominating the
     pipeline or SSA values computed by any previous stage. This ensures the
     stages capture the coarse-grained schedule of the pipeline and how values
     feed forward and backward.
@@ -201,22 +201,22 @@ def LoopScheduleSequentialOp : LoopScheduleOp<"sequential", [LoopOpInterface]> {
     not isolated from above, but could be if this is helpful. A sequential
     loop contains two regions: `condition` and `stages`.
 
-    The sequential loop may accept an optional `iter_args`, similar to the SCF 
+    The sequential loop may accept an optional `inits`, similar to the SCF 
     dialect, for representing loop-carried values like induction variables or 
     reductions. When the sequential loop starts execution, the registers 
-    indicated as `iter_args` by `loopschedule.terminator` should be initialized 
-    to the initial values specified in the `iter_args` section here.
+    indicated as `inits` by `loopschedule.terminator` should be initialized 
+    to the initial values specified in the `inits` section here.
 
     The single-block `condition` region dictates the condition under which the
     sequential loop should execute. It has a `register` terminator, and the
     loop initiates new iterations while the registered value is `true : i1`.
-    It may access SSA values dominating the loop, as well as `iter_args`,
+    It may access SSA values dominating the loop, as well as `inits`,
     which are block arguments.
 
     The single-block `steps` region wraps `loopschedule.step`
     operations. It has a `loopschedule.terminator` terminator, which can
-    both return results from the loop and register `iter_args`. Steps may
-    access SSA values dominating the loop, as well as `iter_args`, which are
+    both return results from the loop and register `inits`. Steps may
+    access SSA values dominating the loop, as well as `inits`, which are
     block arguments.
 
     In contrast to the `loopschedule.pipeline` op, sequential loops guarantee
@@ -227,7 +227,7 @@ def LoopScheduleSequentialOp : LoopScheduleOp<"sequential", [LoopOpInterface]> {
 
   let arguments = (ins
     OptionalAttr<I64Attr>:$tripCount,
-    Variadic<AnyType>:$iterArgs
+    Variadic<AnyType>:$inits
   );
 
   let results = (outs
@@ -247,7 +247,7 @@ def LoopScheduleSequentialOp : LoopScheduleOp<"sequential", [LoopOpInterface]> {
   let builders = [
     OpBuilder<(ins "mlir::TypeRange":$resultTypes,
                    "std::optional<IntegerAttr>": $tripCount,
-                   "mlir::ValueRange":$iterArgs)>
+                   "mlir::ValueRange":$inits)>
   ];
 
   let extraClassDeclaration = [{

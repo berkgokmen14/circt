@@ -27,6 +27,10 @@ def LoopOpInterface : OpInterface<"LoopInterface"> {
       "Block::BlockArgListType",
       "getBodyArgs">,
     InterfaceMethod<
+      "Get the initial values for iter args.",
+      "Operation::operand_range",
+      "getInits">,
+    InterfaceMethod<
       "Get a pointer to the body block.",
       "Block*",
       "getBodyBlock">,

@@ -61,6 +61,10 @@ public:
     return getOperation().getBodyArgs();
   }
 
+  Operation::operand_range getInits() override {
+    return getOperation().getInits();
+  }
+
   Block *getBodyBlock() override { return getOperation().getBodyBlock(); }
 
   Block *getConditionBlock() override {
@@ -564,7 +568,7 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
 
     loop.getConditionBlock()
         ->getArgument(arg.index())
-        .replaceAllUsesWith(reg.getOut());
+        .replaceAllUsesWith(loop.getInits()[arg.index()]);
   }
 
   /// Create iter args initial value assignment group(s), one per register.
@@ -595,20 +599,23 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
     auto constant = calyx::createConstant(op.getLoc(), rewriter,
                                 getComponent(),
                                 32, 1);
-    rewriter.create<calyx::AssignOp>(
-        op.getLoc(), addOp.getRight(),
-        constant);
-    // auto constGroup = createGroupForOp<calyx::CombGroupOp>(rewriter, op);
-    // getState<ComponentLoweringState>().registerEvaluatingGroup(constant, constGroup);
+    rewriter.create<calyx::AssignOp>(op.getLoc(), addOp.getRight(), constant);
     rewriter.create<calyx::AssignOp>(op.getLoc(), incrReg.getIn(), addOp.getOut());
-    rewriter.create<calyx::AssignOp>(
-        op.getLoc(), incrReg.getWriteEn(),
-        calyx::createConstant(op.getLoc(), rewriter,
-                              getComponent(),
-                              1, 1));
+    auto oneI1 =
+        calyx::createConstant(op.getLoc(), rewriter, getComponent(), 1, 1);
+    rewriter.create<calyx::AssignOp>(op.getLoc(), incrReg.getWriteEn(), oneI1);
     getState<ComponentLoweringState>().registerEvaluatingGroup(addOp.getOut(), incrGroup);
     getState<ComponentLoweringState>().registerEvaluatingGroup(addOp.getLeft(), incrGroup);
     getState<ComponentLoweringState>().registerEvaluatingGroup(addOp.getRight(), incrGroup);
+
+    // Build reset for increment counter
+    auto incrInit = createStaticGroupForOp(rewriter, op, 1);
+    rewriter.setInsertionPointToEnd(incrInit.getBodyBlock());
+    auto zero =
+        calyx::createConstant(op.getLoc(), rewriter, getComponent(), 32, 0);
+    rewriter.create<calyx::AssignOp>(op.getLoc(), incrReg.getIn(), zero);
+    rewriter.create<calyx::AssignOp>(op.getLoc(), incrReg.getWriteEn(), oneI1);
+    getState<ComponentLoweringState>().addInitGroup(op, incrInit);
 
     // Set pipeline iter value stuff
     auto pipeline = cast<LoopSchedulePipelineOp>(loop.getOperation());

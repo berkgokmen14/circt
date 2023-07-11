@@ -54,9 +54,15 @@ public:
     return getOperation().getAfterArguments();
   }
 
+  Operation::operand_range getInits() override {
+    return getOperation().getInits();
+  }
+
   Block *getBodyBlock() override { return &getOperation().getAfter().front(); }
 
-  Block *getConditionBlock() { return &getOperation().getBefore().front(); }
+  Block *getConditionBlock() override {
+    return &getOperation().getBefore().front();
+  }
 
   Value getConditionValue() override {
     return getOperation().getConditionOp().getOperand(0);

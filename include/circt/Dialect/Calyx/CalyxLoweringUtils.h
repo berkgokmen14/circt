@@ -134,6 +134,9 @@ public:
   // Returns the arguments to this loop operation.
   virtual Block::BlockArgListType getBodyArgs() = 0;
 
+  // Returns the initial values for iter args.
+  virtual Operation::operand_range getInits() = 0;
+
   // Returns body of this loop operation.
   virtual Block *getBodyBlock() = 0;
 

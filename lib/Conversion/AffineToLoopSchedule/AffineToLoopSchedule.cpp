@@ -1122,7 +1122,9 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
     DenseSet<Operation *> opsWithReturns;
     for (auto *op : group) {
       for (auto *user : op->getUsers()) {
-        if (*problem.getStartTime(user) > startTime || isLoopTerminator(user)) {
+        auto startTimeOpt = problem.getStartTime(user);
+        if ((startTimeOpt.has_value() && *startTimeOpt > startTime) ||
+            isLoopTerminator(user)) {
           if (!opsWithReturns.contains(op)) {
             opsWithReturns.insert(op);
             stepTypes.append(op->getResultTypes().begin(),

@@ -100,9 +100,10 @@ public:
     assert(phaseRegs[phase].count(idx) == 0);
     assert(idx < phase->getNumResults());
     if (auto *valuePtr = std::get_if<Value>(&reg); valuePtr) {
-      assert(isa<calyx::CellInterface>(valuePtr->getDefiningOp()));
-      auto cell = dyn_cast<calyx::CellInterface>(valuePtr->getDefiningOp());
-      assert(!cell.isCombinational());
+      if (auto cell =
+              dyn_cast<calyx::CellInterface>(valuePtr->getDefiningOp())) {
+        assert(!cell.isCombinational());
+      }
     }
     phaseRegs[phase][idx] = reg;
   }
@@ -339,9 +340,8 @@ private:
   calyx::StaticGroupOp createStaticGroupForOp(PatternRewriter &rewriter,
                                               Operation *op,
                                               uint64_t latency) const {
-    Block *block = op->getBlock();
-    auto groupName = getState<ComponentLoweringState>().getUniqueName(
-        loweringState().blockName(block));
+    auto name = op->getName().getStringRef().split(".").second;
+    auto groupName = getState<ComponentLoweringState>().getUniqueName(name);
     return calyx::createStaticGroup(
         rewriter, getState<ComponentLoweringState>().getComponentOp(),
         op->getLoc(), groupName, latency);
@@ -425,9 +425,14 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   // combinational group. Note that if any stores are done to this memory,
   // we require that the load and store be in separate non-combinational
   // groups to avoid reading and writing to the same memory in the same group.
-  auto combGroup = createGroupForOp<calyx::CombGroupOp>(rewriter, loadOp);
-  assignAddressPorts(rewriter, loadOp.getLoc(), combGroup, memoryInterface,
+  auto group = createStaticGroupForOp(rewriter, loadOp, 1);
+  assignAddressPorts(rewriter, loadOp.getLoc(), group, memoryInterface,
                      loadOp.getIndices());
+  rewriter.setInsertionPointToEnd(group.getBodyBlock());
+  auto one =
+      calyx::createConstant(loadOp.getLoc(), rewriter, getComponent(), 1, 1);
+  rewriter.create<calyx::AssignOp>(loadOp.getLoc(), memoryInterface.readEn(),
+                                   one);
 
   // We refrain from replacing the loadOp result with
   // memoryInterface.readData, since multiple loadOp's need to be converted
@@ -439,7 +444,7 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   // things such as InlineCombGroups to be able to properly track which
   // memory assignment groups belong to which accesses.
   getState<ComponentLoweringState>().registerEvaluatingGroup(loadOp.getResult(),
-                                                             combGroup);
+                                                             group);
 
   return success();
 }
@@ -522,7 +527,7 @@ static LogicalResult buildAllocOp(ComponentLoweringState &componentState,
     sizes.push_back(dim);
     addrSizes.push_back(calyx::handleZeroWidth(dim));
   }
-  auto memoryOp = rewriter.create<calyx::MemoryOp>(
+  auto memoryOp = rewriter.create<calyx::SeqMemoryOp>(
       allocOp.getLoc(), componentState.getUniqueName("mem"),
       memtype.getElementType().getIntOrFloatBitWidth(), sizes, addrSizes);
   // Externalize memories by default. This makes it easier for the native
@@ -585,7 +590,10 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   }
 
   if (loop.isPipelined()) {
-    auto incrGroup = createStaticGroupForOp(rewriter, op, 1);
+    auto groupName = getState<ComponentLoweringState>().getUniqueName("incr");
+    auto incrGroup = calyx::createStaticGroup(
+        rewriter, getState<ComponentLoweringState>().getComponentOp(),
+        op->getLoc(), groupName, 1);
     auto incrReg =
         createRegister(op.getLoc(), rewriter, getComponent(), 32,
                        getState<ComponentLoweringState>().getUniqueName("idx"));
@@ -609,7 +617,11 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
     getState<ComponentLoweringState>().registerEvaluatingGroup(addOp.getRight(), incrGroup);
 
     // Build reset for increment counter
-    auto incrInit = createStaticGroupForOp(rewriter, op, 1);
+    auto initName =
+        getState<ComponentLoweringState>().getUniqueName("incr_init");
+    auto incrInit = calyx::createStaticGroup(
+        rewriter, getState<ComponentLoweringState>().getComponentOp(),
+        op->getLoc(), initName, 1);
     rewriter.setInsertionPointToEnd(incrInit.getBodyBlock());
     auto zero =
         calyx::createConstant(op.getLoc(), rewriter, getComponent(), 32, 0);
@@ -987,7 +999,7 @@ struct FuncOpConversion : public calyx::FuncOpPartialLoweringPattern {
         }
         auto memName = "ext_mem_" + std::to_string(extMemCounter);
         auto bitwidth = calyx::getBitWidth(memtype.getElementType());
-        auto memoryOp = rewriter.create<calyx::MemoryOp>(
+        auto memoryOp = rewriter.create<calyx::SeqMemoryOp>(
             funcOp.getLoc(), memName, bitwidth, sizes, addrSizes);
         // Externalize top level memories.
         memoryOp->setAttr("external", IntegerAttr::get(rewriter.getI1Type(),
@@ -1020,7 +1032,7 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
       // Create a register for each phase.
       for (auto &operand : op->getOpOperands()) {
         Value value = operand.get();
-        // value.dump();
+        value.dump();
         unsigned i = operand.getOperandNumber();
         // Iter args are created in BuildWhileGroups, so just mark the iter arg
         // register as the appropriate pipeline register.
@@ -1057,12 +1069,18 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
           Value v;
           if (auto mul = dyn_cast<calyx::MultPipeLibOp>(op); mul) {
             v = mul.getOut();
-          } else if (auto divu = dyn_cast<calyx::DivUPipeLibOp>(op); divu){
+          } else if (auto divu = dyn_cast<calyx::DivUPipeLibOp>(op); divu) {
             v = divu.getOut();
           } else {
             assert(false && "Unsupported pipelined cell op");
           }
           getState<ComponentLoweringState>().addPhaseReg(phase, v, i);
+          continue;
+        }
+
+        if (auto load = value.getDefiningOp<memref::LoadOp>()) {
+          llvm::errs() << "here\n";
+          getState<ComponentLoweringState>().addPhaseReg(phase, value, i);
           continue;
         }
 

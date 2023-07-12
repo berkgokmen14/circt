@@ -443,9 +443,10 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   // control has been generated (see LateSSAReplacement). This is *vital* for
   // things such as InlineCombGroups to be able to properly track which
   // memory assignment groups belong to which accesses.
-  getState<ComponentLoweringState>().registerEvaluatingGroup(loadOp.getResult(),
-                                                             group);
+  getState<ComponentLoweringState>().registerEvaluatingGroup(
+      memoryInterface.readData(), group);
 
+  loadOp.replaceAllUsesWith(memoryInterface.readData());
   return success();
 }
 
@@ -565,8 +566,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                            .str() +
                        "_arg" + std::to_string(arg.index());
 
-    auto reg = createRegister(arg.value().getLoc(), rewriter, getComponent(),
-                              calyx::getBitWidth(arg.value().getType()), name);
+    auto reg =
+        createRegister(arg.value().getLoc(), rewriter, getComponent(),
+                       arg.value().getType().getIntOrFloatBitWidth(), name);
     getState<ComponentLoweringState>().addLoopIterReg(loop, reg, arg.index());
 
     arg.value().replaceAllUsesWith(reg.getOut());
@@ -998,7 +1000,7 @@ struct FuncOpConversion : public calyx::FuncOpPartialLoweringPattern {
           addrSizes.push_back(calyx::handleZeroWidth(dim));
         }
         auto memName = "ext_mem_" + std::to_string(extMemCounter);
-        auto bitwidth = calyx::getBitWidth(memtype.getElementType());
+        auto bitwidth = memtype.getElementType().getIntOrFloatBitWidth();
         auto memoryOp = rewriter.create<calyx::SeqMemoryOp>(
             funcOp.getLoc(), memName, bitwidth, sizes, addrSizes);
         // Externalize top level memories.
@@ -1071,6 +1073,8 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
             v = mul.getOut();
           } else if (auto divu = dyn_cast<calyx::DivUPipeLibOp>(op); divu) {
             v = divu.getOut();
+          } else if (auto seqMem = dyn_cast<calyx::SeqMemoryOp>(op); seqMem) {
+            v = seqMem.readData();
           } else {
             assert(false && "Unsupported pipelined cell op");
           }
@@ -1078,11 +1082,11 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
           continue;
         }
 
-        if (auto load = value.getDefiningOp<memref::LoadOp>()) {
-          llvm::errs() << "here\n";
-          getState<ComponentLoweringState>().addPhaseReg(phase, value, i);
-          continue;
-        }
+        // if (auto load = value.getDefiningOp<memref::LoadOp>()) {
+        //   llvm::errs() << "here\n";
+        //   getState<ComponentLoweringState>().addPhaseReg(phase, value, i);
+        //   continue;
+        // }
 
         // Create a register for passing this result to later phases.
         Type resultType = value.getType();
@@ -1280,7 +1284,7 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
       auto endIter = pipeline.getTripCount().value() + stage.getStart();
       auto idxValue = getState<ComponentLoweringState>().getLoopIterValue(pipeline);
       auto idxType = idxValue.getType();
-      auto bitwidth = calyx::getBitWidth(idxType);
+      auto bitwidth = idxType.getIntOrFloatBitWidth();
       auto i1Type = rewriter.getI1Type();
       auto incrGroup =
           getState<ComponentLoweringState>().getIncrGroup(pipeline);
@@ -1853,8 +1857,8 @@ void LoopScheduleToCalyxPass::runOnOperation() {
 
   /// This pattern performs various SSA replacements that must be done
   /// after control generation.
-  addOncePattern<LateSSAReplacement>(loweringPatterns, patternState, funcMap,
-                                     *loweringState);
+  // addOncePattern<LateSSAReplacement>(loweringPatterns, patternState, funcMap,
+  //                                    *loweringState);
 
   /// Eliminate any unused combinational groups. This is done before
   /// calyx::RewriteMemoryAccesses to avoid inferring slice components for

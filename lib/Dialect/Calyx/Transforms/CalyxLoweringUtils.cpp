@@ -557,6 +557,10 @@ CalyxLoweringState &FuncOpPartialLoweringPattern::loweringState() const {
 LogicalResult
 ConvertIndexTypes::partiallyLowerFuncToComp(mlir::func::FuncOp funcOp,
                                             PatternRewriter &rewriter) const {
+  for (auto arg : funcOp.getArguments()) {
+    arg.setType(calyx::convIndexType(rewriter, arg.getType()));
+  }
+
   funcOp.walk([&](Block *block) {
     for (Value arg : block->getArguments())
       arg.setType(calyx::convIndexType(rewriter, arg.getType()));

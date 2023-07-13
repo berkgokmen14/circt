@@ -343,16 +343,19 @@ UnrollForLoopSchedule::unrollForPipelineParallel(AffineForOp affineFor) {
 
   // Unroll factor is roughly the min recurrence II : Latency / Distance
 
-  // Latency is simply ASAP times, given a latency model for the operations
-  // However, latency can be bounded above by the number of ops for now
+  // Latency is simply ASAP times / critical path, given a latency model for the
+  // operations. However, latency can be bounded above by the number of ops for
+  // now. Here is a super hacky heuristic to know how much to unroll by:
   assert(affineFor.getOps<AffineForOp>().empty());
   uint64_t largeLatencyBound = 0;
   for (auto &op : affineFor.getOps())
     if (isa<arith::MulIOp>(op))
       largeLatencyBound += 3; // Mul will typically be longer latency
-    else
-      ++largeLatencyBound;
+    else if (!isa<AffineMapAccessInterface>(op) && op.getNumOperands() >= 2)
+      largeLatencyBound += op.getNumOperands();
 
+  largeLatencyBound /=
+      std::max(1UL, (uint64_t)affineFor.getNumRegionIterArgs());
   // Do ceiling division
   minDepDistance = std::max(1UL, minDepDistance);
   uint64_t approxII = largeLatencyBound / minDepDistance +

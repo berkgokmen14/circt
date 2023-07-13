@@ -228,12 +228,11 @@ struct CircuitLoweringState {
   std::atomic<bool> used_RANDOMIZE_GARBAGE_ASSIGN{false};
 
   CircuitLoweringState(CircuitOp circuitOp, bool enableAnnotationWarning,
-                       bool emitChiselAssertsAsSVA, bool addMuxPragmas,
+                       bool emitChiselAssertsAsSVA,
                        InstanceGraph *instanceGraph, NLATable *nlaTable)
       : circuitOp(circuitOp), instanceGraph(instanceGraph),
         enableAnnotationWarning(enableAnnotationWarning),
-        emitChiselAssertsAsSVA(emitChiselAssertsAsSVA),
-        addMuxPragmas(addMuxPragmas), nlaTable(nlaTable) {
+        emitChiselAssertsAsSVA(emitChiselAssertsAsSVA), nlaTable(nlaTable) {
     auto *context = circuitOp.getContext();
 
     // Get the testbench output directory.
@@ -327,7 +326,6 @@ private:
   std::mutex annotationPrintingMtx;
 
   const bool emitChiselAssertsAsSVA;
-  const bool addMuxPragmas;
 
   // Records any sv::BindOps that are found during the course of execution.
   // This is unsafe to access directly and should only be used through addBind.
@@ -423,7 +421,6 @@ struct FIRRTLModuleLowering : public LowerFIRRTLToHWBase<FIRRTLModuleLowering> {
   void setDisableRegRandomization() { disableRegRandomization = true; }
   void setEnableAnnotationWarning() { enableAnnotationWarning = true; }
   void setEmitChiselAssertAsSVA() { emitChiselAssertsAsSVA = true; }
-  void setAddMuxPragmas() { addMuxPragmas = true; }
 
 private:
   void lowerFileHeader(CircuitOp op, CircuitLoweringState &loweringState);
@@ -456,15 +453,12 @@ private:
 /// This is the pass constructor.
 std::unique_ptr<mlir::Pass> circt::createLowerFIRRTLToHWPass(
     bool enableAnnotationWarning, bool emitChiselAssertsAsSVA,
-    bool addMuxPragmas, bool disableMemRandomization,
-    bool disableRegRandomization) {
+    bool disableMemRandomization, bool disableRegRandomization) {
   auto pass = std::make_unique<FIRRTLModuleLowering>();
   if (enableAnnotationWarning)
     pass->setEnableAnnotationWarning();
   if (emitChiselAssertsAsSVA)
     pass->setEmitChiselAssertAsSVA();
-  if (addMuxPragmas)
-    pass->setAddMuxPragmas();
   if (disableMemRandomization)
     pass->setDisableMemRandomization();
   if (disableRegRandomization)
@@ -495,7 +489,7 @@ void FIRRTLModuleLowering::runOnOperation() {
   // Keep track of the mapping from old to new modules.  The result may be null
   // if lowering failed.
   CircuitLoweringState state(
-      circuit, enableAnnotationWarning, emitChiselAssertsAsSVA, addMuxPragmas,
+      circuit, enableAnnotationWarning, emitChiselAssertsAsSVA,
       &getAnalysis<InstanceGraph>(), &getAnalysis<NLATable>());
 
   SmallVector<FModuleOp, 32> modulesToProcess;
@@ -1518,6 +1512,7 @@ struct FIRRTLLowering : public FIRRTLVisitor<FIRRTLLowering, LogicalResult> {
   LogicalResult setLoweringTo(Operation *orig, CtorArgTypes... args);
   template <typename ResultOpType, typename... CtorArgTypes>
   LogicalResult setLoweringToLTL(Operation *orig, CtorArgTypes... args);
+  Backedge createBackedge(Location loc, Type type);
   Backedge createBackedge(Value orig, Type type);
   bool updateIfBackedge(Value dest, Value src);
 
@@ -1546,6 +1541,7 @@ struct FIRRTLLowering : public FIRRTLVisitor<FIRRTLLowering, LogicalResult> {
                                     FIRRTLBaseType destType,
                                     bool allowTruncate);
   Value createArrayIndexing(Value array, Value index);
+  Value createValueWithMuxAnnotation(Operation *op, bool isMux2);
 
   // Create a temporary wire at the current insertion point, and try to
   // eliminate it later as part of lowering post processing.
@@ -1555,14 +1551,6 @@ struct FIRRTLLowering : public FIRRTLVisitor<FIRRTLLowering, LogicalResult> {
     auto result = builder.create<sv::WireOp>(type, name);
     tmpWiresToOptimize.push_back(result);
     return result;
-  }
-
-  // Create a temporary wire to act as a destination for connect operations.
-  // These wires are removed after all connects have been lowered.
-  hw::WireOp createTmpHWWireOp(Type type, StringAttrOrRef name = {}) {
-    auto wire = builder.create<hw::WireOp>(getOrCreateZConstant(type), name);
-    tmpWiresToRemove.push_back(wire);
-    return wire;
   }
 
   using FIRRTLVisitor<FIRRTLLowering, LogicalResult>::visitExpr;
@@ -1717,6 +1705,8 @@ struct FIRRTLLowering : public FIRRTLVisitor<FIRRTLLowering, LogicalResult> {
   }
   LogicalResult visitExpr(TailPrimOp op);
   LogicalResult visitExpr(MuxPrimOp op);
+  LogicalResult visitExpr(Mux2CellIntrinsicOp op);
+  LogicalResult visitExpr(Mux4CellIntrinsicOp op);
   LogicalResult visitExpr(MultibitMuxOp op);
   LogicalResult visitExpr(VerbatimExprOp op);
 
@@ -1794,11 +1784,6 @@ private:
   /// lowering process.  LowerToHW should attempt to clean these up after
   /// lowering.
   SmallVector<sv::WireOp> tmpWiresToOptimize;
-
-  /// A list of wires created as a temporary destination to for connect-like
-  /// operations to hook up to. These wires are deleted again and replaced with
-  /// their connected value after all operations have been lowered.
-  SmallVector<hw::WireOp> tmpWiresToRemove;
 
   /// A namespace that can be used to generte new symbol names that are unique
   /// within this module.
@@ -1934,15 +1919,6 @@ LogicalResult FIRRTLLowering::run() {
   // inserted by MemOp insertions.
   for (auto wire : tmpWiresToOptimize)
     optimizeTemporaryWire(wire);
-
-  // Remove all temporary wires created solely for the purpose of facilitating
-  // the lowering of connect-like operations.
-  for (auto wire : tmpWiresToRemove) {
-    if (wire.getInnerSymAttr())
-      return wire.emitError("temporary wire was given an inner symbol");
-    wire.replaceAllUsesWith(wire.getInput());
-    wire.erase();
-  }
 
   // Determine the actual types of lowered LTL operations and remove any
   // intermediate wires among them.
@@ -2434,13 +2410,24 @@ LogicalResult FIRRTLLowering::setLoweringToLTL(Operation *orig,
   return setPossiblyFoldedLowering(orig->getResult(0), result);
 }
 
+/// Creates a backedge of the specified result type. A backedge represents a
+/// placeholder to be filled in later by a lowered value. If the backedge is not
+/// updated with a real value by the end of the pass, it will be replaced with
+/// an undriven wire.  Backedges are allowed to be updated to other backedges.
+/// If a chain of backedges forms a combinational loop, they will be replaced
+/// with an undriven wire.
+Backedge FIRRTLLowering::createBackedge(Location loc, Type type) {
+  auto backedge = backedgeBuilder.get(type, loc);
+  backedges.insert({backedge, backedge});
+  return backedge;
+}
+
 /// Sets the lowering for a value to a backedge of the specified result type.
 /// This is useful for lowering types which cannot pass through a wire, or to
 /// directly materialize values in operations that violate the SSA dominance
 /// constraint.
 Backedge FIRRTLLowering::createBackedge(Value orig, Type type) {
-  auto backedge = backedgeBuilder.get(type, orig.getLoc());
-  backedges.insert({backedge, backedge});
+  auto backedge = createBackedge(orig.getLoc(), type);
   (void)setLowering(orig, backedge);
   return backedge;
 }
@@ -2451,7 +2438,6 @@ bool FIRRTLLowering::updateIfBackedge(Value dest, Value src) {
   auto backedgeIt = backedges.find(dest);
   if (backedgeIt == backedges.end())
     return false;
-  assert(backedgeIt->first == backedgeIt->second && "backedge lowered twice");
   backedgeIt->second = src;
   return true;
 }
@@ -2871,9 +2857,10 @@ LogicalResult FIRRTLLowering::visitExpr(SubtagOp op) {
 //===----------------------------------------------------------------------===//
 
 LogicalResult FIRRTLLowering::visitDecl(WireOp op) {
+  auto origResultType = op.getResult().getType();
+
   // Foreign types lower to a backedge that needs to be resolved by a later
   // connect op.
-  auto origResultType = op.getResult().getType();
   if (!isa<FIRRTLType>(origResultType)) {
     createBackedge(op.getResult(), origResultType);
     return success();
@@ -3122,23 +3109,19 @@ LogicalResult FIRRTLLowering::visitDecl(MemOp op) {
       if (memportKind != op.getPortKind(i))
         continue;
 
-      auto portName = op.getPortName(i).getValue();
-
       auto addInput = [&](StringRef portLabel, StringRef portLabel2,
                           StringRef field, size_t width,
                           StringRef field2 = "") {
         auto portType =
             IntegerType::get(op.getContext(), std::max((size_t)1, width));
+
+        Value backedge = createBackedge(builder.getLoc(), portType);
         auto accesses = getAllFieldAccesses(op.getResult(i), field);
-
-        Value wire =
-            createTmpHWWireOp(portType, "." + portName + "." + field + ".wire");
-
         for (auto a : accesses) {
           if (cast<FIRRTLBaseType>(a.getType())
                   .getPassiveType()
                   .getBitWidthOrSentinel() > 0)
-            (void)setLowering(a, wire);
+            (void)setLowering(a, backedge);
           else
             a->eraseOperand(0);
         }
@@ -3146,22 +3129,21 @@ LogicalResult FIRRTLLowering::visitDecl(MemOp op) {
         if (!field2.empty()) {
           // This handles the case, when the single bit mask field is removed,
           // and the enable is updated after 'And' with mask bit.
-          Value wire2 = createTmpHWWireOp(portType, "." + portName + "." +
-                                                        field2 + ".wire");
+          auto backedge2 = createBackedge(builder.getLoc(), portType);
           auto accesses2 = getAllFieldAccesses(op.getResult(i), field2);
-
           for (auto a : accesses2) {
             if (cast<FIRRTLBaseType>(a.getType())
                     .getPassiveType()
                     .getBitWidthOrSentinel() > 0)
-              (void)setLowering(a, wire2);
+              (void)setLowering(a, backedge2);
             else
               a->eraseOperand(0);
           }
-          wire = builder.createOrFold<comb::AndOp>(wire, wire2, true);
+          backedge =
+              builder.createOrFold<comb::AndOp>(backedge, backedge2, true);
         }
 
-        operands.push_back(wire);
+        operands.push_back(backedge);
         argNames.push_back(
             builder.getStringAttr(portLabel + Twine(portNumber) + portLabel2));
       };
@@ -3289,15 +3271,15 @@ LogicalResult FIRRTLLowering::visitDecl(InstanceOp oldInstance) {
     auto portResult = oldInstance.getResult(portIndex);
     assert(portResult && "invalid IR, couldn't find port");
 
-    // Directly materialize inputs which are trivially assigned once through a
-    // `StrictConnectOp`.
-    if (port.isInput() && getSingleConnectUserOf(portResult)) {
+    // Replace the input port with a backedge.  If it turns out that this port
+    // is never driven, an uninitialized wire will be materialized at the end.
+    if (port.isInput()) {
       operands.push_back(createBackedge(portResult, portType));
       continue;
     }
 
-    // If the result has an analog type and is used only by attach op,
-    // try eliminating a temporary wire by directly using an attached value.
+    // If the result has an analog type and is used only by attach op, try
+    // eliminating a temporary wire by directly using an attached value.
     if (isa<AnalogType>(portResult.getType()) && portResult.hasOneUse()) {
       if (auto attach = dyn_cast<AttachOp>(*portResult.getUsers().begin())) {
         if (auto source = getSingleNonInstanceOperand(attach)) {
@@ -3309,21 +3291,9 @@ LogicalResult FIRRTLLowering::visitDecl(InstanceOp oldInstance) {
       }
     }
 
-    // Directly materialize foreign types.
-    if (!isa<FIRRTLType>(port.type)) {
-      operands.push_back(createBackedge(portResult, portType));
-      continue;
-    }
-
-    // Create a wire for each input/inout operand, so there is
-    // something to connect to.
-    Value wire;
-    if (port.isInOut()) {
-      wire = createTmpWireOp(portType, "." + port.getName().str() + ".wire");
-    } else {
-      wire = createTmpHWWireOp(portType, "." + port.getName() + ".wire");
-    }
-
+    // Create a wire for each inout operand, so there is something to connect
+    // to.
+    auto wire = createTmpWireOp(portType, "." + port.getName().str() + ".wire");
     // Know that the argument FIRRTL value is equal to this wire, allowing
     // connects to it to be lowered.
     (void)setLowering(portResult, wire);
@@ -3945,14 +3915,81 @@ LogicalResult FIRRTLLowering::visitExpr(MuxPrimOp op) {
                                     true);
 }
 
-// Construct array indexing annotated with vendor pragmas to get
-// better synthesis results. Specifically we annotate pragmas in the following
-// form.
+LogicalResult FIRRTLLowering::visitExpr(Mux2CellIntrinsicOp op) {
+  auto cond = getLoweredValue(op.getSel());
+  auto ifTrue = getLoweredAndExtendedValue(op.getHigh(), op.getType());
+  auto ifFalse = getLoweredAndExtendedValue(op.getLow(), op.getType());
+  if (!cond || !ifTrue || !ifFalse)
+    return failure();
+
+  auto val = builder.create<comb::MuxOp>(ifTrue.getType(), cond, ifTrue,
+                                         ifFalse, true);
+  return setLowering(op, createValueWithMuxAnnotation(val, true));
+}
+
+LogicalResult FIRRTLLowering::visitExpr(Mux4CellIntrinsicOp op) {
+  auto sel = getLoweredValue(op.getSel());
+  auto v3 = getLoweredAndExtendedValue(op.getV3(), op.getType());
+  auto v2 = getLoweredAndExtendedValue(op.getV2(), op.getType());
+  auto v1 = getLoweredAndExtendedValue(op.getV1(), op.getType());
+  auto v0 = getLoweredAndExtendedValue(op.getV0(), op.getType());
+  if (!sel || !v3 || !v2 || !v1 || !v0)
+    return failure();
+  Value array[] = {v3, v2, v1, v0};
+  auto create = builder.create<hw::ArrayCreateOp>(array);
+  auto val = builder.create<hw::ArrayGetOp>(create, sel);
+  return setLowering(op, createValueWithMuxAnnotation(val, false));
+}
+
+// Construct a value with vendor specific pragmas to utilize MUX cells.
+// Specifically we annotate pragmas in the following form.
+//
+// For an array indexing:
 // ```
 //   wire GEN;
 //   /* synopsys infer_mux_override */
 //   assign GEN = array[index] /* cadence map_to_mux */;
 // ```
+//
+// For a mux:
+// ```
+//   wire GEN;
+//   /* synopsys infer_mux_override */
+//   assign GEN = sel ? /* cadence map_to_mux */ high : low;
+// ```
+Value FIRRTLLowering::createValueWithMuxAnnotation(Operation *op, bool isMux2) {
+  assert(op->getNumResults() == 1 && "only expect a single result");
+  auto val = op->getResult(0);
+  auto valWire = builder.create<sv::WireOp>(val.getType());
+  // Use SV attributes to annotate pragmas.
+  circt::sv::setSVAttributes(
+      op, sv::SVAttributeAttr::get(builder.getContext(), "cadence map_to_mux",
+                                   /*emitAsComment=*/true));
+
+  // For operands, create temporary wires with optimization blockers(inner
+  // symbols) so that the AST structure will never be destoyed in the later
+  // pipeline.
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPoint(op);
+    StringRef namehint = isMux2 ? "mux2cell_in" : "mux4cell_in";
+    for (auto [idx, operand] : llvm::enumerate(op->getOperands())) {
+      auto sym = moduleNamespace.newName(Twine("__") + theModule.getName() +
+                                         Twine("__MUX__PRAGMA"));
+      auto wire =
+          builder.create<hw::WireOp>(operand, namehint + Twine(idx), sym);
+      op->setOperand(idx, wire);
+    }
+  }
+
+  auto assignOp = builder.create<sv::AssignOp>(valWire, val);
+  sv::setSVAttributes(assignOp,
+                      sv::SVAttributeAttr::get(builder.getContext(),
+                                               "synopsys infer_mux_override",
+                                               /*emitAsComment=*/true));
+  return builder.create<sv::ReadInOutOp>(valWire);
+}
+
 Value FIRRTLLowering::createArrayIndexing(Value array, Value index) {
 
   auto size = hw::type_cast<hw::ArrayType>(array.getType()).getSize();
@@ -3969,29 +4006,7 @@ Value FIRRTLLowering::createArrayIndexing(Value array, Value index) {
     array = builder.create<hw::ArrayConcatOp>(temp2);
   }
 
-  Value inBoundsRead;
-  // If `addMuxPragmas` is enabled, add mux pragmas to array reads.
-  // Don't annotate mux pragmas if the array size is 1 since it causes a
-  // complication failure.
-  if (!circuitState.addMuxPragmas || size <= 1) {
-    inBoundsRead = builder.create<hw::ArrayGetOp>(array, index);
-  } else {
-    auto arrayGet = builder.create<hw::ArrayGetOp>(array, index);
-    auto valWire = builder.create<sv::WireOp>(
-        hw::type_cast<hw::ArrayType>(array.getType()).getElementType());
-    // Use SV attributes to annotate pragmas.
-    circt::sv::setSVAttributes(
-        arrayGet,
-        sv::SVAttributeAttr::get(builder.getContext(), "cadence map_to_mux",
-                                 /*emitAsComment=*/true));
-
-    auto assignOp = builder.create<sv::AssignOp>(valWire, arrayGet);
-    sv::setSVAttributes(assignOp,
-                        sv::SVAttributeAttr::get(builder.getContext(),
-                                                 "synopsys infer_mux_override",
-                                                 /*emitAsComment=*/true));
-    inBoundsRead = builder.create<sv::ReadInOutOp>(valWire);
-  }
+  Value inBoundsRead = builder.create<hw::ArrayGetOp>(array, index);
 
   return inBoundsRead;
 }
@@ -4093,6 +4108,11 @@ LogicalResult FIRRTLLowering::visitStmt(ConnectOp op) {
   if (failed(result))
     return failure();
   if (*result)
+    return success();
+
+  // If this connect is driving a value that is currently a backedge, record
+  // that the source is the value of the backedge.
+  if (updateIfBackedge(destVal, srcVal))
     return success();
 
   if (!destVal.getType().isa<hw::InOutType>())

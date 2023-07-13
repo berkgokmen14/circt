@@ -1264,16 +1264,13 @@ LogicalResult InferenceMapping::map(CircuitOp op) {
              << "\n===----- Mapping ops to constraint exprs -----===\n\n");
 
   // Ensure we have constraint variables established for all module ports.
-  op.walk<WalkOrder::PostOrder>([&](FModuleOp module) {
+  for (auto module : op.getOps<FModuleOp>())
     for (auto arg : module.getArguments()) {
       solver.setCurrentContextInfo(FieldRef(arg, 0));
       declareVars(arg, module.getLoc());
     }
-    return WalkResult::skip(); // no need to look inside the module
-  });
 
-  // Go through the module bodies and populate the constraint problem.
-  auto result = op.walk<WalkOrder::PostOrder>([&](FModuleOp module) {
+  for (auto module : op.getOps<FModuleOp>()) {
     // Check if the module contains *any* uninferred widths. This allows us to
     // do an early skip if the module is already fully inferred.
     bool anyUninferred = false;
@@ -1289,12 +1286,14 @@ LogicalResult InferenceMapping::map(CircuitOp op) {
         return WalkResult::interrupt();
       return WalkResult::advance();
     });
+
     if (!anyUninferred) {
       LLVM_DEBUG(llvm::dbgs() << "Skipping fully-inferred module '"
                               << module.getName() << "'\n");
       skippedModules.insert(module);
-      return WalkResult::skip();
+      continue;
     }
+
     allModulesSkipped = false;
 
     // Go through operations in the module, creating type variables for results,
@@ -1302,10 +1301,10 @@ LogicalResult InferenceMapping::map(CircuitOp op) {
     auto result = module.getBodyBlock()->walk(
         [&](Operation *op) { return WalkResult(mapOperation(op)); });
     if (result.wasInterrupted())
-      return WalkResult::interrupt();
-    return WalkResult::skip(); // walk above already visited module body
-  });
-  return failure(result.wasInterrupted());
+      return failure();
+  }
+
+  return success();
 }
 
 LogicalResult InferenceMapping::mapOperation(Operation *op) {
@@ -1329,7 +1328,7 @@ LogicalResult InferenceMapping::mapOperation(Operation *op) {
     else
       allWidthsKnown = false;
   }
-  if (allWidthsKnown && !isa<FConnectLike, AttachOp, UninferredWidthCastOp>(op))
+  if (allWidthsKnown && !isa<FConnectLike, AttachOp>(op))
     return success();
 
   // Actually generate the necessary constraint expressions.
@@ -1552,12 +1551,8 @@ LogicalResult InferenceMapping::mapOperation(Operation *op) {
         maximumOfTypes(op.getResult(), op.getResult(), op.getV1());
         maximumOfTypes(op.getResult(), op.getResult(), op.getV0());
       })
-      .Case<UninferredWidthCastOp>([&](auto op) {
-        if (hasUninferredWidth(op.getResult().getType()))
-          declareVars(op.getResult(), op.getLoc());
-        constrainTypes(op.getResult(), op.getInput());
-      })
-      .Case<ConnectOp>(
+
+      .Case<ConnectOp, StrictConnectOp>(
           [&](auto op) { constrainTypes(op.getDest(), op.getSrc()); })
       .Case<RefDefineOp>([&](auto op) {
         // Dest >= Src, but also check Src <= Dest for correctness
@@ -2073,39 +2068,6 @@ FailureOr<bool> InferenceTypeUpdate::updateOperation(Operation *op) {
       LLVM_DEBUG(llvm::dbgs()
                  << "Truncating RHS to " << lhsType << " in " << con << "\n");
       con->replaceUsesOfWith(con.getSrc(), trunc);
-    }
-    return anyChanged;
-  }
-
-  if (auto cast = dyn_cast<UninferredWidthCastOp>(op)) {
-    auto lhs = cast.getResult();
-    auto rhs = cast.getInput();
-    auto lhsType = dyn_cast<FIRRTLBaseType>(lhs.getType());
-    auto rhsType = dyn_cast<FIRRTLBaseType>(rhs.getType());
-
-    auto lhsWidth = lhsType.getBitWidthOrSentinel();
-    auto rhsWidth = rhsType.getBitWidthOrSentinel();
-    if (lhsWidth < rhsWidth) {
-      OpBuilder builder(op);
-      auto trunc = builder.createOrFold<TailPrimOp>(cast.getLoc(), rhs,
-                                                    rhsWidth - lhsWidth);
-      if (isa<SIntType>(rhsType))
-        trunc =
-            builder.createOrFold<AsSIntPrimOp>(cast.getLoc(), lhsType, trunc);
-
-      LLVM_DEBUG(llvm::dbgs()
-                 << "Truncating RHS to " << lhsType << " in " << cast << "\n");
-      lhs.replaceAllUsesWith(trunc);
-    } else if (lhsWidth > rhsWidth) {
-      OpBuilder builder(op);
-      auto extend =
-          builder.createOrFold<PadPrimOp>(cast.getLoc(), rhs, lhsWidth);
-      LLVM_DEBUG(llvm::dbgs()
-                 << "Extending RHS to " << lhsType << " in " << cast << "\n");
-      lhs.replaceAllUsesWith(extend);
-    } else {
-      LLVM_DEBUG(llvm::dbgs() << "NOOP " << cast << "\n");
-      lhs.replaceAllUsesWith(rhs);
     }
     return anyChanged;
   }

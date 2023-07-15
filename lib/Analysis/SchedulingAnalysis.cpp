@@ -14,6 +14,7 @@
 #include "circt/Analysis/DependenceAnalysis.h"
 #include "circt/Dialect/LoopSchedule/LoopScheduleOps.h"
 #include "circt/Scheduling/Problems.h"
+#include "mlir/Dialect/Affine/Analysis/AffineAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -21,6 +22,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/AnalysisManager.h"
+#include "mlir/Support/LogicalResult.h"
 #include <limits>
 
 using namespace mlir;
@@ -203,19 +205,38 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeForOp(
     }
   });
 
+  DenseMap<Operation *, SmallVector<LoopInterface>> memOps;
   forOp.getLoopBody().walk([&](Operation *op) {
-    if (!isa<scf::WhileOp>(op))
-      return WalkResult::advance();
+    for (auto &region : op->getRegions()) {
+      for (auto loop : region.getOps<LoopInterface>()) {
+        loop.getBodyBlock()->walk([&](Operation *op) {
+          if (isa<AffineLoadOp>(op) || isa<AffineStoreOp>(op) ||
+              isa<memref::LoadOp>(op) || isa<memref::StoreOp>(op)) {
+            memOps[op].push_back(loop);
+          }
+        });
+      }
+    }
+  });
 
-    auto innerWhileOp = dyn_cast<scf::WhileOp>(op);
-    auto term = innerWhileOp.getConditionOp();
-    innerWhileOp.getAfter().walk([&](Operation *op) {
-      Problem::Dependence depCond(term, op);
-      auto depInserted = problem.insertDependence(depCond);
-      assert(succeeded(depInserted));
-    });
+  forOp.getLoopBody().walk([&](LoopInterface loop) {
+    for (auto it : memOps) {
+      auto *memOp = it.getFirst();
+      auto dependences = memoryAnalysis.getDependences(memOp);
+      for (const MemoryDependence &memoryDep : dependences) {
+        if (!hasDependence(memoryDep.dependenceType))
+          continue;
+        
+        for (auto otherLoop : memOps[memoryDep.source]) {
+          if (loop == otherLoop || !loop->isAncestor(otherLoop))
+            continue;
 
-    return WalkResult::advance();
+          Problem::Dependence dep(loop, otherLoop);
+          auto depInserted = problem.insertDependence(dep);
+          assert(succeeded(depInserted));
+        }
+      }
+    }
   });
 
   // Insert conditional dependences into the problem.
@@ -298,7 +319,6 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
       // Don't insert a dependence into the problem if there is no dependence.
       if (!hasDependence(memoryDep.dependenceType))
         continue;
-
       // Insert a dependence into the problem.
       Problem::Dependence dep(memoryDep.source, op);
       auto depInserted = problem.insertDependence(dep);
@@ -307,20 +327,33 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
     }
   });
 
-  // whileOp.getAfter().walk([&](Operation *op) {
-  //   if (!isa<scf::WhileOp>(op))
-  //     return WalkResult::advance();
+  DenseMap<Operation *, SmallVector<LoopInterface>> memOps;
+  funcOp.getBody().walk([&](LoopInterface loop) {
+    loop.getBodyBlock()->walk([&](Operation *op) {
+      if (isa<AffineLoadOp>(op) || isa<AffineStoreOp>(op) ||
+          isa<memref::LoadOp>(op) || isa<memref::StoreOp>(op)) {
+        memOps[op].push_back(loop);
+      }
+    });
+  });
 
-  //   auto innerWhileOp = dyn_cast<scf::WhileOp>(op);
-  //   auto term = innerWhileOp.getConditionOp();
-  //   innerWhileOp.getAfter().walk([&](Operation *op) {
-  //     Problem::Dependence depCond(term, op);
-  //     auto depInserted = problem.insertDependence(depCond);
-  //     assert(succeeded(depInserted));
-  //   });
-
-  //   return WalkResult::advance();
-  // });
+  funcOp.getBody().walk([&](LoopInterface loop) {
+    for (auto it : memOps) {
+      auto *memOp = it.getFirst();
+      auto dependences = memoryAnalysis.getDependences(memOp);
+      for (const MemoryDependence &memoryDep : dependences) {
+        if (!hasDependence(memoryDep.dependenceType))
+          continue;
+        for (auto otherLoop : memOps[memoryDep.source]) {
+          if (loop == otherLoop || !loop->isAncestor(otherLoop))
+            continue;
+          Problem::Dependence dep(loop, otherLoop);
+          auto depInserted = problem.insertDependence(dep);
+          assert(succeeded(depInserted));
+        }
+      }
+    }
+  });
 
   // Insert conditional dependences into the problem.
   funcOp.getBody().walk([&](Operation *op) {

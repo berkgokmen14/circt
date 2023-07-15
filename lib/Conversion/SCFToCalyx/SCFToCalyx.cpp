@@ -80,7 +80,7 @@ struct WhileSchedulable {
   ScfWhileOp whileOp;
   /// The group(s) to schedule before the while operation These groups should
   /// set the initial value(s) of the loop init_args register(s).
-  SmallVector<calyx::GroupOp> initGroups;
+  SmallVector<calyx::GroupInterface> initGroups;
 };
 
 /// A variant of types representing schedulable operations.
@@ -118,7 +118,7 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
           TypeSwitch<mlir::Operation *, bool>(_op)
               .template Case<arith::ConstantOp, ReturnOp, BranchOpInterface,
                              /// SCF
-                             scf::YieldOp,
+                             scf::YieldOp, scf::WhileOp,
                              /// memref
                              memref::AllocOp, memref::AllocaOp, memref::LoadOp,
                              memref::StoreOp,
@@ -128,7 +128,7 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
                              MulIOp, DivUIOp, DivSIOp, RemUIOp, RemSIOp,
                              IndexCastOp>(
                   [&](auto op) { return buildOp(rewriter, op).succeeded(); })
-              .template Case<scf::WhileOp, FuncOp, scf::ConditionOp>([&](auto) {
+              .template Case<FuncOp, scf::ConditionOp>([&](auto) {
                 /// Skip: these special cases will be handled separately.
                 return true;
               })
@@ -174,6 +174,7 @@ private:
   LogicalResult buildOp(PatternRewriter &rewriter, memref::AllocaOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, memref::LoadOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, memref::StoreOp op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter, scf::WhileOp whileOp) const;
 
   /// buildLibraryOp will build a TCalyxLibOp inside a TGroupOp based on the
   /// source operation TSrcOp.
@@ -663,6 +664,21 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   return res;
 }
 
+LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                                     scf::WhileOp whileOp) const {
+  // Only need to add the whileOp to the BlockSchedulables scheduler interface.
+  // Everything else was handled in the `BuildWhileGroups` pattern.
+  ScfWhileOp scfWhileOp(whileOp);
+  SmallVector<calyx::GroupInterface> initWhileGroups =
+      getState<ComponentLoweringState>().getLoopInitGroups(scfWhileOp);
+  getState<ComponentLoweringState>().addBlockSchedulable(
+      whileOp.getOperation()->getBlock(), WhileSchedulable{
+                                              scfWhileOp,
+                                              initWhileGroups,
+                                          });
+  return success();
+}
+
 /// Inlines Calyx ExecuteRegionOp operations within their parent blocks.
 /// An execution region op (ERO) is inlined by:
 ///  i  : add a sink basic block for all yield operations inside the
@@ -900,7 +916,6 @@ class BuildWhileGroups : public calyx::FuncOpPartialLoweringPattern {
       }
 
       /// Create iter args initial value assignment group(s), one per register.
-      SmallVector<calyx::GroupOp> initGroups;
       auto numOperands = whileOp.getOperation()->getNumOperands();
       for (size_t i = 0; i < numOperands; ++i) {
         auto initGroupOp =
@@ -911,14 +926,14 @@ class BuildWhileGroups : public calyx::FuncOpPartialLoweringPattern {
                     whileOp.getOperation()) +
                     "_init_" + std::to_string(i),
                 whileOp.getOperation()->getOpOperand(i));
-        initGroups.push_back(initGroupOp);
+        getState<ComponentLoweringState>().addLoopInitGroup(whileOp, initGroupOp);
       }
 
       getState<ComponentLoweringState>().addBlockSchedulable(
           whileOp.getOperation()->getBlock(), WhileSchedulable{
                                                   whileOp,
-                                                  initGroups,
                                               });
+
       return WalkResult::advance();
     });
     return res;
@@ -1083,7 +1098,7 @@ private:
   }
 
   calyx::WhileOp buildWhileCtrlOp(ScfWhileOp whileOp,
-                                  SmallVector<calyx::GroupOp> initGroups,
+                                  SmallVector<calyx::GroupInterface> initGroups,
                                   PatternRewriter &rewriter) const {
     Location loc = whileOp.getLoc();
     /// Insert while iter arg initialization group(s). Emit a
@@ -1092,8 +1107,8 @@ private:
       PatternRewriter::InsertionGuard g(rewriter);
       auto parOp = rewriter.create<calyx::ParOp>(loc);
       rewriter.setInsertionPointToStart(parOp.getBodyBlock());
-      for (calyx::GroupOp group : initGroups)
-        rewriter.create<calyx::EnableOp>(group.getLoc(), group.getName());
+      for (calyx::GroupInterface group : initGroups)
+        rewriter.create<calyx::EnableOp>(group.getLoc(), group.symName());
     }
 
     /// Insert the while op itself.

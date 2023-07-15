@@ -39,6 +39,7 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
+#include <memory>
 
 using namespace circt;
 using namespace firrtl;
@@ -2581,8 +2582,8 @@ ParseResult FIRStmtParser::parseWhen(unsigned whenIndent) {
   // This is a function to parse a suite body.
   auto parseSuite = [&](Block &blockToInsertInto) -> ParseResult {
     // Declarations within the suite are scoped to within the suite.
-    FIRModuleContext::ContextScope suiteScope(moduleContext,
-                                              &blockToInsertInto);
+    auto suiteScope = std::make_unique<FIRModuleContext::ContextScope>(
+        moduleContext, &blockToInsertInto);
 
     // After parsing the when region, we can release any new entries in
     // unbundledValues since the symbol table entries that refer to them will be
@@ -2591,22 +2592,22 @@ ParseResult FIRStmtParser::parseWhen(unsigned whenIndent) {
 
     // We parse the substatements into their own parser, so they get inserted
     // into the specified 'when' region.
-    FIRStmtParser subParser(blockToInsertInto, moduleContext, modNameSpace,
-                            version);
+    auto subParser = std::make_unique<FIRStmtParser>(
+        blockToInsertInto, moduleContext, modNameSpace, version);
 
     // Figure out whether the body is a single statement or a nested one.
     auto stmtIndent = getIndentation();
 
     // Parsing a single statment is straightforward.
     if (!stmtIndent.has_value())
-      return subParser.parseSimpleStmt(whenIndent);
+      return subParser->parseSimpleStmt(whenIndent);
 
     if (*stmtIndent <= whenIndent)
       return emitError("statement must be indented more than 'when'"),
              failure();
 
     // Parse a block of statements that are indented more than the when.
-    return subParser.parseSimpleStmtBlock(whenIndent);
+    return subParser->parseSimpleStmtBlock(whenIndent);
   };
 
   // Parse the 'then' body into the 'then' region.
@@ -2634,9 +2635,10 @@ ParseResult FIRStmtParser::parseWhen(unsigned whenIndent) {
   // the outer 'when'.
   if (getToken().is(FIRToken::kw_when)) {
     // We create a sub parser for the else block.
-    FIRStmtParser subParser(whenStmt.getElseBlock(), moduleContext,
-                            modNameSpace, version);
-    return subParser.parseSimpleStmt(whenIndent);
+    auto subParser = std::make_unique<FIRStmtParser>(
+        whenStmt.getElseBlock(), moduleContext, modNameSpace, version);
+
+    return subParser->parseSimpleStmt(whenIndent);
   }
 
   // Parse the 'else' body into the 'else' region.
@@ -2771,8 +2773,9 @@ ParseResult FIRStmtParser::parseMatch(unsigned matchIndent) {
       return failure();
 
     // Parse a block of statements that are indented more than the case.
-    FIRStmtParser subParser(*caseBlock, moduleContext, modNameSpace, version);
-    if (subParser.parseSimpleStmtBlock(*caseIndent))
+    auto subParser = std::make_unique<FIRStmtParser>(*caseBlock, moduleContext,
+                                                     modNameSpace, version);
+    if (subParser->parseSimpleStmtBlock(*caseIndent))
       return failure();
   }
 
@@ -2942,29 +2945,30 @@ ParseResult FIRStmtParser::parseRWProbe(Value &result) {
            << staticRef.getType();
 
   // Check for other unsupported reference sources.
-  if (getFieldRefFromValue(staticRef).getValue() != staticRef)
-    return emitError(startTok.getLoc(),
-                     "cannot rwprobe elements of an aggregate");
+  auto fieldRef = getFieldRefFromValue(staticRef);
+  auto target = fieldRef.getValue();
 
   // TODO: Support for non-public ports.
-  if (isa<BlockArgument>(staticRef))
+  if (isa<BlockArgument>(target))
     return emitError(startTok.getLoc(), "rwprobe of port not yet supported");
 
-  if (isa_and_nonnull<MemOp, CombMemOp, SeqMemOp, MemoryPortOp,
-                      MemoryDebugPortOp, MemoryPortAccessOp>(
-          staticRef.getDefiningOp()))
-    return emitError(startTok.getLoc(), "cannot probe memories or their ports");
-
-  auto *op = staticRef.getDefiningOp();
-  if (!op)
+  auto *definingOp = target.getDefiningOp();
+  if (!definingOp)
     return emitError(startTok.getLoc(),
                      "rwprobe value must be defined by an operation");
-  auto forceable = dyn_cast<Forceable>(op);
+
+  if (isa<MemOp, CombMemOp, SeqMemOp, MemoryPortOp, MemoryDebugPortOp,
+          MemoryPortAccessOp>(definingOp))
+    return emitError(startTok.getLoc(), "cannot probe memories or their ports");
+
+  auto forceable = dyn_cast<Forceable>(definingOp);
   if (!forceable || !forceable.isForceable() /* e.g., is/has const type*/)
     return emitError(startTok.getLoc(), "rwprobe target not forceable")
-        .attachNote(op->getLoc());
+        .attachNote(definingOp->getLoc());
 
-  result = forceable.getDataRef();
+  // TODO: do the ref.sub work while parsing the static expression.
+  result =
+      getValueByFieldID(builder, forceable.getDataRef(), fieldRef.getFieldID());
 
   return success();
 }

@@ -76,9 +76,11 @@ private:
   LogicalResult solveSharedOperatorsProblem(Region &region,
                                             SharedOperatorsProblem &problem);
   LogicalResult createLoopSchedulePipeline(AffineForOp &loop,
-                                           ModuloProblem &problem);
+                                           ModuloProblem &problem,
+                                           MemoryDependenceAnalysis &memAnalysis);
   LogicalResult createLoopScheduleSequential(AffineForOp &loop,
-                                             SharedOperatorsProblem &problem);
+                                             SharedOperatorsProblem &problem,
+                                             MemoryDependenceAnalysis &memAnalysis);
   LogicalResult createFuncLoopSchedule(FuncOp &funcOp,
                                        SharedOperatorsProblem &problem);
 };
@@ -161,9 +163,36 @@ void AffineToLoopSchedule::runOnOperation() {
   // Get dependence analysis for the whole function.
   auto dependenceAnalysis = getAnalysis<MemoryDependenceAnalysis>();
 
+  getOperation().walk([&](Operation *op) {
+      ArrayRef<MemoryDependence> dependences =
+          dependenceAnalysis.getDependences(op);
+      if (dependences.empty())
+        return;
+      llvm::errs() << "dep: ";
+      op->dump();
+      for (auto &dep : dependences) {
+        dep.source->dump();
+        llvm::errs() << (dep.dependenceType == DependenceResult::HasDependence) << "\n";
+      }
+  });
+
+  llvm::errs() << "before affine lowering\n";
   // After dependence analysis, materialize affine structures.
   if (failed(lowerAffineStructures(dependenceAnalysis)))
     return signalPassFailure();
+  llvm::errs() << "after affine lowering\n";
+
+  getOperation().walk([&](Operation *op) {
+      ArrayRef<MemoryDependence> dependences =
+          dependenceAnalysis.getDependences(op);
+      if (dependences.empty())
+        return;
+      // llvm::errs() << "dep: ";
+      // op->dump();
+      // for (auto &dep : dependences) {
+      //   dep.source->dump();
+      // }
+  });
 
   // Get scheduling analysis for the whole function.
   auto *schedulingAnalysis = &getAnalysis<CyclicSchedulingAnalysis>();
@@ -185,8 +214,6 @@ void AffineToLoopSchedule::runOnOperation() {
         // Don't insert a dependence into the problem if there is no dependence.
         if (!hasDependence(memoryDep.dependenceType))
           continue;
-
-        // memoryDep.source->dump();
 
         // Insert a dependence into the problem.
         Problem::Dependence dep(memoryDep.source, op);
@@ -212,7 +239,7 @@ void AffineToLoopSchedule::runOnOperation() {
       return signalPassFailure();
 
     // Convert the IR.
-    if (failed(createLoopSchedulePipeline(loop, moduloProblem)))
+    if (failed(createLoopSchedulePipeline(loop, moduloProblem, dependenceAnalysis)))
       return signalPassFailure();
   }
 
@@ -235,6 +262,34 @@ void AffineToLoopSchedule::runOnOperation() {
   for (auto loop : seqLoops) {
     // loop.dump();
     auto problem = seqSchedulingAnalysis->getProblem(loop);
+
+    DenseMap<Operation *, SmallVector<LoopInterface>> memOps;
+    loop.getLoopBody().walk([&](LoopInterface loop) {
+      loop.getBodyBlock()->walk([&](Operation *op) {
+        if (isa<AffineLoadOp>(op) || isa<AffineStoreOp>(op) ||
+            isa<memref::LoadOp>(op) || isa<memref::StoreOp>(op)) {
+          memOps[op].push_back(loop);
+        }
+      });
+    });
+
+    loop.getLoopBody().walk([&](LoopInterface loop) {
+      for (auto it : memOps) {
+        auto *memOp = it.getFirst();
+        auto dependences = dependenceAnalysis.getDependences(memOp);
+        for (const MemoryDependence &memoryDep : dependences) {
+          if (!hasDependence(memoryDep.dependenceType))
+            continue;
+          for (auto otherLoop : memOps[memoryDep.source]) {
+            if (loop == otherLoop || !loop->isAncestor(otherLoop))
+              continue;
+            Problem::Dependence dep(loop, otherLoop);
+            auto depInserted = problem.insertDependence(dep);
+            assert(succeeded(depInserted));
+          }
+        }
+      }
+    });
     // Populate the target operator types.
     if (failed(populateOperatorTypes(loop.getOperation(), loop.getLoopBody(), problem)))
       return signalPassFailure();
@@ -244,13 +299,46 @@ void AffineToLoopSchedule::runOnOperation() {
       return signalPassFailure();
 
     // Convert the IR.
-    if (failed(createLoopScheduleSequential(loop, problem)))
+    if (failed(createLoopScheduleSequential(loop, problem, dependenceAnalysis)))
       return signalPassFailure();
   }
 
   // Schedule whole function
   auto funcOp = cast<FuncOp>(getOperation());
+  // funcOp->dump();
   auto problem = seqSchedulingAnalysis->getProblem(funcOp);
+  DenseMap<Operation *, SmallVector<LoopInterface>> memOps;
+  funcOp.getBody().walk([&](LoopInterface loop) {
+    loop.getBodyBlock()->walk([&](Operation *op) {
+      if (isa<AffineLoadOp>(op) || isa<AffineStoreOp>(op) ||
+          isa<memref::LoadOp>(op) || isa<memref::StoreOp>(op)) {
+        memOps[op].push_back(loop);
+      }
+    });
+  });
+
+  funcOp.getBody().walk([&](LoopInterface loop) {
+    for (auto it : memOps) {
+      auto *memOp = it.getFirst();
+      // memOp->dump();
+      // llvm::errs() << "here1\n";
+      auto dependences = dependenceAnalysis.getDependences(memOp);
+      // llvm::errs() << dependences.size() << "\n";
+      for (const MemoryDependence &memoryDep : dependences) {
+        // memoryDep.source->dump();
+        if (!hasDependence(memoryDep.dependenceType))
+          continue;
+        llvm::errs() << "here\n";
+        for (auto otherLoop : memOps[memoryDep.source]) {
+          if (loop == otherLoop || !loop->isAncestor(otherLoop))
+            continue;
+          Problem::Dependence dep(loop, otherLoop);
+          auto depInserted = problem.insertDependence(dep);
+          assert(succeeded(depInserted));
+        }
+      }
+    }
+  });
 
   // Populate the target operator types.
   if (failed(populateOperatorTypes(funcOp.getOperation(), funcOp.getBody(), problem)))
@@ -531,8 +619,15 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op,
   problem.setLatency(combOpr, 0);
   Problem::OperatorType seqOpr = problem.getOrInsertOperatorType("seq");
   problem.setLatency(seqOpr, 1);
+  Problem::OperatorType loopOpr = problem.getOrInsertOperatorType("loop");
+  problem.setLatency(loopOpr, 1);
+  // problem.setLimit(loopOpr, 1);
   Problem::OperatorType mcOpr = problem.getOrInsertOperatorType("multicycle");
   problem.setLatency(mcOpr, 4);
+  Problem::OperatorType testOpr = problem.getOrInsertOperatorType("test");
+  problem.setLatency(testOpr, 1);
+  problem.setLimit(testOpr, 1);
+
 
   Operation *unsupported;
   WalkResult result = loopBody.walk([&](Operation *op) {
@@ -548,10 +643,34 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op,
           problem.setLinkedOperatorType(combOp, combOpr);
           return WalkResult::advance();
         })
-        .Case<AddIOp, CmpIOp, LoopScheduleSequentialOp, LoopSchedulePipelineOp>([&](Operation *seqOp) {
+        .Case<AddIOp, CmpIOp>([&](Operation *seqOp) {
           // These ops need to be sequential for now because we do not
           // have enough information to chain them together yet.
           problem.setLinkedOperatorType(seqOp, seqOpr);
+          return WalkResult::advance();
+        })
+        .Case<LoopInterface>([&](Operation *loopOp) {
+          // These ops need to be sequential for now because we do not
+          // have enough information to chain them together yet.
+          problem.setLinkedOperatorType(loopOp, loopOpr);
+          auto loop = cast<LoopInterface>(loopOp);
+          loop.getBodyBlock()->walk([&](Operation *op) {
+            if (!(isa<AffineLoadOp, AffineStoreOp, 
+                  memref::LoadOp, memref::StoreOp>(op)))
+              return;
+            Value memRef = isa<AffineStoreOp>(*op)
+                               ? cast<AffineStoreOp>(*op).getMemRef()
+                               : isa<AffineLoadOp>(*op)
+                               ? cast<AffineLoadOp>(*op).getMemRef()
+                               : isa<memref::StoreOp>(*op)
+                               ? cast<memref::StoreOp>(*op).getMemRef()
+                               : cast<memref::LoadOp>(*op).getMemRef();
+            Problem::OperatorType memOpr = problem.getOrInsertOperatorType(
+                "mem_" + std::to_string(hash_value(memRef)));
+            problem.setLatency(memOpr, 1);
+            problem.setLimit(memOpr, 2);
+            problem.addExtraLimitingType(loopOp, memOpr);
+          });
           return WalkResult::advance();
         })
         .Case<AffineStoreOp, memref::StoreOp>([&](Operation *memOp) {
@@ -687,7 +806,8 @@ AffineToLoopSchedule::solveSharedOperatorsProblem(Region &region,
 /// Create the pipeline op for a loop nest.
 LogicalResult
 AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
-                                         ModuloProblem &problem) {
+                                         ModuloProblem &problem,
+                                         MemoryDependenceAnalysis &memAnalysis) {
   ImplicitLocOpBuilder builder(loop.getLoc(), loop);
 
   // Create Values for the loop's lower and upper bounds.
@@ -867,6 +987,9 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
 
     for (auto *op : group) {
       auto *newOp = builder.clone(*op, stageValueMaps[startTime]);
+      // op->dump();
+      // llvm::errs() << memAnalysis.getDependences(op).size() << "\n";
+      memAnalysis.replaceOp(op, newOp);
 
       // All further uses in this stage should used the cloned-version of values
       // So we update the mapping in this stage
@@ -989,7 +1112,9 @@ bool isUsedOutsideOfRegion(Value val, Block *block) {
 }
 
 /// Create the stg ops for a loop nest.
-LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &loop, SharedOperatorsProblem &problem) {
+LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &loop, 
+                                                    SharedOperatorsProblem &problem,
+                                                    MemoryDependenceAnalysis &memAnalysis) {
   ImplicitLocOpBuilder builder(loop.getLoc(), loop);
 
   // Create Values for the loop's lower and upper bounds.
@@ -1154,6 +1279,7 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
     for (auto *op : group) {
       unsigned resultIndex = stepTerminator->getNumOperands();
       auto *newOp = builder.clone(*op, valueMap);
+      // memAnalysis.replaceOp(op, newOp);
       if (opsWithReturns.contains(op)) {
         stepTerminator->insertOperands(resultIndex, newOp->getResults());
         movedOps.emplace_back(op, newOp, resultIndex);
@@ -1290,11 +1416,17 @@ LogicalResult AffineToLoopSchedule::createFuncLoopSchedule(FuncOp &funcOp,
   // Add the non-yield operations to their start time groups.
   DenseMap<unsigned, SmallVector<Operation *>> startGroups;
   for (auto *op : problem.getOperations()) {
-    if (isa<AffineYieldOp, YieldOp, func::ReturnOp>(op))
+    if (isa<AffineYieldOp, YieldOp, func::ReturnOp, memref::AllocaOp, arith::ConstantOp>(op))
       continue;
     auto startTime = problem.getStartTime(op);
     startGroups[*startTime].push_back(op);
   }
+
+  // for (auto *op : problem.getOperations()) {
+  //   if (isa<memref::AllocaOp>(op)) {
+  //     op.
+  //   }
+  // }
 
   SmallVector<SmallVector<Operation *>> scheduleGroups;
   auto totalLatency = problem.getStartTime(anchor).value();
@@ -1308,7 +1440,8 @@ LogicalResult AffineToLoopSchedule::createFuncLoopSchedule(FuncOp &funcOp,
 
   // Create the stages.
   Block &funcBlock = funcOp.getBody().front();
-  builder.setInsertionPointToStart(&funcBlock);
+  auto *funcReturn = funcOp.getBody().back().getTerminator();
+  builder.setInsertionPoint(funcReturn);
 
   // Iterate in order of the start times.
   SmallVector<unsigned> startTimes;
@@ -1398,7 +1531,7 @@ LogicalResult AffineToLoopSchedule::createFuncLoopSchedule(FuncOp &funcOp,
   // Remove the loop nest from the IR.
   funcOp.getBody().walk<WalkOrder::PostOrder>([&](Operation *op) {
     if ((isa<LoopScheduleStepOp>(op) && isa<FuncOp>(op->getParentOp())) ||
-        inTopLevelStepOp(op) || isa<func::ReturnOp>(op))
+        inTopLevelStepOp(op) || isa<func::ReturnOp, memref::AllocaOp, arith::ConstantOp>(op))
       return;
     op->dropAllUses();
     op->dropAllDefinedValueUses();

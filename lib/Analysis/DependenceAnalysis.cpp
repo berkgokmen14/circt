@@ -159,16 +159,24 @@ circt::analysis::MemoryDependenceAnalysis::getDependences(Operation *op) {
 /// Replaces the dependences, if any, from the oldOp to the newOp.
 void circt::analysis::MemoryDependenceAnalysis::replaceOp(Operation *oldOp,
                                                           Operation *newOp) {
+  // llvm::errs() << "replace\n";
   // If oldOp had any dependences.
-  auto it = results.find(oldOp);
-  if (it != results.end())
-    // Move the dependences to newOp.
-    it->first = newOp;
+  auto deps = results.lookup(oldOp);
+  // llvm::errs() << "move dep\n";
+  // Move the dependences to newOp.
+  results[newOp] = deps;
+  results.erase(oldOp);
+
+  // auto test = results.find(newOp);
+  // if (test != results.end()) {
+  //   test->first->dump();
+  // }
 
   // Find any dependences originating from oldOp and make newOp the source.
   // TODO(mikeurbach): consider adding an inverted index to avoid this scan.
   for (auto &it : results)
     for (auto &dep : it.second)
-      if (dep.source == oldOp)
+      if (dep.source == oldOp) {
         dep.source = newOp;
+      }
 }

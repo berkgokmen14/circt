@@ -128,6 +128,23 @@ LogicalResult AffineToLoopSchedule::unrollSubLoops(AffineForOp &forOp) {
   return success();
 }
 
+Value getMemref(Operation *op) {
+  Value memref = isa<AffineStoreOp>(*op)
+                     ? cast<AffineStoreOp>(*op).getMemRef()
+                     : isa<AffineLoadOp>(*op)
+                     ? cast<AffineLoadOp>(*op).getMemRef()
+                     : isa<memref::StoreOp>(*op)
+                     ? cast<memref::StoreOp>(*op).getMemRef()
+                     : cast<memref::LoadOp>(*op).getMemRef();
+  return memref;
+}
+
+bool oneIsStore(Operation *op, Operation *otherOp) {
+  auto firstIsStore = isa<AffineStoreOp, memref::StoreOp>(*op);
+  auto secondIsStore = isa<AffineStoreOp, memref::StoreOp>(*otherOp);
+  return firstIsStore || secondIsStore;
+}
+
 void AffineToLoopSchedule::runOnOperation() {
   // Collect loops to pipeline and work on them.
   SmallVector<AffineForOp> loops;
@@ -163,36 +180,9 @@ void AffineToLoopSchedule::runOnOperation() {
   // Get dependence analysis for the whole function.
   auto dependenceAnalysis = getAnalysis<MemoryDependenceAnalysis>();
 
-  getOperation().walk([&](Operation *op) {
-      ArrayRef<MemoryDependence> dependences =
-          dependenceAnalysis.getDependences(op);
-      if (dependences.empty())
-        return;
-      llvm::errs() << "dep: ";
-      op->dump();
-      for (auto &dep : dependences) {
-        dep.source->dump();
-        llvm::errs() << (dep.dependenceType == DependenceResult::HasDependence) << "\n";
-      }
-  });
-
-  llvm::errs() << "before affine lowering\n";
   // After dependence analysis, materialize affine structures.
   if (failed(lowerAffineStructures(dependenceAnalysis)))
     return signalPassFailure();
-  llvm::errs() << "after affine lowering\n";
-
-  getOperation().walk([&](Operation *op) {
-      ArrayRef<MemoryDependence> dependences =
-          dependenceAnalysis.getDependences(op);
-      if (dependences.empty())
-        return;
-      // llvm::errs() << "dep: ";
-      // op->dump();
-      // for (auto &dep : dependences) {
-      //   dep.source->dump();
-      // }
-  });
 
   // Get scheduling analysis for the whole function.
   auto *schedulingAnalysis = &getAnalysis<CyclicSchedulingAnalysis>();
@@ -263,29 +253,31 @@ void AffineToLoopSchedule::runOnOperation() {
     // loop.dump();
     auto problem = seqSchedulingAnalysis->getProblem(loop);
 
-    DenseMap<Operation *, SmallVector<LoopInterface>> memOps;
+    DenseMap<LoopInterface, SmallVector<Operation *>> memOps;
     loop.getLoopBody().walk([&](LoopInterface loop) {
       loop.getBodyBlock()->walk([&](Operation *op) {
         if (isa<AffineLoadOp>(op) || isa<AffineStoreOp>(op) ||
             isa<memref::LoadOp>(op) || isa<memref::StoreOp>(op)) {
-          memOps[op].push_back(loop);
+          memOps[loop].push_back(op);
         }
       });
     });
 
     loop.getLoopBody().walk([&](LoopInterface loop) {
-      for (auto it : memOps) {
-        auto *memOp = it.getFirst();
-        auto dependences = dependenceAnalysis.getDependences(memOp);
-        for (const MemoryDependence &memoryDep : dependences) {
-          if (!hasDependence(memoryDep.dependenceType))
+      for (auto *memOp : memOps[loop]) {
+        auto memref = getMemref(memOp);
+        for (auto it : memOps) {
+          auto otherLoop = it.getFirst();
+          if (loop == otherLoop || !loop->isBeforeInBlock(otherLoop))
             continue;
-          for (auto otherLoop : memOps[memoryDep.source]) {
-            if (loop == otherLoop || !loop->isAncestor(otherLoop))
-              continue;
-            Problem::Dependence dep(loop, otherLoop);
-            auto depInserted = problem.insertDependence(dep);
-            assert(succeeded(depInserted));
+          for (auto *otherMemOp : memOps[otherLoop]) {
+            auto otherMemref = getMemref(otherMemOp);
+            if (memref == otherMemref && oneIsStore(memOp, otherMemOp)) {
+              Problem::Dependence dep(loop, otherLoop);
+              auto depInserted = problem.insertDependence(dep);
+              assert(succeeded(depInserted));
+              break;
+            }
           }
         }
       }
@@ -307,34 +299,31 @@ void AffineToLoopSchedule::runOnOperation() {
   auto funcOp = cast<FuncOp>(getOperation());
   // funcOp->dump();
   auto problem = seqSchedulingAnalysis->getProblem(funcOp);
-  DenseMap<Operation *, SmallVector<LoopInterface>> memOps;
+  DenseMap<LoopInterface, SmallVector<Operation *>> memOps;
   funcOp.getBody().walk([&](LoopInterface loop) {
     loop.getBodyBlock()->walk([&](Operation *op) {
       if (isa<AffineLoadOp>(op) || isa<AffineStoreOp>(op) ||
           isa<memref::LoadOp>(op) || isa<memref::StoreOp>(op)) {
-        memOps[op].push_back(loop);
+        memOps[loop].push_back(op);
       }
     });
   });
 
   funcOp.getBody().walk([&](LoopInterface loop) {
-    for (auto it : memOps) {
-      auto *memOp = it.getFirst();
-      // memOp->dump();
-      // llvm::errs() << "here1\n";
-      auto dependences = dependenceAnalysis.getDependences(memOp);
-      // llvm::errs() << dependences.size() << "\n";
-      for (const MemoryDependence &memoryDep : dependences) {
-        // memoryDep.source->dump();
-        if (!hasDependence(memoryDep.dependenceType))
+    for (auto *memOp : memOps[loop]) {
+      auto memref = getMemref(memOp);
+      for (auto it : memOps) {
+        auto otherLoop = it.getFirst();
+        if (loop == otherLoop || !loop->isBeforeInBlock(otherLoop))
           continue;
-        llvm::errs() << "here\n";
-        for (auto otherLoop : memOps[memoryDep.source]) {
-          if (loop == otherLoop || !loop->isAncestor(otherLoop))
-            continue;
-          Problem::Dependence dep(loop, otherLoop);
-          auto depInserted = problem.insertDependence(dep);
-          assert(succeeded(depInserted));
+        for (auto *otherMemOp : memOps[otherLoop]) {
+          auto otherMemref = getMemref(otherMemOp);
+          if (memref == otherMemref && oneIsStore(memOp, otherMemOp)) {
+            Problem::Dependence dep(loop, otherLoop);
+            auto depInserted = problem.insertDependence(dep);
+            assert(succeeded(depInserted));
+            break;
+          }
         }
       }
     }
@@ -621,12 +610,8 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op,
   problem.setLatency(seqOpr, 1);
   Problem::OperatorType loopOpr = problem.getOrInsertOperatorType("loop");
   problem.setLatency(loopOpr, 1);
-  // problem.setLimit(loopOpr, 1);
   Problem::OperatorType mcOpr = problem.getOrInsertOperatorType("multicycle");
   problem.setLatency(mcOpr, 4);
-  Problem::OperatorType testOpr = problem.getOrInsertOperatorType("test");
-  problem.setLatency(testOpr, 1);
-  problem.setLimit(testOpr, 1);
 
 
   Operation *unsupported;

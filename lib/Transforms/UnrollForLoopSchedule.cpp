@@ -44,6 +44,7 @@ private:
   DenseSet<AffineMapAccessInterface> updateMemoryOps(AffineForOp affineFor);
   uint64_t getMinDepDistance(AffineForOp affineFor);
   std::optional<uint64_t> consumePragma(AffineForOp affineFor);
+  unsigned getFuseIterations(AffineForOp &forOp);
   AffineForOp cloneIntoNewBlock(AffineForOp affineFor, IRMapping &irMapping,
                                 DenseSet<Operation *> &dontTouchSet);
   LogicalResult unrollForDataParallel(AffineForOp affineFor);
@@ -165,6 +166,17 @@ UnrollForLoopSchedule::consumePragma(AffineForOp affineFor) {
   return maxUnrollFactor;
 }
 
+unsigned UnrollForLoopSchedule::getFuseIterations(AffineForOp &forOp) {
+  SmallVector<AffineForOp> nesting({forOp});
+  while (isPerfectlyNested(nesting)) {
+    if (nesting.back().getOps<AffineForOp>().empty())
+      break;
+    nesting.push_back(*nesting.back().getOps<AffineForOp>().begin());
+  }
+  int fuseIterations = nesting.size() - 2;
+  return fuseIterations < 0 ? 0 : fuseIterations;
+}
+
 // Clone an affine loop into its own isolated block. Not all values in scope are
 // copied over
 AffineForOp
@@ -241,93 +253,101 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   if (loopUnrollUpToFactor(tmpFor, unrollFactor).failed())
     return failure();
 
-  // Since we isolated the unrolled loop in its own block we have isolated all
-  // the ops that can be trivially fused together
-  Block *blockToRead =
-      loopIsPromoted ? tmpBlk : &tmpFor.getLoopBody().getBlocks().front();
-  SmallVector<AffineForOp> innerLoops;
-  for (auto loop : blockToRead->getOps<AffineForOp>())
-    if (!dontTouchSet.contains(loop))
-      innerLoops.push_back(loop);
-
-  // Check if memory dependencies limit fusion, if so abandon our work
-  auto *tmpDependence = &getAnalysis<MemoryDependenceAnalysis>();
-  for (auto loopI : innerLoops)
-    for (auto memOp : updateMemoryOps(loopI))
-      for (const auto &dep : tmpDependence->getDependences(memOp))
-        for (auto comp : dep.dependenceComponents)
-          for (auto loopJ : innerLoops)
-            if (dep.dependenceType == DependenceResult::HasDependence &&
-                loopI != loopJ && loopJ->isAncestor(comp.op)) {
-              tmpBlk->erase();
-              return success();
-            }
-
-  // Now we do the merging/fusing of loops
-  auto destLoop = innerLoops.front();
-  auto &destBlk = destLoop.getRegion().getBlocks().back();
   OpBuilder builder(affineFor);
   IRRewriter rewriter(builder);
+  Block *blockToFuse =
+      loopIsPromoted ? tmpBlk : &tmpFor.getLoopBody().getBlocks().front();
+  AffineForOp *newAnchorOp = nullptr;
+  unsigned fuseIterations = getFuseIterations(affineFor);
+  for (unsigned i = 0; i < fuseIterations; ++i) {
+    // Since we isolated the unrolled loop in its own block we have isolated all
+    // the ops that can be trivially fused together
+    SmallVector<AffineForOp> innerLoops;
+    for (auto loop : blockToFuse->getOps<AffineForOp>())
+      if (!dontTouchSet.contains(loop))
+        innerLoops.push_back(loop);
 
-  // First save operations in order, because we will be mutating them
-  SmallVector<Operation *> operations;
-  for (auto &op : blockToRead->getOperations())
-    operations.push_back(&op);
+    // Check if memory dependencies limit fusion, if so abandon our work
+    auto *tmpDependence = &getAnalysis<MemoryDependenceAnalysis>();
+    for (auto loopI : innerLoops)
+      for (auto memOp : updateMemoryOps(loopI))
+        for (const auto &dep : tmpDependence->getDependences(memOp))
+          for (auto comp : dep.dependenceComponents)
+            for (auto loopJ : innerLoops)
+              if (dep.dependenceType == DependenceResult::HasDependence &&
+                  loopI != loopJ && loopJ->isAncestor(comp.op)) {
+                tmpBlk->erase();
+                return success();
+              }
 
-  // Keep a running list of values that the loop body depends on, because
-  // they will need to be moved inorder to dominate the relocation of the
-  // loop body
-  SmallVector<Operation *> operationsToMove;
-  for (auto *op : operations) {
-    if (!isa<AffineForOp>(*op) || dontTouchSet.contains(op)) {
-      operationsToMove.push_back(op);
-      continue;
-    }
+    // Now we do the merging/fusing of loops
+    auto destLoop = innerLoops.front();
+    auto &destBlk = destLoop.getRegion().getBlocks().back();
 
-    auto srcLoop = cast<AffineForOp>(*op);
-    if (srcLoop == destLoop) {
+    // First save operations in order, because we will be mutating them
+    SmallVector<Operation *> operations;
+    for (auto &op : blockToFuse->getOperations())
+      operations.push_back(&op);
+
+    // Keep a running list of values that the loop body depends on, because
+    // they will need to be moved inorder to dominate the relocation of the
+    // loop body
+    SmallVector<Operation *> operationsToMove;
+    for (auto *op : operations) {
+      if (!isa<AffineForOp>(*op) || dontTouchSet.contains(op)) {
+        operationsToMove.push_back(op);
+        continue;
+      }
+
+      auto srcLoop = cast<AffineForOp>(*op);
+      if (srcLoop == destLoop) {
+        operationsToMove.clear();
+        continue;
+      }
+
+      // Move the dominating ops to above the destLoop
+      for (auto &opToMove : operationsToMove)
+        opToMove->moveBefore(destLoop);
+
       operationsToMove.clear();
-      continue;
+      auto &srcBlk = srcLoop.getRegion().getBlocks().back();
+      destBlk.getTerminator()->erase();
+      rewriter.mergeBlocks(&srcBlk, &destBlk, destBlk.getArguments());
     }
 
-    // Move the dominating ops to above the destLoop
-    for (auto &opToMove : operationsToMove)
-      opToMove->moveBefore(destLoop);
+    // Get rid of ops whose bodies we relocated
+    innerLoops.erase(innerLoops.begin());
+    for (auto innerLoop : innerLoops)
+      innerLoop->erase();
 
-    operationsToMove.clear();
-    auto &srcBlk = srcLoop.getRegion().getBlocks().back();
-    destBlk.getTerminator()->erase();
-    rewriter.mergeBlocks(&srcBlk, &destBlk, destBlk.getArguments());
+    blockToFuse = &destLoop.getRegion().getBlocks().front();
+    newAnchorOp = &destLoop;
   }
-
-  // Point old ops to the cloned & moved ones
-  for (auto opMapping : irMapping.getOperationMap())
-    opMapping.first->replaceAllUsesWith(opMapping.second->getResults());
-
-  // Get rid of ops whose bodies we relocated
-  innerLoops.erase(innerLoops.begin());
-  for (auto innerLoop : innerLoops)
-    innerLoop->erase();
-
   // Now we dump the fused-loop block in the location of the original loop
   rewriter.inlineBlockBefore(tmpBlk, affineFor,
                              affineFor->getBlock()->getArguments());
 
-  auto *containingBlk = affineFor->getBlock();
-  affineFor.erase();
+  if (newAnchorOp != nullptr) {
+    // Point old ops to the cloned & moved ones
+    for (auto opMapping : irMapping.getOperationMap())
+      opMapping.first->replaceAllUsesWith(opMapping.second->getResults());
 
-  // Now do cleanup of duplicate Ops from cloning step
-  SmallVector<Operation *> prologueToDelete;
-  for (auto &op : containingBlk->getOperations()) {
-    if (isa<AffineForOp>(op) && cast<AffineForOp>(op) == destLoop) {
-      break;
+    // Now do cleanup of duplicate Ops from cloning step
+    auto *containingBlk = affineFor->getBlock();
+    SmallVector<Operation *> prologueToDelete;
+    for (auto &op : containingBlk->getOperations()) {
+      if (isa<AffineForOp>(op) && cast<AffineForOp>(op) == *newAnchorOp) {
+        break;
+      }
+      if (op.getUses().empty() && !dontTouchSet.contains(&op))
+        prologueToDelete.push_back(&op);
     }
-    if (op.getUses().empty() && !dontTouchSet.contains(&op))
-      prologueToDelete.push_back(&op);
+
+    for (auto *op : prologueToDelete)
+      op->erase();
   }
 
-  for (auto *op : prologueToDelete)
-    op->erase();
+  affineFor.erase();
 
   return success();
 }

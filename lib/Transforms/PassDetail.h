@@ -10,6 +10,8 @@
 #ifndef TRANSFORMS_PASSDETAIL_H
 #define TRANSFORMS_PASSDETAIL_H
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/Pass/Pass.h"

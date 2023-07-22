@@ -14,11 +14,14 @@
 #include "circt/Dialect/ESI/ESITypes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/FunctionImplementation.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Visitors.h"
 #include "mlir/Support/LogicalResult.h"
+#include "llvm/ADT/STLExtras.h"
+#include <iterator>
 
 using namespace mlir;
 using namespace circt;
@@ -77,6 +80,35 @@ LogicalResult loopschedule::verifyLoop(Operation *op) {
   Block *stagesBlock = loop.getBodyBlock();
   if (stagesBlock->getOperations().size() < 2)
     return loop.emitOpError("body must contain at least one phase");
+
+  // Verify iter_args are produced by the first phase that uses it
+  // and is only used before new value is produced
+  for (auto it : llvm::enumerate(loop.getTerminatorIterArgs())) {
+    auto val = it.value();
+    auto i = it.index();
+    if (!isa<PhaseInterface>(val.getDefiningOp()))
+      return loop.emitOpError("New iter_args must be produced by a phase");
+    auto definingPhase = val.getDefiningOp<PhaseInterface>();
+    SmallVector<PhaseInterface> validPhases;
+    auto phases = loop.getBodyBlock()->getOps<PhaseInterface>();
+    llvm::copy_if(phases, std::back_inserter(validPhases),
+                  [&](PhaseInterface phase) {
+                    return phase == definingPhase ||
+                           phase->isBeforeInBlock(definingPhase);
+                  });
+    auto bodyArg = loop.getBodyArgs()[i];
+    for (auto &use : bodyArg.getUses()) {
+      auto *user = use.getOwner();
+      bool inValidPhase = false;
+      for (auto phase : validPhases) {
+        if (phase->isAncestor(user))
+          inValidPhase = true;
+      }
+      if (!inValidPhase)
+        return loop.emitOpError("Iter arg can only be used before new value is "
+                                "produced, found use in: ");
+    }
+  }
 
   return success();
 }
@@ -191,12 +223,25 @@ LogicalResult LoopSchedulePipelineOp::verify() {
         continue;
       }
 
-      if (lastStartTime >= stage.getStart())
+      if (lastStartTime > stage.getStart())
         return stage.emitOpError("'start' must be after previous 'start' (")
                << lastStartTime.value() << ')';
 
       lastStartTime = stage.getStart();
     }
+  }
+
+  // Verify iter_args used in condition are produced by first stage
+  auto firstStage = *stagesBlock.getOps<LoopSchedulePipelineStageOp>().begin();
+  auto termIterArgs = getTerminatorIterArgs();
+  for (auto arg : getConditionBlock()->getArguments()) {
+    auto numUses = std::distance(arg.getUses().begin(), arg.getUses().end());
+    if (numUses == 0)
+      continue;
+    auto termIterArg = termIterArgs[arg.getArgNumber()];
+    if (termIterArg.getDefiningOp() != firstStage.getOperation())
+      return emitOpError("Iter args used in condition block must be produced "
+                         "by first pipeline stage");
   }
 
   return success();
@@ -246,35 +291,54 @@ uint64_t LoopSchedulePipelineOp::getBodyLatency() {
 // PipelineStageOp
 //===----------------------------------------------------------------------===//
 
-LogicalResult LoopSchedulePipelineStageOp::verify() { 
-  // if (getStart() == 0)
-  //   return success();
+std::optional<LoopSchedulePipelineStageOp>
+getStageAfter(LoopSchedulePipelineStageOp stage, uint64_t cycles) {
+  auto startTime = stage.getStart();
+  auto desiredTime = startTime + cycles;
 
-  // WalkResult res = this->walk([&](Operation *op) {
-  //   auto operands = op->getOpOperands();
-  //   for (auto &operand : operands) {
-  //     Value v = operand.get();
-  //     if (auto blockArg = dyn_cast<BlockArgument>(v)) {
-  //       auto *definingOp = blockArg.getOwner()->getParentOp();
-  //       if (isa<LoopSchedulePipelineOp>(definingOp)) {
-  //         return WalkResult::interrupt();
-  //       }
-  //     }
-  //   }
-  //   return WalkResult::advance();
-  // });
-  // if (res.wasInterrupted()) {
-  //   emitOpError("Pipeline iter_args can only be accessed in first cycle");
-  //   return failure();
-  // }
-  return success(); 
+  auto *op = stage->getNextNode();
+
+  while (op != nullptr) {
+    if (auto newStage = dyn_cast<LoopSchedulePipelineStageOp>(op)) {
+      if (newStage.getStart() == desiredTime)
+        return newStage;
+    }
+    op = op->getNextNode();
+  }
+
+  return std::nullopt;
+}
+
+LogicalResult LoopSchedulePipelineStageOp::verify() {
+  auto stage = (*this);
+  auto *term = stage.getBodyBlock().getTerminator();
+
+  // Verify results produced by pipelined ops are only used when ready
+  for (auto res : stage.getResults()) {
+    auto num = res.getResultNumber();
+    auto &termOperand = term->getOpOperand(num);
+    auto *op = termOperand.get().getDefiningOp();
+    if (!isa<memref::LoadOp, arith::MulIOp>(op))
+      continue;
+    uint64_t cycles = 0;
+    if (isa<memref::LoadOp>(op)) {
+      cycles = 1;
+    } else if (isa<arith::MulIOp>(op)) {
+      cycles = 4;
+    }
+    auto correctStep = *getStageAfter(stage, cycles);
+    if (res.isUsedOutsideOfBlock(&correctStep.getBodyBlock()))
+      return emitOpError(
+          "pipelined ops can only be used the cycle results are ready");
+  }
+
+  return success();
 }
 
 void LoopSchedulePipelineStageOp::build(OpBuilder &builder,
                                         OperationState &state,
                                         TypeRange resultTypes,
-                                        IntegerAttr start,
-                                        IntegerAttr end) {
+                                        IntegerAttr start, IntegerAttr end) {
   OpBuilder::InsertionGuard g(builder);
 
   state.addTypes(resultTypes);
@@ -304,7 +368,7 @@ unsigned LoopSchedulePipelineStageOp::getStageNumber() {
 //===----------------------------------------------------------------------===//
 
 ParseResult LoopScheduleSequentialOp::parse(OpAsmParser &parser,
-                                   OperationState &result) {
+                                            OperationState &result) {
   // Parse optional trip count.
   if (succeeded(parser.parseOptionalKeyword("trip_count"))) {
     IntegerAttr tripCount;
@@ -355,7 +419,7 @@ ParseResult LoopScheduleSequentialOp::parse(OpAsmParser &parser,
 void LoopScheduleSequentialOp::print(OpAsmPrinter &p) {
   // Print the optional tripCount.
   if (getTripCount())
-    p << " trip_count = " << ' ' << *getTripCount();
+    p << " trip_count = " << *getTripCount();
 
   // Print iter_args assignment list.
   p << " iter_args(";
@@ -383,8 +447,8 @@ LogicalResult LoopScheduleSequentialOp::verify() {
   Block &scheduleBlock = getSchedule().front();
 
   for (Operation &inner : scheduleBlock) {
-    // Verify the schedule block contains only `stg.step` and
-    // `stg.terminator` ops.
+    // Verify the schedule block contains only `loopschedule.step` and
+    // `loopschedule.terminator` ops.
     if (!isa<LoopScheduleStepOp, LoopScheduleTerminatorOp>(inner))
       return emitOpError("stages may only contain 'stg.step' or "
                          "'stg.terminator' ops, found ")
@@ -395,9 +459,9 @@ LogicalResult LoopScheduleSequentialOp::verify() {
 }
 
 void LoopScheduleSequentialOp::build(OpBuilder &builder, OperationState &state,
-                            TypeRange resultTypes,
-                            std::optional<IntegerAttr> tripCount,
-                            ValueRange iterArgs) {
+                                     TypeRange resultTypes,
+                                     std::optional<IntegerAttr> tripCount,
+                                     ValueRange iterArgs) {
   OpBuilder::InsertionGuard g(builder);
 
   state.addTypes(resultTypes);
@@ -419,20 +483,37 @@ void LoopScheduleSequentialOp::build(OpBuilder &builder, OperationState &state,
   Block &scheduleBlock = scheduleRegion->emplaceBlock();
   scheduleBlock.addArguments(iterArgs.getTypes(), argLocs);
   builder.setInsertionPointToEnd(&scheduleBlock);
-  builder.create<LoopScheduleTerminatorOp>(builder.getUnknownLoc(), ValueRange(),
-                                       ValueRange());
+  builder.create<LoopScheduleTerminatorOp>(builder.getUnknownLoc(),
+                                           ValueRange(), ValueRange());
 }
 
 //===----------------------------------------------------------------------===//
-// STGStepOp
+// LoopScheduleStepOp
 //===----------------------------------------------------------------------===//
 
 LogicalResult LoopScheduleStepOp::verify() {
+  // Verify results produced by sequential op are only used in next step or
+  // terminator
+  auto step = *this;
+  auto *term = step.getBodyBlock().getTerminator();
+  auto *next = step->getNextNode();
+  if (auto nextStep = dyn_cast<LoopScheduleStepOp>(next)) {
+    for (auto res : step.getResults()) {
+      auto num = res.getResultNumber();
+      auto &termOperand = term->getOpOperand(num);
+      if (!isa<memref::LoadOp, arith::MulIOp>(
+              termOperand.get().getDefiningOp()))
+        continue;
+      if (res.isUsedOutsideOfBlock(&nextStep.getBodyBlock()))
+        return emitOpError("multi-cycle ops can only be used in next step");
+    }
+  }
+
   return success();
 }
 
 void LoopScheduleStepOp::build(OpBuilder &builder, OperationState &state,
-                                 TypeRange resultTypes) {
+                               TypeRange resultTypes) {
   OpBuilder::InsertionGuard g(builder);
 
   state.addTypes(resultTypes);
@@ -452,7 +533,7 @@ unsigned LoopScheduleStepOp::getStepNumber() {
   else if (auto parent = op->getParentOfType<func::FuncOp>(); parent)
     step = &parent.getBody().front().front();
   else {
-    op->emitOpError("STGStepOp not inside a function or STGWhileOp");
+    op->emitOpError("not inside a function or LoopScheduleSequentialOp");
     return -1;
   }
 
@@ -505,7 +586,8 @@ LogicalResult LoopScheduleTerminatorOp::verify() {
     if (iterArg.getDefiningOp<LoopSchedulePipelineStageOp>() == nullptr &&
         iterArg.getDefiningOp<LoopScheduleStepOp>() == nullptr)
       return emitOpError(
-          "'iter_args' must be defined by a 'loopschedule.pipeline.stage' or 'loopschedule.step'");
+          "'iter_args' must be defined by a 'loopschedule.pipeline.stage' or "
+          "'loopschedule.step'");
 
   // Verify loop terminates with the same result types as the loop.
   auto opResults = getResults();
@@ -521,7 +603,8 @@ LogicalResult LoopScheduleTerminatorOp::verify() {
     if (result.getDefiningOp<LoopSchedulePipelineStageOp>() == nullptr &&
         result.getDefiningOp<LoopScheduleStepOp>() == nullptr)
       return emitOpError(
-          "'results' must be defined by a 'loopschedule.pipeline.stage' or 'loopschedule.step'");
+          "'results' must be defined by a 'loopschedule.pipeline.stage' or "
+          "'loopschedule.step'");
 
   return success();
 }

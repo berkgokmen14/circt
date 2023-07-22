@@ -268,7 +268,8 @@ void AffineToLoopSchedule::runOnOperation() {
         auto memref = getMemref(memOp);
         for (auto it : memOps) {
           auto otherLoop = it.getFirst();
-          if (loop == otherLoop || !loop->isBeforeInBlock(otherLoop))
+          auto sameBlock = loop->getBlock() == otherLoop->getBlock();
+          if (loop == otherLoop || !sameBlock || !loop->isBeforeInBlock(otherLoop))
             continue;
           for (auto *otherMemOp : memOps[otherLoop]) {
             auto otherMemref = getMemref(otherMemOp);
@@ -314,7 +315,8 @@ void AffineToLoopSchedule::runOnOperation() {
       auto memref = getMemref(memOp);
       for (auto it : memOps) {
         auto otherLoop = it.getFirst();
-        if (loop == otherLoop || !loop->isBeforeInBlock(otherLoop))
+        auto sameBlock = loop->getBlock() == otherLoop->getBlock();
+        if (loop == otherLoop || !sameBlock || !loop->isBeforeInBlock(otherLoop))
           continue;
         for (auto *otherMemOp : memOps[otherLoop]) {
           auto otherMemref = getMemref(otherMemOp);
@@ -622,7 +624,7 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op,
     }
 
     return TypeSwitch<Operation *, WalkResult>(op)
-        .Case<AddIOp, IfOp, AffineYieldOp, arith::ConstantOp, CmpIOp,
+        .Case<IfOp, AffineYieldOp, arith::ConstantOp, CmpIOp,
               IndexCastOp, memref::AllocaOp, YieldOp, func::ReturnOp>([&](Operation *combOp) {
           // Some known combinational ops.
           problem.setLinkedOperatorType(combOp, combOpr);
@@ -712,6 +714,8 @@ AffineToLoopSchedule::solveModuloProblem(AffineForOp &loop,
 
   // Optionally debug problem inputs.
   LLVM_DEBUG(forOp.getBody()->walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (auto parent = op->getParentOfType<LoopInterface>(); parent)
+      return;
     llvm::dbgs() << "Scheduling inputs for " << *op;
     auto opr = problem.getLinkedOperatorType(op);
     llvm::dbgs() << "\n  opr = " << opr;
@@ -741,6 +745,8 @@ AffineToLoopSchedule::solveModuloProblem(AffineForOp &loop,
     llvm::dbgs() << "Scheduled initiation interval = "
                  << problem.getInitiationInterval() << "\n\n";
     forOp.getBody()->walk<WalkOrder::PreOrder>([&](Operation *op) {
+      if (auto parent = op->getParentOfType<LoopInterface>(); parent)
+        return;
       llvm::dbgs() << "Scheduling outputs for " << *op;
       llvm::dbgs() << "\n  start = " << problem.getStartTime(op);
       llvm::dbgs() << "\n\n";
@@ -756,6 +762,8 @@ AffineToLoopSchedule::solveSharedOperatorsProblem(Region &region,
                                                   SharedOperatorsProblem &problem) {
   // Optionally debug problem inputs.
   LLVM_DEBUG(region.walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (auto parent = op->getParentOfType<LoopInterface>(); parent)
+      return;
     llvm::dbgs() << "Scheduling inputs for " << *op;
     auto opr = problem.getLinkedOperatorType(op);
     llvm::dbgs() << "\n  opr = " << opr;
@@ -779,6 +787,8 @@ AffineToLoopSchedule::solveSharedOperatorsProblem(Region &region,
   // Optionally debug problem outputs.
   LLVM_DEBUG({
     region.walk<WalkOrder::PreOrder>([&](Operation *op) {
+      if (auto parent = op->getParentOfType<LoopInterface>(); parent)
+        return;
       llvm::dbgs() << "Scheduling outputs for " << *op;
       llvm::dbgs() << "\n  start = " << problem.getStartTime(op);
       llvm::dbgs() << "\n\n";
@@ -1216,6 +1226,7 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
     startTimes.push_back(group.first);
   llvm::sort(startTimes);
 
+  LoopScheduleStepOp lastStep;
   DominanceInfo dom(getOperation());
   for (auto i : enumerate(startTimes)) {
     auto startTime = i.value();
@@ -1244,7 +1255,7 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
       }
     }
 
-    if (startTime == 0) {
+    if (i.index() == startTimes.size() - 1) {
       // Add index increment to first step
       stepTypes.push_back(builder.getIndexType());
     }
@@ -1283,11 +1294,12 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
       }
     }
 
-    if (startTime == 0) {
+    if (i.index() == startTimes.size() - 1) {
       auto incResult =
           builder.create<arith::AddIOp>(scheduleBlock.getArgument(0), incr);
       stepTerminator->insertOperands(stepTerminator->getNumOperands(),
                                      incResult->getResults());
+      lastStep = step;
     }
   }
 
@@ -1299,8 +1311,8 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(AffineForOp &lo
   // mapped values that were originally yielded.
   SmallVector<Value> termIterArgs;
   SmallVector<Value> termResults;
-  termIterArgs.push_back(scheduleBlock.front().getResult(
-      scheduleBlock.front().getNumResults() - 1));
+  termIterArgs.push_back(lastStep.getResult(
+      lastStep.getNumResults() - 1));
   for (int i = 0, vals = anchor->getNumOperands(); i < vals;
        ++i) {
     auto value = anchor->getOperand(i);

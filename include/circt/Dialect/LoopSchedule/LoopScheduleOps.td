@@ -104,6 +104,7 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
     Value getConditionValue() {
       return getCondBlock().getTerminator()->getOperand(0);
     }
+    Operation::operand_range getTerminatorIterArgs();
     std::optional<uint64_t> getBound() {
       return getTripCount();
     }
@@ -112,6 +113,12 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
     }
 
     uint64_t getBodyLatency();
+  }];
+
+  let extraClassDefinition = [{
+    Operation::operand_range $cppClass::getTerminatorIterArgs() {
+      return cast<LoopScheduleTerminatorOp>(getBodyBlock()->getTerminator()).getIterArgs();
+    }
   }];
 }
 
@@ -265,11 +272,18 @@ def LoopScheduleSequentialOp : LoopScheduleOp<"sequential", [LoopOpInterface]> {
     Value getConditionValue() {
       return getCondBlock().getTerminator()->getOperand(0);
     }
+    Operation::operand_range getTerminatorIterArgs();
     std::optional<uint64_t> getBound() {
       return getTripCount();
     }
     bool isPipelined() {
       return false;
+    }
+  }];
+
+  let extraClassDefinition = [{
+    Operation::operand_range $cppClass::getTerminatorIterArgs() {
+      return cast<LoopScheduleTerminatorOp>(getBodyBlock()->getTerminator()).getIterArgs();
     }
   }];
 }

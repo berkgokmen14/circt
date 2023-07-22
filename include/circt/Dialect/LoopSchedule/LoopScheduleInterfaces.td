@@ -12,6 +12,7 @@
 
 include "mlir/IR/EnumAttr.td"
 include "mlir/IR/OpBase.td"
+include "mlir/Dialect/Affine/IR/AffineMemoryOpInterfaces.td"
 
 // Op interface for scheduled loops.
 def LoopOpInterface : OpInterface<"LoopInterface"> {
@@ -85,5 +86,87 @@ def PhaseOpInterface : OpInterface<"PhaseInterface"> {
       "",
       "std::optional<uint64_t>",
       "getStartTime">
+  ];
+}
+
+// Op interface for allocations.
+def AllocOpInterface : OpInterface<"AllocInterface"> {
+  let cppNamespace = "::circt::loopschedule";
+
+  let description = [{
+    This is an op interface for alloc ops to be lowered.
+  }];
+}
+
+// Op interface for loads.
+def LoadOpInterface : OpInterface<"LoadInterface"> {
+  let cppNamespace = "::circt::loopschedule";
+
+  let description = [{
+    This is an op interface for schedulable loads.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      "This returns the latency of the load.",
+      "std::optional<unsigned int>",
+      "getLatency",
+      (ins)>,
+    InterfaceMethod<
+      "This returns the limit of the load.",
+      "std::optional<unsigned int>",
+      "getLimit",
+      (ins)>,
+    InterfaceMethod<
+      "This returns the unique identifier of the associated memory",
+      "std::string",
+      "getUniqueId",
+      (ins)>
+  ];
+  /* let verify = [{ return verifyGroupInterface(op); }]; */
+}
+
+// Op interface for stores.
+def StoreOpInterface : OpInterface<"StoreInterface"> {
+  let cppNamespace = "::circt::loopschedule";
+
+  let description = [{
+    This is an op interface for schedulable stores.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      "This returns the latency of the store.",
+      "std::optional<unsigned int>",
+      "getLatency",
+      (ins)>,
+    InterfaceMethod<
+      "This returns the limit of the store.",
+      "std::optional<unsigned int>",
+      "getLimit",
+      (ins)>,
+    InterfaceMethod<
+      "This returns the unique identifier of the associated memory",
+      "std::string",
+      "getUniqueId",
+      (ins)>
+  ];
+  /* let verify = [{ return verifyGroupInterface(op); }]; */
+}
+
+// Op interface for AffineLoads.
+def SchedulableAffineOpInterface : OpInterface<"SchedulableAffineInterface"> {
+  let cppNamespace = "::circt::loopschedule";
+
+  let description = [{
+    This is an op interface for schedulable loads.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      "Creates a new non-affine op equivalent to the original Op",
+      "Operation*",
+      "createNonAffineOp",
+      (ins "mlir::OpBuilder":$builder, "mlir::ValueRange":$indices)>
   ];
 }

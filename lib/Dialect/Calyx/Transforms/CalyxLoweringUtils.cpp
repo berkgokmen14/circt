@@ -831,3 +831,5 @@ BuildReturnRegs::partiallyLowerFuncToComp(mlir::func::FuncOp funcOp,
 
 } // namespace calyx
 } // namespace circt
+
+#include "circt/Dialect/Calyx/CalyxLoweringInterfaces.cpp.inc"

@@ -756,4 +756,6 @@ class BuildReturnRegs : public calyx::FuncOpPartialLoweringPattern {
 } // namespace calyx
 } // namespace circt
 
+#include "circt/Dialect/Calyx/CalyxLoweringInterfaces.h.inc"
+
 #endif // CIRCT_DIALECT_CALYX_CALYXLOWERINGUTILS_H

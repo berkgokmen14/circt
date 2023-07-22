@@ -65,8 +65,6 @@ private:
   ModuloProblem getModuloProblem(CyclicProblem &prob);
   LogicalResult
   lowerAffineStructures(MemoryDependenceAnalysis &dependenceAnalysis);
-  LogicalResult
-  lowerAffineLoops(MemoryDependenceAnalysis &dependenceAnalysis);
   LogicalResult unrollSubLoops(AffineForOp &forOp);
   LogicalResult populateOperatorTypes(Operation* op,
                                       Region &loopBody,
@@ -232,11 +230,6 @@ void AffineToLoopSchedule::runOnOperation() {
     if (failed(createLoopSchedulePipeline(loop, moduloProblem, dependenceAnalysis)))
       return signalPassFailure();
   }
-
-  // if (failed(lowerAffineLoops(dependenceAnalysis)))
-  //   return signalPassFailure();
-
-  // getOperation().dump();
 
   // Schedule all remaining loops
   auto *seqSchedulingAnalysis = &getAnalysis<SharedOperatorsSchedulingAnalysis>();
@@ -412,6 +405,76 @@ private:
   MemoryDependenceAnalysis &dependenceAnalysis;
 };
 
+class SchedulableAffineReadInterfaceLowering : public mlir::RewritePattern {
+public:
+  SchedulableAffineReadInterfaceLowering(
+      MLIRContext *context, MemoryDependenceAnalysis &dependenceAnalysis)
+      : RewritePattern(MatchAnyOpTypeTag(), 1, context),
+        dependenceAnalysis(dependenceAnalysis) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    if (auto readOp = dyn_cast<AffineReadOpInterface>(*op)) {
+      // Expand affine map from 'affineWriteOpInterface'.
+      SmallVector<Value, 8> indices(readOp.getMapOperands());
+      auto maybeExpandedMap = expandAffineMap(rewriter, readOp.getLoc(),
+                                              readOp.getAffineMap(), indices);
+      if (!maybeExpandedMap.has_value())
+        return failure();
+
+      if (auto schedulableOp = dyn_cast<loopschedule::SchedulableAffineInterface>(*op)) {
+        // Build memref.store valueToStore, memref[expandedMap.results].
+        auto *newOp =
+            schedulableOp.createNonAffineOp(rewriter, *maybeExpandedMap);
+        rewriter.replaceOp(op, newOp->getResults());
+
+        dependenceAnalysis.replaceOp(op, newOp);
+
+        return success();
+      }
+    }
+    return failure();
+  }
+
+private:
+  MemoryDependenceAnalysis &dependenceAnalysis;
+};
+
+class SchedulableAffineWriteInterfaceLowering : public mlir::RewritePattern {
+public:
+  SchedulableAffineWriteInterfaceLowering(
+      MLIRContext *context, MemoryDependenceAnalysis &dependenceAnalysis)
+      : RewritePattern(MatchAnyOpTypeTag(), 1, context),
+        dependenceAnalysis(dependenceAnalysis) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    if (auto writeOp = dyn_cast<AffineWriteOpInterface>(*op)) {
+      // Expand affine map from 'affineWriteOpInterface'.
+      SmallVector<Value, 8> indices(writeOp.getMapOperands());
+      auto maybeExpandedMap = expandAffineMap(rewriter, writeOp.getLoc(),
+                                              writeOp.getAffineMap(), indices);
+      if (!maybeExpandedMap.has_value())
+        return failure();
+
+      if (auto schedulableOp = dyn_cast<loopschedule::SchedulableAffineInterface>(*op)) {
+        // Build memref.store valueToStore, memref[expandedMap.results].
+        auto *newOp =
+            schedulableOp.createNonAffineOp(rewriter, *maybeExpandedMap);
+        rewriter.replaceOp(op, newOp->getResults());
+
+        dependenceAnalysis.replaceOp(op, newOp);
+
+        return success();
+      }
+    }
+    return failure();
+  }
+
+private:
+  MemoryDependenceAnalysis &dependenceAnalysis;
+};
+
 /// Helper to hoist computation out of scf::IfOp branches, turning it into a
 /// mux-like operation, and exposing potentially concurrent execution of its
 /// branches.
@@ -448,6 +511,12 @@ static bool yieldOpLegalityCallback(AffineYieldOp op) {
   return !op->getParentOfType<IfOp>();
 }
 
+static bool schedulableAffineInterfaceLegalityCallback(Operation *op) {
+  return !(
+      isa<loopschedule::SchedulableAffineInterface>(*op) &&
+      (isa<AffineReadOpInterface>(*op) || isa<AffineWriteOpInterface>(*op)));
+}
+
 /// After analyzing memory dependences, and before creating the schedule, we
 /// want to materialize affine operations with arithmetic, scf, and memref
 /// operations, which make the condition computation of addresses, etc.
@@ -464,6 +533,8 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures(
   target.addLegalDialect<AffineDialect, ArithDialect, MemRefDialect,
                          SCFDialect>();
   target.addIllegalOp<AffineIfOp, AffineLoadOp, AffineStoreOp, AffineApplyOp>();
+  target.markUnknownOpDynamicallyLegal(
+      schedulableAffineInterfaceLegalityCallback);
   target.addDynamicallyLegalOp<IfOp>(ifOpLegalityCallback);
   target.addDynamicallyLegalOp<AffineYieldOp>(yieldOpLegalityCallback);
 
@@ -472,6 +543,10 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures(
   patterns.add<AffineLoadLowering>(context, dependenceAnalysis);
   patterns.add<AffineStoreLowering>(context, dependenceAnalysis);
   patterns.add<IfOpHoisting>(context);
+  patterns.add<SchedulableAffineReadInterfaceLowering>(context,
+                                                       dependenceAnalysis);
+  patterns.add<SchedulableAffineWriteInterfaceLowering>(context,
+                                                        dependenceAnalysis);
 
   if (failed(applyPartialConversion(op, target, std::move(patterns))))
     return failure();
@@ -482,116 +557,6 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures(
 
   return success();
 }
-
-struct ForLoopLoweringPattern : public OpRewritePattern<ForOp> {
-  using OpRewritePattern<ForOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(ForOp forOp,
-                                PatternRewriter &rewriter) const override {
-    // Generate type signature for the loop-carried values. The induction
-    // variable is placed first, followed by the forOp.iterArgs.
-    SmallVector<Type> lcvTypes;
-    SmallVector<Location> lcvLocs;
-    lcvTypes.push_back(forOp.getInductionVar().getType());
-    lcvLocs.push_back(forOp.getInductionVar().getLoc());
-    for (Value value : forOp.getInitArgs()) {
-      lcvTypes.push_back(value.getType());
-      lcvLocs.push_back(value.getLoc());
-    }
-
-    // Build scf.WhileOp
-    SmallVector<Value> initArgs;
-    initArgs.push_back(forOp.getLowerBound());
-    llvm::append_range(initArgs, forOp.getInitArgs());
-    auto whileOp = rewriter.create<WhileOp>(forOp.getLoc(), lcvTypes, initArgs,
-                                            forOp->getAttrs());
-
-    // 'before' region contains the loop condition and forwarding of iteration
-    // arguments to the 'after' region.
-    auto *beforeBlock = rewriter.createBlock(
-        &whileOp.getBefore(), whileOp.getBefore().begin(), lcvTypes, lcvLocs);
-    rewriter.setInsertionPointToStart(&whileOp.getBefore().front());
-    auto cmpOp = rewriter.create<arith::CmpIOp>(
-        whileOp.getLoc(), arith::CmpIPredicate::slt,
-        beforeBlock->getArgument(0), forOp.getUpperBound());
-    rewriter.create<scf::ConditionOp>(whileOp.getLoc(), cmpOp.getResult(),
-                                      beforeBlock->getArguments());
-
-    // Inline for-loop body into an executeRegion operation in the "after"
-    // region. The return type of the execRegionOp does not contain the
-    // iv - yields in the source for-loop contain only iterArgs.
-    auto *afterBlock = rewriter.createBlock(
-        &whileOp.getAfter(), whileOp.getAfter().begin(), lcvTypes, lcvLocs);
-
-    // Add induction variable incrementation
-    rewriter.setInsertionPointToEnd(afterBlock);
-    auto ivIncOp = rewriter.create<arith::AddIOp>(
-        whileOp.getLoc(), afterBlock->getArgument(0), forOp.getStep());
-
-    // Rewrite uses of the for-loop block arguments to the new while-loop
-    // "after" arguments
-    for (const auto &barg : enumerate(forOp.getBody(0)->getArguments()))
-      barg.value().replaceAllUsesWith(afterBlock->getArgument(barg.index()));
-
-    // Inline for-loop body operations into 'after' region.
-    for (auto &arg : llvm::make_early_inc_range(*forOp.getBody()))
-      arg.moveBefore(afterBlock, afterBlock->end());
-
-    // Add incremented IV to yield operations
-    for (auto yieldOp : afterBlock->getOps<scf::YieldOp>()) {
-      SmallVector<Value> yieldOperands = yieldOp.getOperands();
-      yieldOperands.insert(yieldOperands.begin(), ivIncOp.getResult());
-      yieldOp->setOperands(yieldOperands);
-    }
-
-    // We cannot do a direct replacement of the forOp since the while op returns
-    // an extra value (the induction variable escapes the loop through being
-    // carried in the set of iterargs). Instead, rewrite uses of the forOp
-    // results.
-    for (const auto &arg : llvm::enumerate(forOp.getResults()))
-      arg.value().replaceAllUsesWith(whileOp.getResult(arg.index() + 1));
-
-    rewriter.eraseOp(forOp);
-    return success();
-  }
-};
-
-LogicalResult AffineToLoopSchedule::lowerAffineLoops(
-    MemoryDependenceAnalysis &dependenceAnalysis) {
-  auto *context = &getContext();
-  auto op = getOperation();
-
-  ConversionTarget target(*context);
-  target.addLegalDialect<AffineDialect, ArithDialect, MemRefDialect,
-                         SCFDialect>();
-  target.addIllegalOp<AffineIfOp, AffineLoadOp, AffineStoreOp, AffineApplyOp,
-                      AffineForOp, AffineYieldOp>();
-  target.addDynamicallyLegalOp<IfOp>(ifOpLegalityCallback);
-  // target.addDynamicallyLegalOp<AffineYieldOp>(yieldOpLegalityCallback);
-
-  RewritePatternSet patterns(context);
-  // patterns.add<AffineLoadLowering>(context, dependenceAnalysis);
-  // patterns.add<AffineStoreLowering>(context, dependenceAnalysis);
-  patterns.add<IfOpHoisting>(context);
-  patterns.add<ForLoopLoweringPattern>(context);
-  populateAffineToStdConversionPatterns(patterns);
-
-  if (failed(applyPartialConversion(op, target, std::move(patterns))))
-    return failure();
-
-  // Loop invariant code motion to hoist produced constants out of loop
-  op->walk(
-      [&](LoopLikeOpInterface loopLike) { moveLoopInvariantCode(loopLike); });
-
-  patterns.clear();
-  patterns.add<ForLoopLoweringPattern>(context);
-  target.addIllegalOp<scf::ForOp>();
-  if (failed(applyPartialConversion(op, target, std::move(patterns))))
-    return failure();
-
-  return success();
-}
-
 
 /// Populate the schedling problem operator types for the dialect we are
 /// targetting. Right now, we assume Calyx, which has a standard library with
@@ -686,6 +651,34 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op,
           problem.setLatency(memOpr, 1);
           problem.setLimit(memOpr, 1);
           problem.setLinkedOperatorType(memOp, memOpr);
+          return WalkResult::advance();
+        })
+        .Case<loopschedule::LoadInterface>([&](Operation *op) {
+          auto loadOp = cast<loopschedule::LoadInterface>(*op);
+          auto latencyOpt = loadOp.getLatency();
+          auto limitOpt = loadOp.getLimit();
+          assert(latencyOpt.has_value() && "Load op must have latency");
+          Problem::OperatorType portOpr =
+              problem.getOrInsertOperatorType(loadOp.getUniqueId());
+          problem.setLatency(portOpr, latencyOpt.value());
+          if (limitOpt.has_value())
+            problem.setLimit(portOpr, limitOpt.value());
+          problem.setLinkedOperatorType(op, portOpr);
+
+          return WalkResult::advance();
+        })
+        .Case<loopschedule::StoreInterface>([&](Operation *op) {
+          auto storeOp = cast<loopschedule::StoreInterface>(*op);
+          auto latencyOpt = storeOp.getLatency();
+          auto limitOpt = storeOp.getLimit();
+          assert(latencyOpt.has_value() && "Store op must have latency");
+          Problem::OperatorType portOpr =
+              problem.getOrInsertOperatorType(storeOp.getUniqueId());
+          problem.setLatency(portOpr, latencyOpt.value());
+          if (limitOpt.has_value())
+            problem.setLimit(portOpr, limitOpt.value());
+          problem.setLinkedOperatorType(op, portOpr);
+
           return WalkResult::advance();
         })
         .Case<MulIOp>([&](Operation *mcOp) {

@@ -121,14 +121,6 @@ public:
     return loopIterValues[loop];
   }
 
-  // void addInitGroup(LoopInterface loop, calyx::StaticGroupOp group) {
-  //   initGroups[loop].push_back(group);
-  // }
-
-  // SmallVector<calyx::StaticGroupOp> getInitGroups(LoopInterface loop) {
-  //   return initGroups[loop];
-  // }
-
   void setCondReg(LoopInterface loop, calyx::RegisterOp reg) {
     condRegs[loop] = reg;
   }
@@ -175,10 +167,6 @@ private:
 
   DenseMap<LoopInterface, calyx::StaticGroupOp> condGroups;
 
-  /// The group(s) to schedule before the while operation These groups should
-  /// set the initial value(s) of the loop init_args register(s).
-  // DenseMap<LoopInterface, SmallVector<calyx::StaticGroupOp>> initGroups;
-
   DenseMap<LoopInterface, calyx::StaticGroupOp> incrGroup;
 
   // Values that guard the execution of the phase
@@ -220,6 +208,9 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
                              /// memref
                              memref::AllocOp, memref::AllocaOp, memref::LoadOp,
                              memref::StoreOp,
+                             /// memory interface
+                             calyx::StoreLoweringInterface, calyx::LoadLoweringInterface,
+                             calyx::AllocLoweringInterface,
                              /// standard arithmetic
                              AddIOp, SubIOp, CmpIOp, ShLIOp, ShRUIOp, ShRSIOp,
                              AndIOp, XOrIOp, OrIOp, ExtUIOp, TruncIOp, MulIOp,
@@ -270,6 +261,12 @@ private:
   LogicalResult buildOp(PatternRewriter &rewriter, memref::AllocaOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, memref::LoadOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, memref::StoreOp op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter,
+                        calyx::LoadLoweringInterface op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter,
+                        calyx::StoreLoweringInterface op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter,
+                        calyx::AllocLoweringInterface op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, LoopInterface op) const;
   LogicalResult buildOp(PatternRewriter &rewriter,
                         LoopScheduleTerminatorOp op) const;
@@ -488,6 +485,78 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   return success();
 }
 
+LogicalResult
+BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                       calyx::LoadLoweringInterface loadOp) const {
+  Value memref = loadOp.getMemoryValue();
+  Block *block = loadOp->getBlock();
+
+  if (!calyx::singleLoadFromMemoryInBlock(memref, block)) {
+    loadOp->emitOpError("LoadOp has more than one load in block");
+    return failure();
+  }
+
+  if (!calyx::noStoresToMemoryInBlock(memref, block)) {
+    loadOp->emitOpError("LoadOp has stores in block");
+    return failure();
+  }
+
+  auto memoryInterface =
+      getState<ComponentLoweringState>().getMemoryInterface(memref);
+  // TODO: Check only one access to this memory per cycle
+  // Single load from memory; we do not need to write the
+  // output to a register. This is essentially a "combinational read" under
+  // current Calyx semantics with memory, and thus can be done in a
+  // combinational group. Note that if any stores are done to this memory,
+  // we require that the load and store be in separate non-combinational
+  // groups to avoid reading and writing to the same memory in the same group.
+  auto group = createStaticGroupForOp(rewriter, loadOp, 1);
+  assignAddressPorts(rewriter, loadOp.getLoc(), group, memoryInterface,
+                     loadOp.getIndices());
+  rewriter.setInsertionPointToEnd(group.getBodyBlock());
+  auto one =
+      calyx::createConstant(loadOp.getLoc(), rewriter, getComponent(), 1, 1);
+  rewriter.create<calyx::AssignOp>(loadOp.getLoc(), memoryInterface.readEn(),
+                                   one);
+
+  // We refrain from replacing the loadOp result with
+  // memoryInterface.readData, since multiple loadOp's need to be converted
+  // to a single memory's ReadData. If this replacement is done now, we lose
+  // the link between which SSA memref::LoadOp values map to which groups for
+  // loading a value from the Calyx memory. At this point of lowering, we
+  // keep the memref::LoadOp SSA value, and do value replacement _after_
+  // control has been generated (see LateSSAReplacement). This is *vital* for
+  // things such as InlineCombGroups to be able to properly track which
+  // memory assignment groups belong to which accesses.
+  getState<ComponentLoweringState>().registerEvaluatingGroup(
+      loadOp.getResult(), group);
+
+  // loadOp.replaceAllUsesWith(memoryInterface.readData());
+  return success();
+}
+
+LogicalResult
+BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                       calyx::StoreLoweringInterface storeOp) const {
+  auto memoryInterface = getState<ComponentLoweringState>().getMemoryInterface(
+      storeOp.getMemoryValue());
+  auto group = createStaticGroupForOp(rewriter, storeOp, 1);
+
+  rewriter.setInsertionPointToEnd(group.getBodyBlock());
+  auto &state = getState<ComponentLoweringState>();
+  auto blockOpt =
+      storeOp.connectToMemInterface(rewriter, group, getComponent(), state);
+
+  if (blockOpt.has_value()) {
+    state.addBlockSchedulable(blockOpt.value(), group);
+  }
+
+  // By definition, StoreOps must be sink operations
+  // state.registerSinkOperations(storeOp, group);
+
+  return success();
+}
+
 LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      MulIOp op) const {
   Location loc = op.getLoc();
@@ -566,6 +635,15 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
 LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      memref::AllocaOp allocOp) const {
   return buildAllocOp(getState<ComponentLoweringState>(), rewriter, allocOp);
+}
+
+LogicalResult
+BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                       calyx::AllocLoweringInterface allocOp) const {
+  rewriter.setInsertionPointToStart(getComponent().getBodyBlock());
+  allocOp.insertMemory(rewriter, getState<ComponentLoweringState>());
+
+  return success();
 }
 
 LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,

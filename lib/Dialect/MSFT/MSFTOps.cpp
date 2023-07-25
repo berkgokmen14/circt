@@ -56,7 +56,7 @@ static void buildModule(OpBuilder &builder, OperationState &result,
   auto exportPortIdent = StringAttr::get(builder.getContext(), "hw.exportPort");
 
   for (auto elt : ports.inputs) {
-    if (elt.direction == hw::PortDirection::INOUT &&
+    if (elt.dir == hw::ModulePort::Direction::InOut &&
         !elt.type.isa<hw::InOutType>())
       elt.type = hw::InOutType::get(elt.type);
     argTypes.push_back(elt.type);
@@ -467,24 +467,23 @@ hw::ModulePortInfo MSFTModuleOp::getPorts() {
   for (unsigned i = 0, e = argTypes.size(); i < e; ++i) {
     bool isInOut = false;
     auto argName = argNames[i].cast<StringAttr>();
-    auto direction =
-        isInOut ? hw::PortDirection::INOUT : hw::PortDirection::INPUT;
+    auto direction = isInOut ? hw::ModulePort::Direction::InOut
+                             : hw::ModulePort::Direction::Input;
     auto type = argTypes[i];
     if (auto inout = type.dyn_cast<hw::InOutType>()) {
       isInOut = true;
       type = inout.getElementType();
     }
     auto argLoc = argLocs[i].cast<LocationAttr>();
-    inputs.push_back({argName, direction, type, i, {}, argLoc});
+    inputs.push_back({{argName, type, direction}, i, {}, argLoc});
   }
 
   auto resultNames = this->getResultNames();
   auto resultTypes = getResultTypes();
   auto resultLocs = getResultLocs();
   for (unsigned i = 0, e = resultTypes.size(); i < e; ++i) {
-    outputs.push_back({resultNames[i].cast<StringAttr>(),
-                       hw::PortDirection::OUTPUT,
-                       resultTypes[i],
+    outputs.push_back({{resultNames[i].cast<StringAttr>(), resultTypes[i],
+                        hw::ModulePort::Direction::Output},
                        i,
                        {},
                        resultLocs[i].cast<LocationAttr>()});
@@ -691,9 +690,10 @@ LogicalResult MSFTModuleOp::verify() {
 /// dialect.
 ///
 /// If `disallowParamRefs` is true, then parameter references are not allowed.
-static LogicalResult checkParameterInContext(Attribute value, Operation *module,
-                                             Operation *usingOp,
-                                             bool disallowParamRefs) {
+static LogicalResult checkParameterInContextMSFT(Attribute value,
+                                                 Operation *module,
+                                                 Operation *usingOp,
+                                                 bool disallowParamRefs) {
   // Literals are always ok.  Their types are already known to match
   // expectations.
   if (value.isa<IntegerAttr>() || value.isa<FloatAttr>() ||
@@ -703,8 +703,8 @@ static LogicalResult checkParameterInContext(Attribute value, Operation *module,
   // Check both subexpressions of an expression.
   if (auto expr = value.dyn_cast<hw::ParamExprAttr>()) {
     for (auto op : expr.getOperands())
-      if (failed(
-              checkParameterInContext(op, module, usingOp, disallowParamRefs)))
+      if (failed(checkParameterInContextMSFT(op, module, usingOp,
+                                             disallowParamRefs)))
         return failure();
     return success();
   }
@@ -898,8 +898,8 @@ LogicalResult MSFTModuleExternOp::verify() {
     // Verify that this is a valid parameter value, disallowing parameter
     // references.  We could allow parameters to refer to each other in the
     // future with lexical ordering if there is a need.
-    if (failed(checkParameterInContext(value, *this, *this,
-                                       /*disallowParamRefs=*/true)))
+    if (failed(checkParameterInContextMSFT(value, *this, *this,
+                                           /*disallowParamRefs=*/true)))
       return failure();
   }
   return success();
@@ -929,10 +929,10 @@ hw::ModulePortInfo MSFTModuleExternOp::getPorts() {
       type = inout.getElementType();
     }
 
-    auto direction =
-        isInOut ? hw::PortDirection::INOUT : hw::PortDirection::INPUT;
+    auto direction = isInOut ? hw::ModulePort::Direction::InOut
+                             : hw::ModulePort::Direction::Input;
 
-    inputs.push_back({name, direction, type, i, {}, loc});
+    inputs.push_back({{name, type, direction}, i, {}, loc});
   }
 
   auto resultNames = getOperation()->getAttrOfType<ArrayAttr>("resultNames");
@@ -941,11 +941,20 @@ hw::ModulePortInfo MSFTModuleExternOp::getPorts() {
     auto name = resultNames[i].cast<StringAttr>();
     auto loc = resultLocs[i].cast<LocationAttr>();
     outputs.push_back(
-        {name, hw::PortDirection::OUTPUT, resultTypes[i], i, {}, loc});
+        {{name, resultTypes[i], hw::ModulePort::Direction::Output},
+         i,
+         {},
+         loc});
   }
 
   return hw::ModulePortInfo(inputs, outputs);
 }
+
+size_t MSFTModuleExternOp::getNumPorts() {
+  return getArgNames().size() + getResultNames().size();
+}
+
+hw::InnerSymAttr MSFTModuleExternOp::getPortSymbolAttr(size_t) { return {}; }
 
 //===----------------------------------------------------------------------===//
 // OutputOp

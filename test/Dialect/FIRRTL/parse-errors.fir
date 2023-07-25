@@ -626,6 +626,14 @@ circuit RWProbeConst:
 
 ;// -----
 
+circuit RWProbePort:
+  module RWProbePort:
+    input in : UInt<1>[2]
+    output p : RWProbe<UInt<1>>
+    define p = rwprobe(in[1]) ; expected-error {{rwprobe of port not yet supported}}
+
+;// -----
+
 FIRRTL version 2.0.0
 circuit PartialConnect_v2p0p0:
   module PartialConnect_v2p0p0:
@@ -749,3 +757,62 @@ circuit UnsupportedStringEncodedIntegerLiterals:
     output foo: UInt<8>
     ; expected-error @below {{String-encoded integer literals are unsupported after FIRRTL 3.0.0}}
     connect foo, UInt("h2a")
+
+;// -----
+
+circuit UnknownTypeAlias:
+  module UnknownTypeAlias:
+    output x : Foo ; expected-error {{type identifier `Foo` is not declared}}
+
+;// -----
+
+circuit DuplicateAlias:
+  type Foo = UInt
+  type Foo = UInt; expected-error {{type alias `Foo` is already defined}}
+  module DuplicateAlias:
+
+;// -----
+; https://github.com/llvm/circt/issues/5494
+
+circuit BundleOfProps:
+  module BundleOfProps:
+    input x : {a : String}
+    ; expected-error @above {{type '!firrtl.string' cannot be used as field in a bundle}}
+
+;// -----
+
+circuit VecOfProps:
+  module VecOfProps:
+    input x : String[2]
+    ; expected-error @above {{type '!firrtl.string' cannot be used in a vector}}
+
+;// -----
+
+FIRRTL version 3.0.0
+circuit UnsupportedVersionDeclGroups:
+  ; expected-error @below {{unexpected token}}
+  declgroup A, bind:
+
+;// -----
+
+FIRRTL version 3.0.0
+circuit UnsupportedVersionGroups:
+  module UnsupportedVersionGroups:
+    ; expected-error @below {{unexpected token}}
+    group A:
+
+;// -----
+
+FIRRTL version 3.1.0
+circuit UnsupportedGroupConvention:
+  ; expected-error @below {{unknown convention 'foo'}}
+  declgroup A, foo :
+
+;// -----
+
+FIRRTL version 3.1.0
+circuit GroupAndCircuitShareName:
+  ; expected-error @below {{cannot have the same name as the circuit}}
+  declgroup GroupAndCircuitShareName, bind :
+
+  module GroupAndCircuitShareName:

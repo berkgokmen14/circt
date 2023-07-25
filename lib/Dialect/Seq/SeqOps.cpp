@@ -503,9 +503,17 @@ ParseResult FirRegOp::parse(OpAsmParser &parser, OperationState &result) {
   }
 
   Type ty;
-  if (parser.parseOptionalAttrDict(result.attributes) || parser.parseColon() ||
-      parser.parseType(ty))
-    return failure();
+  if (succeeded(parser.parseOptionalKeyword("preset"))) {
+    IntegerAttr preset;
+    if (parser.parseAttribute(preset, "preset", result.attributes) ||
+        parser.parseOptionalAttrDict(result.attributes))
+      return failure();
+    ty = preset.getType();
+  } else {
+    if (parser.parseOptionalAttrDict(result.attributes) ||
+        parser.parseColon() || parser.parseType(ty))
+      return failure();
+  }
   result.addTypes({ty});
 
   setNameFromResult(parser, result);
@@ -525,8 +533,8 @@ ParseResult FirRegOp::parse(OpAsmParser &parser, OperationState &result) {
 }
 
 void FirRegOp::print(::mlir::OpAsmPrinter &p) {
-  SmallVector<StringRef> elidedAttrs = {getInnerSymAttrName(),
-                                        getIsAsyncAttrName()};
+  SmallVector<StringRef> elidedAttrs = {
+      getInnerSymAttrName(), getIsAsyncAttrName(), getPresetAttrName()};
 
   p << ' ' << getNext() << " clock " << getClk();
 
@@ -538,6 +546,10 @@ void FirRegOp::print(::mlir::OpAsmPrinter &p) {
   if (hasReset()) {
     p << " reset " << (getIsAsync() ? "async" : "sync") << ' ';
     p << getReset() << ", " << getResetValue();
+  }
+
+  if (auto preset = getPresetAttr()) {
+    p << " preset " << preset.getValue();
   }
 
   if (canElideName(p, *this))
@@ -555,6 +567,10 @@ LogicalResult FirRegOp::verify() {
   } else {
     if (getIsAsync())
       return emitOpError("register with no reset cannot be async");
+  }
+  if (auto preset = getPresetAttr()) {
+    if (preset.getType() != getType())
+      return emitOpError("preset type must match register type");
   }
   return success();
 }
@@ -716,6 +732,16 @@ OpFoldResult ClockGateOp::fold(FoldAdaptor adaptor) {
   // Forward constant zero clocks.
   if (isConstantZero(adaptor.getInput()))
     return IntegerAttr::get(IntegerType::get(getContext(), 1), 0);
+
+  // Transitive clock gating - eliminate clock gates that are driven by an
+  // identical enable signal somewhere higher in the clock gate hierarchy.
+  auto clockGateInputOp = getInput().getDefiningOp<ClockGateOp>();
+  while (clockGateInputOp) {
+    if (clockGateInputOp.getEnable() == getEnable() &&
+        clockGateInputOp.getTestEnable() == getTestEnable())
+      return getInput();
+    clockGateInputOp = clockGateInputOp.getInput().getDefiningOp<ClockGateOp>();
+  }
 
   return {};
 }

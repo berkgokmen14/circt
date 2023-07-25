@@ -13,6 +13,7 @@
 #ifndef CIRCT_DIALECT_HW_HWOPINTERFACES_H
 #define CIRCT_DIALECT_HW_HWOPINTERFACES_H
 
+#include "circt/Dialect/HW/HWTypes.h"
 #include "circt/Dialect/HW/InnerSymbolTable.h"
 #include "circt/Support/LLVM.h"
 #include "mlir/IR/OpDefinition.h"
@@ -21,19 +22,8 @@
 namespace circt {
 namespace hw {
 
-/// A module port direction.
-enum class PortDirection {
-  INPUT = 1,
-  OUTPUT = 2,
-  INOUT = 3,
-};
-
 /// This holds the name, type, direction of a module's ports
-struct PortInfo {
-  StringAttr name;
-  PortDirection direction;
-  Type type;
-
+struct PortInfo : public ModulePort {
   /// This is the argument index or the result index depending on the direction.
   /// "0" for an output means the first output, "0" for a in/inout means the
   /// first argument.
@@ -44,9 +34,9 @@ struct PortInfo {
   LocationAttr loc = {};
 
   StringRef getName() const { return name.getValue(); }
-  bool isInput() const { return direction == PortDirection::INPUT; }
-  bool isOutput() const { return direction == PortDirection::OUTPUT; }
-  bool isInOut() const { return direction == PortDirection::INOUT; }
+  bool isInput() const { return dir == ModulePort::Direction::Input; }
+  bool isOutput() const { return dir == ModulePort::Direction::Output; }
+  bool isInOut() const { return dir == ModulePort::Direction::InOut; }
 
   /// Return a unique numeric identifier for this port.
   ssize_t getId() const { return isOutput() ? argNum : (-1 - argNum); };
@@ -74,6 +64,52 @@ struct ModulePortInfo {
   SmallVector<PortInfo> inputs;
   /// This is a list of the output ports.
   SmallVector<PortInfo> outputs;
+};
+
+// This provides capability for looking up port indices based on port names.
+struct ModulePortLookupInfo {
+  FailureOr<unsigned>
+  lookupPortIndex(const llvm::DenseMap<StringAttr, unsigned> &portMap,
+                  StringAttr name) const {
+    auto it = portMap.find(name);
+    if (it == portMap.end())
+      return failure();
+    return it->second;
+  }
+
+public:
+  explicit ModulePortLookupInfo(MLIRContext *ctx,
+                                const ModulePortInfo &portInfo)
+      : ctx(ctx) {
+    for (auto &in : portInfo.inputs)
+      inputPortMap[in.name] = in.argNum;
+
+    for (auto &out : portInfo.outputs)
+      outputPortMap[out.name] = out.argNum;
+  }
+
+  // Return the index of the input port with the specified name.
+  FailureOr<unsigned> getInputPortIndex(StringAttr name) const {
+    return lookupPortIndex(inputPortMap, name);
+  }
+
+  // Return the index of the output port with the specified name.
+  FailureOr<unsigned> getOutputPortIndex(StringAttr name) const {
+    return lookupPortIndex(outputPortMap, name);
+  }
+
+  FailureOr<unsigned> getInputPortIndex(StringRef name) const {
+    return getInputPortIndex(StringAttr::get(ctx, name));
+  }
+
+  FailureOr<unsigned> getOutputPortIndex(StringRef name) const {
+    return getOutputPortIndex(StringAttr::get(ctx, name));
+  }
+
+private:
+  llvm::DenseMap<StringAttr, unsigned> inputPortMap;
+  llvm::DenseMap<StringAttr, unsigned> outputPortMap;
+  MLIRContext *ctx;
 };
 
 class InnerSymbolOpInterface;

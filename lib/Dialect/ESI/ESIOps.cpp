@@ -464,61 +464,6 @@ LogicalResult ServiceHierarchyMetadataOp::verifySymbolUses(
   return success();
 }
 
-void ServiceImplementReqOp::gatherPairedReqs(
-    llvm::SmallVectorImpl<std::pair<RequestToServerConnectionOp,
-                                    RequestToClientConnectionOp>> &reqPairs) {
-
-  // Build a mapping of client path names to requests.
-  DenseMap<std::pair<hw::InnerRefAttr, ArrayAttr>,
-           SmallVector<RequestToServerConnectionOp, 0>>
-      clientNameToServer;
-  DenseMap<std::pair<hw::InnerRefAttr, ArrayAttr>,
-           SmallVector<RequestToClientConnectionOp, 0>>
-      clientNameToClient;
-  for (auto &op : getOps())
-    if (auto req = dyn_cast<RequestToClientConnectionOp>(op))
-      clientNameToClient[std::make_pair(req.getServicePort(),
-                                        req.getClientNamePathAttr())]
-          .push_back(req);
-    else if (auto req = dyn_cast<RequestToServerConnectionOp>(op))
-      clientNameToServer[std::make_pair(req.getServicePort(),
-                                        req.getClientNamePathAttr())]
-          .push_back(req);
-
-  // Find all of the pairs and emit them.
-  DenseSet<Operation *> emittedOps;
-  for (auto op : getOps<RequestToServerConnectionOp>()) {
-    std::pair<hw::InnerRefAttr, ArrayAttr> clientName =
-        std::make_pair(op.getServicePort(), op.getClientNamePathAttr());
-    const SmallVector<RequestToServerConnectionOp, 0> &ops =
-        clientNameToServer[clientName];
-
-    // Only emit a pair if there's one toServer and one toClient request for a
-    // given client name path.
-    if (ops.size() == 1) {
-      auto toClientF = clientNameToClient.find(clientName);
-      if (toClientF != clientNameToClient.end() &&
-          toClientF->second.size() == 1) {
-        reqPairs.push_back(
-            std::make_pair(ops.front(), toClientF->second.front()));
-        emittedOps.insert(ops.front());
-        emittedOps.insert(toClientF->second.front());
-        continue;
-      }
-    }
-  }
-
-  // Emit partial pairs for all the remaining requests.
-  for (auto &op : getOps()) {
-    if (emittedOps.contains(&op))
-      continue;
-    if (auto req = dyn_cast<RequestToClientConnectionOp>(op))
-      reqPairs.push_back(std::make_pair(nullptr, req));
-    else if (auto req = dyn_cast<RequestToServerConnectionOp>(op))
-      reqPairs.push_back(std::make_pair(req, nullptr));
-  }
-}
-
 //===----------------------------------------------------------------------===//
 // Structural ops.
 //===----------------------------------------------------------------------===//
@@ -536,7 +481,8 @@ LogicalResult ESIPureModuleOp::verify() {
     });
   };
 
-  DenseMap<StringAttr, std::tuple<hw::PortDirection, Type, Operation *>> ports;
+  DenseMap<StringAttr, std::tuple<hw::ModulePort::Direction, Type, Operation *>>
+      ports;
   for (Operation &op : body.getOperations()) {
     if (hw::HWInstanceLike inst = dyn_cast<hw::HWInstanceLike>(op)) {
       if (llvm::any_of(op.getOperands(), [](Value v) {
@@ -562,13 +508,13 @@ LogicalResult ESIPureModuleOp::verify() {
       Type portType = port.getResult().getType();
       if (existing != ports.end()) {
         auto [dir, type, op] = existing->getSecond();
-        if (dir != hw::PortDirection::INPUT || type != portType)
+        if (dir != hw::ModulePort::Direction::Input || type != portType)
           return (port.emitOpError("port '")
                   << port.getName() << "' previously declared as type " << type)
               .attachNote(op->getLoc());
       }
       ports[port.getNameAttr()] = std::make_tuple(
-          hw::PortDirection::INPUT, portType, port.getOperation());
+          hw::ModulePort::Direction::Input, portType, port.getOperation());
     } else if (auto port = dyn_cast<ESIPureModuleOutputOp>(op)) {
       auto existing = ports.find(port.getNameAttr());
       if (existing != ports.end())
@@ -576,8 +522,8 @@ LogicalResult ESIPureModuleOp::verify() {
                 << port.getName() << "' previously declared")
             .attachNote(std::get<2>(existing->getSecond())->getLoc());
       ports[port.getNameAttr()] =
-          std::make_tuple(hw::PortDirection::INPUT, port.getValue().getType(),
-                          port.getOperation());
+          std::make_tuple(hw::ModulePort::Direction::Input,
+                          port.getValue().getType(), port.getOperation());
     }
   }
   return success();

@@ -640,7 +640,16 @@ void EmitOMIRPass::runOnOperation() {
       }
       if (sramIDs.erase(tracker.id))
         makeTrackerAbsolute(tracker);
-      trackers.insert({tracker.id, tracker});
+      if (auto [it, inserted] = trackers.try_emplace(tracker.id, tracker);
+          !inserted) {
+        auto diag = op->emitError(omirTrackerAnnoClass)
+                    << " annotation with same ID already found, must resolve "
+                       "to single target";
+        diag.attachNote(it->second.op->getLoc())
+            << "tracker with same ID already found here";
+        anyFailures = true;
+        return true;
+      }
       return true;
     };
     AnnotationSet::removePortAnnotations(op, setTracker);
@@ -741,12 +750,12 @@ void EmitOMIRPass::makeTrackerAbsolute(Tracker &tracker) {
   // Assemble the module and name path for the NLA. Also attach an NLA reference
   // annotation to each instance participating in the path.
   SmallVector<Attribute> namepath;
-  auto addToPath = [&](Operation *op, StringAttr name) {
+  auto addToPath = [&](Operation *op) {
     namepath.push_back(getInnerRefTo(op));
   };
   // Add the path up to where the NLA starts.
   for (auto inst : paths[0])
-    addToPath(inst, inst.getInstanceNameAttr());
+    addToPath(inst);
   // Add the path from the NLA to the op.
   if (tracker.nla) {
     auto path = tracker.nla.getNamepath().getValue();
@@ -760,7 +769,7 @@ void EmitOMIRPass::makeTrackerAbsolute(Tracker &tracker) {
       });
       assert(it != node->end() &&
              "Instance referenced by NLA does not exist in module");
-      addToPath((*it)->getInstance(), ref.getName());
+      addToPath((*it)->getInstance());
     }
   }
 
@@ -934,7 +943,7 @@ void EmitOMIRPass::emitOptionalRTLPorts(DictionaryAttr node,
     jsonStream.attribute("name", "ports");
     jsonStream.attributeArray("value", [&] {
       for (const auto &port : llvm::enumerate(module.getPorts())) {
-        auto portType = dyn_cast<FIRRTLBaseType>(port.value().type);
+        auto portType = type_dyn_cast<FIRRTLBaseType>(port.value().type);
         if (!portType || portType.getBitWidthOrSentinel() == 0)
           continue;
         jsonStream.object([&] {
@@ -1231,15 +1240,14 @@ void EmitOMIRPass::emitTrackedTarget(DictionaryAttr node,
 }
 
 hw::InnerRefAttr EmitOMIRPass::getInnerRefTo(Operation *op) {
-  return ::getInnerRefTo(op, "omir_sym",
-                         [&](FModuleOp module) -> ModuleNamespace & {
-                           return getModuleNamespace(module);
-                         });
+  return ::getInnerRefTo(op, [&](FModuleOp module) -> ModuleNamespace & {
+    return getModuleNamespace(module);
+  });
 }
 
 hw::InnerRefAttr EmitOMIRPass::getInnerRefTo(FModuleLike module,
                                              size_t portIdx) {
-  return ::getInnerRefTo(module, portIdx, "omir_sym",
+  return ::getInnerRefTo(module, portIdx,
                          [&](FModuleLike mod) -> ModuleNamespace & {
                            return getModuleNamespace(mod);
                          });
@@ -1251,13 +1259,13 @@ FIRRTLType EmitOMIRPass::getTypeOf(Operation *op) {
   assert(op->getNumResults() == 1 &&
          isa<FIRRTLType>(op->getResult(0).getType()) &&
          "op must have a single FIRRTLType result");
-  return cast<FIRRTLType>(op->getResult(0).getType());
+  return type_cast<FIRRTLType>(op->getResult(0).getType());
 }
 
 FIRRTLType EmitOMIRPass::getTypeOf(FModuleLike mod, size_t portIdx) {
   Type portType = mod.getPortType(portIdx);
   assert(isa<FIRRTLType>(portType) && "port must have a FIRRTLType");
-  return cast<FIRRTLType>(portType);
+  return type_cast<FIRRTLType>(portType);
 }
 
 // Constructs a reference to a field of an aggregate FIRRTLType with a fieldID,
@@ -1266,7 +1274,7 @@ FIRRTLType EmitOMIRPass::getTypeOf(FModuleLike mod, size_t portIdx) {
 void EmitOMIRPass::addFieldID(FIRRTLType type, unsigned fieldID,
                               SmallVectorImpl<char> &result) {
   while (fieldID)
-    TypeSwitch<FIRRTLType>(type)
+    FIRRTLTypeSwitch<FIRRTLType>(type)
         .Case<FVectorType>([&](FVectorType vector) {
           size_t index = vector.getIndexForFieldID(fieldID);
           type = vector.getElementType();

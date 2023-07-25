@@ -16,6 +16,7 @@
 #include "circt/Dialect/Arc/ArcInterfaces.h"
 #include "circt/Dialect/Arc/ArcOps.h"
 #include "circt/Dialect/Arc/ArcPasses.h"
+#include "circt/Dialect/Seq/SeqPasses.h"
 #include "circt/InitAllDialects.h"
 #include "circt/InitAllPasses.h"
 #include "circt/Support/Version.h"
@@ -92,6 +93,9 @@ static cl::opt<std::string> stateFile("state-file", cl::desc("State file"),
 
 static cl::opt<bool> shouldInline("inline", cl::desc("Inline arcs"),
                                   cl::init(true), cl::cat(mainCategory));
+
+static cl::opt<bool> shouldDedup("dedup", cl::desc("Deduplicate arcs"),
+                                 cl::init(true), cl::cat(mainCategory));
 
 static cl::opt<bool>
     shouldMakeLUTs("lookup-tables",
@@ -172,6 +176,7 @@ static void populatePipeline(PassManager &pm) {
   // represented as intrinsic ops.
   if (untilReached(UntilPreprocessing))
     return;
+  pm.addPass(seq::createLowerFirMemPass());
   pm.addPass(
       arc::createAddTapsPass(observePorts, observeWires, observeNamedValues));
   pm.addPass(arc::createStripSVPass());
@@ -183,7 +188,8 @@ static void populatePipeline(PassManager &pm) {
   if (untilReached(UntilArcConversion))
     return;
   pm.addPass(createConvertToArcsPass());
-  pm.addPass(arc::createDedupPass());
+  if (shouldDedup)
+    pm.addPass(arc::createDedupPass());
   pm.addPass(arc::createInlineModulesPass());
   pm.addPass(createCSEPass());
   pm.addPass(arc::createArcCanonicalizerPass());
@@ -193,7 +199,8 @@ static void populatePipeline(PassManager &pm) {
   if (untilReached(UntilArcOpt))
     return;
   pm.addPass(arc::createSplitLoopsPass());
-  pm.addPass(arc::createDedupPass());
+  if (shouldDedup)
+    pm.addPass(arc::createDedupPass());
   pm.addPass(createCSEPass());
   pm.addPass(arc::createArcCanonicalizerPass());
   if (shouldMakeLUTs)
@@ -216,6 +223,7 @@ static void populatePipeline(PassManager &pm) {
   // pm.addPass(createCSEPass());
   // pm.addPass(createSimpleCanonicalizerPass());
   // Removing some muxes etc. may lead to additional dedup opportunities
+  // if (shouldDedup)
   // pm.addPass(arc::createDedupPass());
 
   // Lower stateful arcs into explicit state reads and writes.

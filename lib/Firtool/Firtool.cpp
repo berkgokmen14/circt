@@ -119,8 +119,8 @@ LogicalResult firtool::populateCHIRRTLToLowFIRRTL(mlir::PassManager &pm,
 
   pm.addNestedPass<firrtl::CircuitOp>(firrtl::createAddSeqMemPortsPass());
 
-  pm.addPass(firrtl::createCreateSiFiveMetadataPass(
-      opt.replSeqMem, opt.replSeqMemCircuit, opt.replSeqMemFile));
+  pm.addPass(firrtl::createCreateSiFiveMetadataPass(opt.replSeqMem,
+                                                    opt.replSeqMemFile));
 
   pm.addNestedPass<firrtl::CircuitOp>(firrtl::createExtractInstancesPass());
 
@@ -189,7 +189,7 @@ LogicalResult firtool::populateLowFIRRTLToHW(mlir::PassManager &pm,
 
   pm.addPass(createLowerFIRRTLToHWPass(
       opt.enableAnnotationWarning.getValue(),
-      opt.emitChiselAssertsAsSVA.getValue(), opt.addMuxPragmas.getValue(),
+      opt.emitChiselAssertsAsSVA.getValue(),
       !opt.isRandomEnabled(FirtoolOptions::RandomKind::Mem),
       !opt.isRandomEnabled(FirtoolOptions::RandomKind::Reg)));
 
@@ -215,6 +215,7 @@ LogicalResult firtool::populateHWToSV(mlir::PassManager &pm,
            FirtoolOptions::RandomKind::Reg),
        /*emitSeparateAlwaysBlocks=*/
        opt.emitSeparateAlwaysBlocks}));
+  pm.addPass(seq::createLowerFirMemPass());
   pm.addPass(sv::createHWMemSimImplPass(
       opt.replSeqMem, opt.ignoreReadEnableMem, opt.addMuxPragmas,
       !opt.isRandomEnabled(FirtoolOptions::RandomKind::Mem),

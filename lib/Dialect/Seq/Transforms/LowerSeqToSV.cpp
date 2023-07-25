@@ -38,10 +38,16 @@ using namespace circt;
 using namespace seq;
 
 namespace {
+#define GEN_PASS_DEF_LOWERSEQTOSV
+#define GEN_PASS_DEF_LOWERSEQFIRRTLTOSV
+#define GEN_PASS_DEF_LOWERSEQFIRRTLINITTOSV
+#include "circt/Dialect/Seq/SeqPasses.h.inc"
+
 struct SeqToSVPass : public impl::LowerSeqToSVBase<SeqToSVPass> {
   void runOnOperation() override;
   using LowerSeqToSVBase::lowerToAlwaysFF;
 };
+
 struct SeqFIRRTLToSVPass
     : public impl::LowerSeqFIRRTLToSVBase<SeqFIRRTLToSVPass> {
   void runOnOperation() override;
@@ -135,6 +141,47 @@ public:
 private:
   bool lowerToAlwaysFF;
 };
+
+// Lower seq.clock_gate to a fairly standard clock gate implementation.
+//
+class ClockGateLowering : public OpConversionPattern<ClockGateOp> {
+public:
+  using OpConversionPattern<ClockGateOp>::OpConversionPattern;
+  using OpAdaptor = typename OpConversionPattern<ClockGateOp>::OpAdaptor;
+  LogicalResult
+  matchAndRewrite(ClockGateOp clockGate, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const final {
+    auto loc = clockGate.getLoc();
+    Value clk = adaptor.getInput();
+
+    // enable in
+    Value enable = adaptor.getEnable();
+    if (auto te = adaptor.getTestEnable())
+      enable = rewriter.create<comb::OrOp>(loc, enable, te);
+
+    // Enable latch.
+    Value enableLatch = rewriter.create<sv::RegOp>(
+        loc, rewriter.getI1Type(), rewriter.getStringAttr("cg_en_latch"));
+
+    // Latch the enable signal using an always @* block.
+    rewriter.create<sv::AlwaysOp>(
+        loc, llvm::SmallVector<sv::EventControl>{}, llvm::SmallVector<Value>{},
+        [&]() {
+          rewriter.create<sv::IfOp>(
+              loc, comb::createOrFoldNot(loc, clk, rewriter), [&]() {
+                rewriter.create<sv::PAssignOp>(loc, enableLatch, enable);
+              });
+        });
+
+    // Create the gated clock signal.
+    Value gclk = rewriter.create<comb::AndOp>(
+        loc, clk, rewriter.create<sv::ReadInOutOp>(loc, enableLatch));
+    clockGate.replaceAllUsesWith(gclk);
+    rewriter.eraseOp(clockGate);
+    return success();
+  }
+};
+
 } // namespace
 
 namespace {
@@ -153,6 +200,7 @@ public:
 private:
   struct RegLowerInfo {
     sv::RegOp reg;
+    IntegerAttr preset;
     Value asyncResetSignal;
     Value asyncResetValue;
     int64_t randStart;
@@ -235,29 +283,34 @@ void FirRegLower::lower() {
   if (regs.empty())
     return;
 
-  // Lower the regs to SV regs.
-  SmallVector<RegLowerInfo> toInit;
-  for (auto reg : llvm::make_early_inc_range(regs))
-    toInit.push_back(lower(reg));
+  // Lower the regs to SV regs. Group them by initializer and reset kind.
+  SmallVector<RegLowerInfo> randomInit, presetInit;
+  llvm::MapVector<Value, SmallVector<RegLowerInfo>> asyncResets;
+  for (auto reg : llvm::make_early_inc_range(regs)) {
+    auto svReg = lower(reg);
+    if (svReg.preset)
+      presetInit.push_back(svReg);
+    else if (!disableRegRandomization)
+      randomInit.push_back(svReg);
+
+    if (svReg.asyncResetSignal)
+      asyncResets[svReg.asyncResetSignal].emplace_back(svReg);
+  }
 
   // Compute total width of random space.  Place non-chisel registers at the end
   // of the space.  The Random space is unique to the initial block, due to
   // verilog thread rules, so we can drop trailing random calls if they are
   // unused.
   uint64_t maxBit = 0;
-  for (auto reg : toInit)
+  for (auto reg : randomInit)
     if (reg.randStart >= 0)
       maxBit = std::max(maxBit, (uint64_t)reg.randStart + reg.width);
 
-  // This is a map from async reset signals to register info.
-  llvm::MapVector<Value, SmallVector<RegLowerInfo>> asyncResets;
-  for (auto &reg : toInit) {
+  for (auto &reg : randomInit) {
     if (reg.randStart == -1) {
       reg.randStart = maxBit;
       maxBit += reg.width;
     }
-    if (reg.asyncResetSignal)
-      asyncResets[reg.asyncResetSignal].emplace_back(reg);
   }
 
   // Create an initial block at the end of the module where random
@@ -272,7 +325,7 @@ void FirRegLower::lower() {
   //     `INIT_RANDOM_PROLOG_
   //     ... initBuilder ..
   // `endif
-  if (toInit.empty() || (disableRegRandomization && asyncResets.empty()))
+  if (randomInit.empty() && presetInit.empty() && asyncResets.empty())
     return;
 
   auto loc = module.getLoc();
@@ -289,7 +342,7 @@ void FirRegLower::lower() {
       });
 
       builder.create<sv::InitialOp>([&] {
-        if (!disableRegRandomization) {
+        if (!randomInit.empty()) {
           builder.create<sv::IfDefProceduralOp>("INIT_RANDOM_PROLOG_", [&] {
             builder.create<sv::VerbatimOp>("`INIT_RANDOM_PROLOG_");
           });
@@ -333,9 +386,17 @@ void FirRegLower::lower() {
             }
 
             // Create initialisers for all registers.
-            for (auto &svReg : toInit)
+            for (auto &svReg : randomInit)
               initialize(builder, svReg, randValues);
           });
+        }
+
+        if (!presetInit.empty()) {
+          for (auto &svReg : presetInit) {
+            auto loc = svReg.reg.getLoc();
+            auto cst = getOrCreateConstant(loc, svReg.preset.getValue());
+            builder.create<sv::BPAssignOp>(loc, svReg.reg, cst);
+          }
         }
 
         if (!asyncResets.empty()) {
@@ -582,7 +643,7 @@ FirRegLower::RegLowerInfo FirRegLower::lower(FirRegOp reg) {
   Location loc = reg.getLoc();
 
   ImplicitLocOpBuilder builder(reg.getLoc(), reg);
-  RegLowerInfo svReg{nullptr, nullptr, nullptr, -1, 0};
+  RegLowerInfo svReg{nullptr, reg.getPresetAttr(), nullptr, nullptr, -1, 0};
   svReg.reg = builder.create<sv::RegOp>(loc, reg.getType(), reg.getNameAttr());
   svReg.width = hw::getBitWidth(reg.getResult().getType());
 
@@ -772,10 +833,11 @@ void SeqToSVPass::runOnOperation() {
   MLIRContext &ctxt = getContext();
   ConversionTarget target(ctxt);
   target.addIllegalDialect<SeqDialect>();
-  target.addLegalDialect<sv::SVDialect>();
+  target.addLegalDialect<sv::SVDialect, comb::CombDialect, hw::HWDialect>();
   RewritePatternSet patterns(&ctxt);
   patterns.add<CompRegLower<CompRegOp>>(&ctxt, lowerToAlwaysFF);
   patterns.add<CompRegLower<CompRegClockEnabledOp>>(&ctxt, lowerToAlwaysFF);
+  patterns.add<ClockGateLowering>(&ctxt);
 
   if (failed(applyPartialConversion(top, target, std::move(patterns))))
     signalPassFailure();

@@ -876,6 +876,16 @@ firrtl.circuit "Top"   {
 
 // -----
 
+firrtl.circuit "Top" {
+  firrtl.module @Top (in %in : !firrtl.uint) {
+    %a = firrtl.wire : !firrtl.uint
+    // expected-error @+1 {{op operand #0 must be a sized passive base type}}
+    firrtl.strictconnect %a, %in : !firrtl.uint
+  }
+}
+
+// -----
+
 firrtl.circuit "AnalogRegister" {
   firrtl.module @AnalogRegister(in %clock: !firrtl.clock) {
     // expected-error @+1 {{'firrtl.reg' op result #0 must be a passive non-'const' base type that does not contain analog, but got '!firrtl.analog'}}
@@ -1109,7 +1119,7 @@ firrtl.circuit "Top" {
   firrtl.module @Foo (in %in: !firrtl.probe<uint<2>>) {}
   firrtl.module @Top (in %in: !firrtl.probe<uint<2>>) {
     %foo_in = firrtl.instance foo @Foo(in in: !firrtl.probe<uint<2>>)
-    // expected-error @below {{must be a passive base type}}
+    // expected-error @below {{must be a sized passive base type}}
     firrtl.strictconnect %foo_in, %in : !firrtl.probe<uint<2>>
   }
 }
@@ -1261,6 +1271,34 @@ firrtl.circuit "PropertyDoubleDrive" {
   }
 }
 
+// -----
+// Check that you can't connect property types.
+
+firrtl.circuit "PropertyConnect" {
+  firrtl.module @PropertyConnect(out %out: !firrtl.string) {
+    %0 = firrtl.string "hello"
+    // expected-error @below {{must be a sized passive base type}}
+    firrtl.strictconnect %out, %0 : !firrtl.string
+  }
+}
+
+// -----
+// Property aggregates can only contain properties.
+// Check list.
+
+firrtl.circuit "ListOfHW" {
+  // expected-error @below {{expected property type, found '!firrtl.uint<2>'}}
+  firrtl.module @MapOfHW(in %in: !firrtl.list<uint<2>>) {}
+}
+
+// -----
+// Property aggregates can only contain properties.
+// Check map.
+
+firrtl.circuit "MapOfHW" {
+  // expected-error @below {{expected property type, found '!firrtl.uint<4>'}}
+  firrtl.module @MapOfHW(in %in: !firrtl.map<string,uint<4>>) {}
+}
 
 // -----
 // Issue 4174-- handle duplicate module names.
@@ -1591,16 +1629,6 @@ firrtl.circuit "BitcastNonConstToConstContaining" {
 
 // -----
 
-// Uninferred width cast non-const to const
-firrtl.circuit "UninferredWidthCastNonConstToConst" {
-  firrtl.module @UninferredWidthCastNonConstToConst(in %a: !firrtl.uint) {
-    // expected-error @+1 {{operand constness must match}}
-    %b = firrtl.widthCast %a : (!firrtl.uint) -> !firrtl.const.uint<1>
-  }
-}
-
-// -----
-
 // Uninferred reset cast non-const to const
 firrtl.circuit "UninferredWidthCastNonConstToConst" {
   firrtl.module @UninferredWidthCastNonConstToConst(in %a: !firrtl.reset) {
@@ -1685,4 +1713,146 @@ firrtl.circuit "EnumAnalog" {
 firrtl.circuit "NonConstEnumConstElements" {
 // expected-error @+1 {{enum with 'const' elements must be 'const'}}
 firrtl.module @NonConstEnumConstElements(in %a: !firrtl.enum<None: uint<0>, Some: const.uint<1>>) {}
+}
+
+// -----
+// No const with probes within.
+
+firrtl.circuit "ConstOpenVector" {
+  // expected-error @below {{vector cannot be const with references}}
+  firrtl.extmodule @ConstOpenVector(out out : !firrtl.const.openvector<probe<uint<1>>, 2>)
+}
+
+// -----
+// Elements must support FieldID's.
+
+firrtl.circuit "OpenVectorNotFieldID" {
+  // expected-error @below {{vector element type does not support fieldID's, type: '!firrtl.string'}}
+  firrtl.extmodule @OpenVectorNotFieldID(out out : !firrtl.openvector<string, 2>)
+}
+
+// -----
+// No const with probes within.
+
+firrtl.circuit "ConstOpenBundle" {
+  // expected-error @below {{'const' bundle cannot have references, but element "x" has type '!firrtl.probe<uint<1>>'}}
+  firrtl.extmodule @ConstOpenBundle(out out : !firrtl.const.openbundle<x: probe<uint<1>>>)
+}
+
+// -----
+// Elements must support FieldID's.
+
+firrtl.circuit "OpenBundleNotFieldID" {
+  // expected-error @below {{bundle element "a" has unsupported type that does not support fieldID's: '!firrtl.string'}}
+  firrtl.extmodule @OpenBundleNotFieldID(out out : !firrtl.openbundle<a: string>)
+}
+
+// -----
+// Strict connect between non-equivalent anonymous type operands.
+
+firrtl.circuit "NonEquivalenctStrictConnect" {
+  firrtl.module @NonEquivalenctStrictConnect(in %in: !firrtl.uint<1>, out %out: !firrtl.alias<foo, uint<2>>) {
+    // expected-error @below {{op failed to verify that operands must be structurally equivalent}}
+    firrtl.strictconnect %out, %in: !firrtl.alias<foo, uint<2>>, !firrtl.uint<1>
+  }
+}
+
+// -----
+
+// A group definition, "@A::@B", is missing an outer nesting of a group
+// definition with symbol "@A".
+firrtl.circuit "GroupMissingNesting" {
+  firrtl.declgroup @A bind {
+    firrtl.declgroup @B bind {}
+  }
+  // expected-note @below {{illegal parent op defined here}}
+  firrtl.module @GroupMissingNesting() {
+    // expected-error @below {{'firrtl.group' op has a nested group symbol, but does not have a 'firrtl.group' op as a parent}}
+    firrtl.group @A::@B {}
+  }
+}
+
+// -----
+
+// A group definition with a legal symbol, "@B", is illegaly nested under
+// another group with a legal symbol, "@B".
+firrtl.circuit "UnnestedGroup" {
+  firrtl.declgroup @A bind {}
+  firrtl.declgroup @B bind {}
+  firrtl.module @UnnestedGroup() {
+    // expected-note @below {{illegal parent op defined here}}
+    firrtl.group @A {
+      // expected-error @below {{'firrtl.group' op has an un-nested group symbol, but does not have a 'firrtl.module' op as a parent}}
+      firrtl.group @B {}
+    }
+  }
+}
+
+// -----
+
+// A group definition, "@B::@C", is nested under the wrong group, "@A".
+firrtl.circuit "WrongGroupNesting" {
+  firrtl.declgroup @A bind {}
+  firrtl.declgroup @B bind {
+    firrtl.declgroup @C bind {}
+  }
+  firrtl.module @WrongGroupNesting() {
+    // expected-note @below {{illegal parent group defined here}}
+    firrtl.group @A {
+      // expected-error @below {{'firrtl.group' op is nested under an illegal group}}
+      firrtl.group @B::@C {}
+    }
+  }
+}
+
+// -----
+
+// A group captures a type which is not a FIRRTL base type.
+firrtl.circuit "NonBaseTypeCapture" {
+  firrtl.declgroup @A bind {}
+  // expected-note @below {{operand is defined here}}
+  firrtl.module @NonBaseTypeCapture(in %a: !firrtl.probe<uint<1>>) {
+    // expected-error @below {{'firrtl.group' op captures an operand which is not a FIRRTL base type}}
+    firrtl.group @A {
+      // expected-note @below {{operand is used here}}
+      %b = firrtl.ref.resolve %a : !firrtl.probe<uint<1>>
+    }
+  }
+}
+
+// -----
+
+// A group captures a non-passive type.
+firrtl.circuit "NonPassiveCapture" {
+  firrtl.declgroup @A bind {}
+  firrtl.module @NonPassiveCapture() {
+    // expected-note @below {{operand is defined here}}
+    %a = firrtl.wire : !firrtl.bundle<a flip: uint<1>>
+    // expected-error @below {{'firrtl.group' op captures an operand which is not a passive type}}
+    firrtl.group @A {
+      %b = firrtl.wire : !firrtl.bundle<a flip: uint<1>>
+      // expected-note @below {{operand is used here}}
+      firrtl.connect %b, %a : !firrtl.bundle<a flip: uint<1>>, !firrtl.bundle<a flip: uint<1>>
+    }
+  }
+}
+
+// -----
+
+// A group may not drive sinks outside the group.
+firrtl.circuit "GroupDrivesSinksOutside" {
+  firrtl.declgroup @A bind {}
+  firrtl.module @GroupDrivesSinksOutside(in %cond : !firrtl.uint<1>) {
+    %a = firrtl.wire : !firrtl.uint<1>
+    // expected-note @below {{destination is defined here}}
+    %b = firrtl.wire : !firrtl.bundle<c: uint<1>>
+    // expected-note @below {{enclosing group is defined here}}
+    firrtl.group @A {
+      firrtl.when %cond : !firrtl.uint<1> {
+        %b_c = firrtl.subfield %b[c] : !firrtl.bundle<c: uint<1>>
+        // expected-error @below {{'firrtl.strictconnect' op connects to a destination which is defined outside its enclosing group}}
+        firrtl.strictconnect %b_c, %a : !firrtl.uint<1>
+      }
+    }
+  }
 }

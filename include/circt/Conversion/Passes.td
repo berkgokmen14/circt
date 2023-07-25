@@ -234,7 +234,9 @@ def PipelineToHW : Pass<"lower-pipeline-to-hw", "hw::HWModuleOp"> {
   ];
   let options = [
     Option<"outlineStages", "outline-stages", "bool", "false",
-      "Outline each stage to a separate `hw.module`.">
+      "Outline each stage to a separate `hw.module`.">,
+    Option<"clockGateRegs", "clock-gate-regs", "bool", "false",
+      "Clock gate each register instead of (default) input muxing  (ASIC optimization).">
   ];
 }
 
@@ -406,9 +408,7 @@ def LowerFIRRTLToHW : Pass<"lower-firrtl-to-hw", "mlir::ModuleOp"> {
            "bool", "false",
     "Emit warnings on unprocessed annotations during lower-to-hw pass">,
     Option<"emitChiselAssertsAsSVA", "emit-chisel-asserts-as-sva",
-           "bool", "false","Convert all Chisel asserts to SVA">,
-    Option<"addMuxPragmas", "add-mux-pragmas", "bool", "false",
-            "Annotate mux pragmas to multibit mux and subacess results">
+           "bool", "false","Convert all Chisel asserts to SVA">
   ];
 }
 
@@ -544,6 +544,32 @@ def ConvertHWToSystemC : Pass<"convert-hw-to-systemc", "mlir::ModuleOp"> {
   }];
   let constructor = "circt::createConvertHWToSystemCPass()";
   let dependentDialects = ["systemc::SystemCDialect", "mlir::emitc::EmitCDialect"];
+}
+
+//===----------------------------------------------------------------------===//
+// HWToSV
+//===----------------------------------------------------------------------===//
+
+def LowerHWToSV : Pass<"lower-hw-to-sv", "hw::HWModuleOp"> {
+  let summary = "Convert HW to SV";
+  let description = [{
+    This pass converts various HW contructs to SV.
+  }];
+  let constructor = "circt::createLowerHWToSVPass()";
+  let dependentDialects = ["sv::SVDialect"];
+}
+
+//===----------------------------------------------------------------------===//
+// VerifToSV
+//===----------------------------------------------------------------------===//
+
+def LowerVerifToSV : Pass<"lower-verif-to-sv", "hw::HWModuleOp"> {
+  let summary = "Convert Verif to SV";
+  let description = [{
+    This pass converts various Verif contructs to SV.
+  }];
+  let constructor = "circt::createLowerVerifToSVPass()";
+  let dependentDialects = ["sv::SVDialect", "hw::HWDialect"];
 }
 
 //===----------------------------------------------------------------------===//

@@ -115,7 +115,7 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
               .template Case<
                   arith::ConstantOp, ReturnOp, BranchOpInterface,
                   /// SCF
-                  scf::YieldOp,
+                  scf::YieldOp, scf::WhileOp,
                   /// memref
                   memref::AllocOp, memref::AllocaOp, memref::LoadOp,
                   memref::StoreOp,
@@ -127,7 +127,7 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
                   XOrIOp, OrIOp, ExtUIOp, ExtSIOp, TruncIOp, MulIOp, DivUIOp,
                   DivSIOp, RemUIOp, RemSIOp, IndexCastOp>(
                   [&](auto op) { return buildOp(rewriter, op).succeeded(); })
-              .template Case<scf::WhileOp, FuncOp, scf::ConditionOp>([&](auto) {
+              .template Case<FuncOp, scf::ConditionOp>([&](auto) {
                 /// Skip: these special cases will be handled separately.
                 return true;
               })
@@ -179,6 +179,7 @@ private:
                         calyx::StoreLoweringInterface op) const;
   LogicalResult buildOp(PatternRewriter &rewriter,
                         calyx::AllocLoweringInterface op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter, scf::WhileOp whileOp) const;
 
   /// buildLibraryOp will build a TCalyxLibOp inside a TGroupOp based on the
   /// source operation TSrcOp.
@@ -258,6 +259,7 @@ private:
         getState<ComponentLoweringState>().getUniqueName(opName));
     // Operation pipelines are not combinational, so a GroupOp is required.
     auto group = createGroupForOp<calyx::GroupOp>(rewriter, op);
+    OpBuilder builder(group->getRegion(0));
     getState<ComponentLoweringState>().addBlockScheduleable(op->getBlock(),
                                                             group);
 
@@ -268,9 +270,13 @@ private:
     rewriter.create<calyx::AssignOp>(loc, reg.getIn(), out);
     // The write enable port is high when the pipeline is done.
     rewriter.create<calyx::AssignOp>(loc, reg.getWriteEn(), opPipe.getDone());
+    // Set pipelineOp to high as long as its done signal is not high.
+    // This prevents the pipelineOP from executing for the cycle that we write
+    // to register. To get !(pipelineOp.done) we do 1 xor pipelineOp.done
+    hw::ConstantOp c1 = createConstant(loc, rewriter, getComponent(), 1, 1);
     rewriter.create<calyx::AssignOp>(
-        loc, opPipe.getGo(),
-        createConstant(loc, rewriter, getComponent(), 1, 1));
+        loc, opPipe.getGo(), c1,
+        comb::createOrFoldNot(group.getLoc(), opPipe.getDone(), builder));
     // The group is done when the register write is complete.
     rewriter.create<calyx::GroupDoneOp>(loc, reg.getDone());
 
@@ -293,12 +299,23 @@ private:
     IRRewriter::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointToEnd(group.getBody());
     auto addrPorts = memoryInterface.addrPorts();
-    assert(addrPorts.size() == addressValues.size() &&
-           "Mismatch between number of address ports of the provided memory "
-           "and address assignment values");
-    for (auto address : enumerate(addressValues))
-      rewriter.create<calyx::AssignOp>(loc, addrPorts[address.index()],
-                                       address.value());
+    if (addressValues.empty()) {
+      assert(
+          addrPorts.size() == 1 &&
+          "We expected a 1 dimensional memory of size 1 because there were no "
+          "address assignment values");
+      // Assign to address 1'd0 in memory.
+      rewriter.create<calyx::AssignOp>(
+          loc, addrPorts[0],
+          createConstant(loc, rewriter, getComponent(), 1, 0));
+    } else {
+      assert(addrPorts.size() == addressValues.size() &&
+             "Mismatch between number of address ports of the provided memory "
+             "and address assignment values");
+      for (auto address : enumerate(addressValues))
+        rewriter.create<calyx::AssignOp>(loc, addrPorts[address.index()],
+                                         address.value());
+    }
   }
 };
 
@@ -376,52 +393,68 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   Value memref = loadOp.getMemref();
   auto memoryInterface =
       getState<ComponentLoweringState>().getMemoryInterface(memref);
-  if (calyx::noStoresToMemory(memref) && calyx::singleLoadFromMemory(memref)) {
-    // Single load from memory; we do not need to write the
-    // output to a register. This is essentially a "combinational read" under
-    // current Calyx semantics with memory, and thus can be done in a
-    // combinational group. Note that if any stores are done to this memory,
-    // we require that the load and store be in separate non-combinational
-    // groups to avoid reading and writing to the same memory in the same group.
-    auto combGroup = createGroupForOp<calyx::CombGroupOp>(rewriter, loadOp);
-    assignAddressPorts(rewriter, loadOp.getLoc(), combGroup, memoryInterface,
-                       loadOp.getIndices());
+  auto group = createGroupForOp<calyx::GroupOp>(rewriter, loadOp);
+  assignAddressPorts(rewriter, loadOp.getLoc(), group, memoryInterface,
+                     loadOp.getIndices());
 
-    // We refrain from replacing the loadOp result with
-    // memoryInterface.readData, since multiple loadOp's need to be converted
-    // to a single memory's ReadData. If this replacement is done now, we lose
-    // the link between which SSA memref::LoadOp values map to which groups for
-    // loading a value from the Calyx memory. At this point of lowering, we
-    // keep the memref::LoadOp SSA value, and do value replacement _after_
-    // control has been generated (see LateSSAReplacement). This is *vital* for
-    // things such as calyx::InlineCombGroups to be able to properly track which
-    // memory assignment groups belong to which accesses.
-    getState<ComponentLoweringState>().registerEvaluatingGroup(
-        loadOp.getResult(), combGroup);
-  } else {
-    auto group = createGroupForOp<calyx::GroupOp>(rewriter, loadOp);
-    assignAddressPorts(rewriter, loadOp.getLoc(), group, memoryInterface,
-                       loadOp.getIndices());
+  rewriter.setInsertionPointToEnd(group.getBodyBlock());
 
+  bool needReg = true;
+  Value res;
+  Value regWriteEn =
+      createConstant(loadOp.getLoc(), rewriter, getComponent(), 1, 1);
+  if (memoryInterface.readEnOpt().has_value()) {
+    auto oneI1 =
+        calyx::createConstant(loadOp.getLoc(), rewriter, getComponent(), 1, 1);
+    rewriter.create<calyx::AssignOp>(loadOp.getLoc(), memoryInterface.readEn(),
+                                     oneI1);
+    regWriteEn = memoryInterface.readDone();
+    if (calyx::noStoresToMemory(memref) &&
+        calyx::singleLoadFromMemory(memref)) {
+      // Single load from memory; we do not need to write the output to a
+      // register. The readData value will be held until readEn is asserted
+      // again
+      needReg = false;
+      rewriter.create<calyx::GroupDoneOp>(loadOp.getLoc(),
+                                          memoryInterface.readDone());
+      // We refrain from replacing the loadOp result with
+      // memoryInterface.readData, since multiple loadOp's need to be converted
+      // to a single memory's ReadData. If this replacement is done now, we lose
+      // the link between which SSA memref::LoadOp values map to which groups
+      // for loading a value from the Calyx memory. At this point of lowering,
+      // we keep the memref::LoadOp SSA value, and do value replacement _after_
+      // control has been generated (see LateSSAReplacement). This is *vital*
+      // for things such as calyx::InlineCombGroups to be able to properly track
+      // which memory assignment groups belong to which accesses.
+      res = loadOp.getResult();
+    }
+  }
+
+  if (needReg) {
     // Multiple loads from the same memory; In this case, we _may_ have a
     // structural hazard in the design we generate. To get around this, we
     // conservatively place a register in front of each load operation, and
-    // replace all uses of the loaded value with the register output. Proper
-    // handling of this requires the combinational group inliner/scheduler to
-    // be aware of when a combinational expression references multiple loaded
-    // values from the same memory, and then schedule assignments to temporary
-    // registers to get around the structural hazard.
+    // replace all uses of the loaded value with the register output. Reading
+    // for sequential memories will cause a read to take at least 2 cycles,
+    // but it will usually be better because combinational reads on memories
+    // can significantly decrease the maximum achievable frequency.
     auto reg = createRegister(
         loadOp.getLoc(), rewriter, getComponent(),
         loadOp.getMemRefType().getElementTypeBitWidth(),
         getState<ComponentLoweringState>().getUniqueName("load"));
-    calyx::buildAssignmentsForRegisterWrite(
-        rewriter, group, getState<ComponentLoweringState>().getComponentOp(),
-        reg, memoryInterface.readData());
+    rewriter.setInsertionPointToEnd(group.getBodyBlock());
+    rewriter.create<calyx::AssignOp>(loadOp.getLoc(), reg.getIn(),
+                                     memoryInterface.readData());
+    rewriter.create<calyx::AssignOp>(loadOp.getLoc(), reg.getWriteEn(),
+                                     regWriteEn);
+    rewriter.create<calyx::GroupDoneOp>(loadOp.getLoc(), reg.getDone());
     loadOp.getResult().replaceAllUsesWith(reg.getOut());
-    getState<ComponentLoweringState>().addBlockScheduleable(loadOp->getBlock(),
-                                                            group);
+    res = reg.getOut();
   }
+
+  getState<ComponentLoweringState>().registerEvaluatingGroup(res, group);
+  getState<ComponentLoweringState>().addBlockScheduleable(loadOp->getBlock(),
+                                                          group);
   return success();
 }
 
@@ -526,7 +559,13 @@ static LogicalResult buildAllocOp(ComponentLoweringState &componentState,
     sizes.push_back(dim);
     addrSizes.push_back(calyx::handleZeroWidth(dim));
   }
-  auto memoryOp = rewriter.create<calyx::MemoryOp>(
+  // If memref has no size (e.g., memref<i32>) create a 1 dimensional memory of
+  // size 1.
+  if (sizes.empty() && addrSizes.empty()) {
+    sizes.push_back(1);
+    addrSizes.push_back(1);
+  }
+  auto memoryOp = rewriter.create<calyx::SeqMemoryOp>(
       allocOp.getLoc(), componentState.getUniqueName("mem"),
       memtype.getElementType().getIntOrFloatBitWidth(), sizes, addrSizes);
   // Externalize memories by default. This makes it easier for the native
@@ -735,6 +774,21 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   }
   rewriter.eraseOp(op);
   return res;
+}
+
+LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                                     scf::WhileOp whileOp) const {
+  // Only need to add the whileOp to the BlockSchedulables scheduler interface.
+  // Everything else was handled in the `BuildWhileGroups` pattern.
+  ScfWhileOp scfWhileOp(whileOp);
+  SmallVector<calyx::GroupOp> initWhileGroups =
+      getState<ComponentLoweringState>().getLoopInitGroups(scfWhileOp);
+  getState<ComponentLoweringState>().addBlockScheduleable(
+      whileOp.getOperation()->getBlock(), WhileScheduleable{
+                                              scfWhileOp,
+                                              initWhileGroups,
+                                          });
+  return success();
 }
 
 /// Inlines Calyx ExecuteRegionOp operations within their parent blocks.
@@ -988,11 +1042,8 @@ class BuildWhileGroups : public calyx::FuncOpPartialLoweringPattern {
         initGroups.push_back(initGroupOp);
       }
 
-      getState<ComponentLoweringState>().addBlockScheduleable(
-          whileOp.getOperation()->getBlock(), WhileScheduleable{
-                                                  whileOp,
-                                                  initGroups,
-                                              });
+      getState<ComponentLoweringState>().setLoopInitGroups(whileOp, initGroups);
+
       return WalkResult::advance();
     });
     return res;

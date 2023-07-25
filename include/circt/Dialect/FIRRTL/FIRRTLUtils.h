@@ -110,27 +110,79 @@ void walkGroundTypes(FIRRTLType firrtlType,
 // Inner symbol and InnerRef helpers.
 //===----------------------------------------------------------------------===//
 
-/// Returns an operation's `inner_sym`, adding one if necessary.
+/// Returns an inner symbol identifier for the specified target (op or port),
+/// adding one if necessary.
 StringAttr
-getOrAddInnerSym(Operation *op, StringRef nameHint, FModuleOp mod,
-                 std::function<ModuleNamespace &(FModuleOp)> getNamespace);
+getOrAddInnerSym(const hw::InnerSymTarget &target,
+                 llvm::function_ref<ModuleNamespace &(FModuleOp)> getNamespace);
 
-/// Obtain an inner reference to an operation, possibly adding an `inner_sym`
-/// to that operation.
+/// Obtain an inner reference to the target (operation or port),
+/// adding an inner symbol as necessary.
 hw::InnerRefAttr
-getInnerRefTo(Operation *op, StringRef nameHint,
-              std::function<ModuleNamespace &(FModuleOp)> getNamespace);
+getInnerRefTo(const hw::InnerSymTarget &target,
+              llvm::function_ref<ModuleNamespace &(FModuleOp)> getNamespace);
 
-/// Returns a port's `inner_sym`, adding one if necessary.
-StringAttr
-getOrAddInnerSym(FModuleLike mod, size_t portIdx, StringRef nameHint,
-                 std::function<ModuleNamespace &(FModuleLike)> getNamespace);
+/// Returns an inner symbol identifier for the specified operation, adding one
+/// if necessary.
+static inline StringAttr getOrAddInnerSym(
+    Operation *op,
+    llvm::function_ref<ModuleNamespace &(FModuleOp)> getNamespace) {
+  return getOrAddInnerSym(hw::InnerSymTarget(op), getNamespace);
+}
+/// Returns an inner symbol identifier for the specified operation's field
+/// adding one if necessary.
+static inline StringAttr getOrAddInnerSym(
+    Operation *op, uint64_t fieldID,
+    llvm::function_ref<ModuleNamespace &(FModuleOp)> getNamespace) {
+  return getOrAddInnerSym(hw::InnerSymTarget(op, fieldID), getNamespace);
+}
 
-/// Obtain an inner reference to a port, possibly adding an `inner_sym`
-/// to the port.
-hw::InnerRefAttr
-getInnerRefTo(FModuleLike mod, size_t portIdx, StringRef nameHint,
-              std::function<ModuleNamespace &(FModuleLike)> getNamespace);
+/// Obtain an inner reference to an operation, possibly adding an inner symbol.
+static inline hw::InnerRefAttr
+getInnerRefTo(Operation *op,
+              llvm::function_ref<ModuleNamespace &(FModuleOp)> getNamespace) {
+  return getInnerRefTo(hw::InnerSymTarget(op), getNamespace);
+}
+
+/// Obtain an inner reference to an operation's field, possibly adding an inner
+/// symbol.
+static inline hw::InnerRefAttr
+getInnerRefTo(Operation *op, uint64_t fieldID,
+              llvm::function_ref<ModuleNamespace &(FModuleOp)> getNamespace) {
+  return getInnerRefTo(hw::InnerSymTarget(op, fieldID), getNamespace);
+}
+
+/// Returns an inner symbol identifier for the specified port, adding one if
+/// necessary.
+static inline StringAttr getOrAddInnerSym(
+    FModuleLike mod, size_t portIdx,
+    llvm::function_ref<ModuleNamespace &(FModuleLike)> getNamespace) {
+  return getOrAddInnerSym(hw::InnerSymTarget(portIdx, mod), getNamespace);
+}
+
+/// Returns an inner symbol identifier for the specified port's field, adding
+/// one if necessary.
+static inline StringAttr getOrAddInnerSym(
+    FModuleLike mod, size_t portIdx, uint64_t fieldID,
+    llvm::function_ref<ModuleNamespace &(FModuleLike)> getNamespace) {
+  return getOrAddInnerSym(hw::InnerSymTarget(portIdx, mod, fieldID),
+                          getNamespace);
+}
+
+/// Obtain an inner reference to a port, possibly adding an inner symbol.
+static inline hw::InnerRefAttr
+getInnerRefTo(FModuleLike mod, size_t portIdx,
+              llvm::function_ref<ModuleNamespace &(FModuleLike)> getNamespace) {
+  return getInnerRefTo(hw::InnerSymTarget(portIdx, mod), getNamespace);
+}
+
+/// Obtain an inner reference to a port's field, possibly adding an inner
+/// symbol.
+static inline hw::InnerRefAttr
+getInnerRefTo(FModuleLike mod, size_t portIdx, uint64_t fieldID,
+              llvm::function_ref<ModuleNamespace &(FModuleLike)> getNamespace) {
+  return getInnerRefTo(hw::InnerSymTarget(portIdx, mod, fieldID), getNamespace);
+}
 
 //===----------------------------------------------------------------------===//
 // Type utilities
@@ -159,6 +211,22 @@ inline FIRRTLType mapBaseType(FIRRTLType type,
       .Case<FIRRTLBaseType>([&](auto base) { return fn(base); })
       .Case<RefType>([&](auto ref) {
         return RefType::get(fn(ref.getType()), ref.getForceable());
+      });
+}
+
+/// Return a FIRRTLType with its base type component mutated by the given
+/// function. Return null when the function returns null.
+/// (i.e., ref<T> -> ref<f(T)> if f(T) != null else null, and T -> f(T)).
+inline FIRRTLType
+mapBaseTypeNullable(FIRRTLType type,
+                    function_ref<FIRRTLBaseType(FIRRTLBaseType)> fn) {
+  return TypeSwitch<FIRRTLType, FIRRTLType>(type)
+      .Case<FIRRTLBaseType>([&](auto base) { return fn(base); })
+      .Case<RefType>([&](auto ref) -> FIRRTLType {
+        auto result = fn(ref.getType());
+        if (!result)
+          return {};
+        return RefType::get(result, ref.getForceable());
       });
 }
 

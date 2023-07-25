@@ -128,11 +128,6 @@ struct FirtoolOptions {
                      "relevant metadata"),
       llvm::cl::init(false), llvm::cl::cat(category)};
 
-  llvm::cl::opt<std::string> replSeqMemCircuit{
-      "repl-seq-mem-circuit",
-      llvm::cl::desc("Circuit root for seq mem metadata"), llvm::cl::init(""),
-      llvm::cl::cat(category)};
-
   llvm::cl::opt<std::string> replSeqMemFile{
       "repl-seq-mem-file", llvm::cl::desc("File name for seq mem metadata"),
       llvm::cl::init(""), llvm::cl::cat(category)};
@@ -174,7 +169,8 @@ struct FirtoolOptions {
       llvm::cl::init(false), llvm::cl::cat(category)};
 
   llvm::cl::opt<bool> addMuxPragmas{
-      "add-mux-pragmas", llvm::cl::desc("Annotate mux pragmas"),
+      "add-mux-pragmas",
+      llvm::cl::desc("Annotate mux pragmas for memory array access"),
       llvm::cl::init(false), llvm::cl::cat(category)};
 
   llvm::cl::opt<bool> emitChiselAssertsAsSVA{

@@ -39,6 +39,7 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
+#include <memory>
 
 using namespace circt;
 using namespace firrtl;
@@ -80,6 +81,9 @@ struct SharedParserConstants {
   /// this.  Do not use `annotationMap[key]`, use `aM.lookup(key)` instead.
   llvm::StringMap<ArrayAttr> annotationMap;
 
+  /// A map from identifiers to type aliases.
+  llvm::StringMap<FIRRTLType> aliasMap;
+
   /// An empty array attribute.
   const ArrayAttr emptyArrayAttr;
 
@@ -99,46 +103,6 @@ private:
 //===----------------------------------------------------------------------===//
 
 namespace {
-/// The FIRRTL specification version.
-struct FIRVersion {
-  uint32_t major, minor, patch;
-
-  /// Three way compare of one FIRRTL version with another FIRRTL version.
-  /// Return 1 if the first version is greater than the second version, -1 if
-  /// the first version is less than the second version, and 0 if the versions
-  /// are equal.
-  static int compare(const FIRVersion &a, const FIRVersion &b) {
-    if (a.major > b.major)
-      return 1;
-    if (a.major < b.major)
-      return -1;
-    if (a.minor > b.minor)
-      return 1;
-    if (a.minor < b.minor)
-      return -1;
-    if (a.patch > b.patch)
-      return 1;
-    if (a.patch < b.patch)
-      return -1;
-    return 0;
-  }
-};
-
-/// Method to enable printing of FIRVersions
-template <typename T>
-static T &operator<<(T &os, const FIRVersion &version) {
-  os << version.major << "." << version.minor << "." << version.patch;
-  return os;
-}
-
-/// The minimum FIRRTL Version supported by this compiler.  If a version is seen
-/// less than this, the compiler should reject the circuit.
-FIRVersion minimumFIRVersion{0, 2, 0};
-
-/// The default FIRRTL Version that is assumed if no FIRRTL Version string is
-/// specified.
-FIRVersion defaultFIRVersion{1, 0, 0};
-
 /// This class implements logic common to all levels of the parser, including
 /// things like types and helper logic.
 struct FIRParser {
@@ -172,6 +136,13 @@ struct FIRParser {
     return emitError(getToken().getLoc(), message);
   }
   InFlightDiagnostic emitError(SMLoc loc, const Twine &message = {});
+
+  /// Emit a warning.
+  InFlightDiagnostic emitWarning(const Twine &message = {}) {
+    return emitWarning(getToken().getLoc(), message);
+  }
+
+  InFlightDiagnostic emitWarning(SMLoc loc, const Twine &message = {});
 
   //===--------------------------------------------------------------------===//
   // Location Handling
@@ -313,6 +284,10 @@ InFlightDiagnostic FIRParser::emitError(SMLoc loc, const Twine &message) {
   return diag;
 }
 
+InFlightDiagnostic FIRParser::emitWarning(SMLoc loc, const Twine &message) {
+  return mlir::emitWarning(translateLocation(loc), message);
+}
+
 //===----------------------------------------------------------------------===//
 // Token Parsing
 //===----------------------------------------------------------------------===//
@@ -370,8 +345,8 @@ public:
       using ILH = FIRParserOptions::InfoLocHandling;
       switch (parser->constants.options.infoLocatorHandling) {
       case ILH::IgnoreInfo:
-        assert(0 && "Should not parse info locations if ignoring");
-        LLVM_FALLTHROUGH;
+        assert(0 && "Should not return info locations if ignoring");
+        break;
       case ILH::PreferInfo:
         infoLoc = loc;
         break;
@@ -647,8 +622,9 @@ ParseResult FIRParser::parseVersionLit(const Twine &message) {
   version.patch = cInt.getLimitedValue(UINT32_MAX);
   if (version.major != aInt || version.minor != bInt || version.patch != cInt)
     return emitError("integers out of range"), failure();
-  if (FIRVersion::compare(version, minimumFIRVersion) < 0)
-    return emitError() << "FIRRTL version must be >=" << minimumFIRVersion,
+  if (FIRVersion::compare(version, FIRVersion::minimumFIRVersion()) < 0)
+    return emitError() << "FIRRTL version must be >="
+                       << FIRVersion::minimumFIRVersion(),
            failure();
   consumeToken(FIRToken::version);
   return success();
@@ -796,7 +772,7 @@ ParseResult FIRParser::parseEnumType(FIRRTLType &result) {
           FIRRTLType parsedType;
           if (parseType(parsedType, "expected enumeration type"))
             return failure();
-          type = dyn_cast<FIRRTLBaseType>(parsedType);
+          type = type_dyn_cast<FIRRTLBaseType>(parsedType);
           if (!type)
             return emitError(fieldLoc, "field must be a base type");
         } else {
@@ -823,6 +799,7 @@ ParseResult FIRParser::parseEnumType(FIRRTLType &result) {
 ///      ::= 'RWProbe' '<' type '>'
 ///      ::= 'const' type
 ///      ::= 'String'
+///      ::= id
 ///
 /// field: 'flip'? fieldId ':' type
 ///
@@ -883,7 +860,7 @@ ParseResult FIRParser::parseType(FIRRTLType &result, const Twine &message) {
 
     bool forceable = kind == FIRToken::kw_RWProbe;
 
-    auto innerType = dyn_cast<FIRRTLBaseType>(type);
+    auto innerType = type_dyn_cast<FIRRTLBaseType>(type);
     if (!innerType || innerType.containsReference())
       return emitError(loc, "cannot nest reference types");
 
@@ -908,9 +885,17 @@ ParseResult FIRParser::parseType(FIRRTLType &result, const Twine &message) {
           StringRef fieldName;
           FIRRTLType type;
           if (parseFieldId(fieldName, "expected bundle field name") ||
-              parseToken(FIRToken::colon, "expected ':' in bundle") ||
-              parseType(type, "expected bundle field type"))
+              parseToken(FIRToken::colon, "expected ':' in bundle"))
             return failure();
+          auto loc = getToken().getLoc();
+          if (parseType(type, "expected bundle field type"))
+            return failure();
+
+          // We require that elements of aggregates themselves
+          // support notion of FieldID, reject if the type does not.
+          if (!isa<hw::FieldIDTypeInterface>(type))
+            return emitError(loc, "type ")
+                   << type << " cannot be used as field in a bundle";
 
           elements.push_back(
               {StringAttr::get(getContext(), fieldName), isFlipped, type});
@@ -932,11 +917,25 @@ ParseResult FIRParser::parseType(FIRRTLType &result, const Twine &message) {
     break;
   }
 
-  case FIRToken::l_brace_bar:
+  case FIRToken::l_brace_bar: {
     if (parseEnumType(result))
       return failure();
     break;
+  }
 
+  case FIRToken::identifier: {
+    StringRef id;
+    auto loc = getToken().getLoc();
+    if (parseId(id, "expected a type alias name"))
+      return failure();
+    auto it = constants.aliasMap.find(id);
+    if (it == constants.aliasMap.end()) {
+      emitError(loc) << "type identifier `" << id << "` is not declared";
+      return failure();
+    }
+    result = it->second;
+    break;
+  }
   case FIRToken::kw_const: {
     consumeToken(FIRToken::kw_const);
     auto nextToken = getToken();
@@ -949,7 +948,7 @@ ParseResult FIRParser::parseType(FIRRTLType &result, const Twine &message) {
     if (failed(parseType(result, message)))
       return failure();
 
-    auto baseType = dyn_cast<FIRRTLBaseType>(result);
+    auto baseType = type_dyn_cast<FIRRTLBaseType>(result);
     if (!baseType)
       return emitError(loc, "only hardware types can be 'const'");
 
@@ -978,7 +977,13 @@ ParseResult FIRParser::parseType(FIRRTLType &result, const Twine &message) {
     if (size < 0)
       return emitError(sizeLoc, "invalid size specifier"), failure();
 
-    auto baseType = dyn_cast<FIRRTLBaseType>(result);
+    // We require that elements of aggregates themselves
+    // support notion of FieldID, reject if the type does not.
+    if (!isa<hw::FieldIDTypeInterface>(result))
+      return emitError(sizeLoc, "type ")
+             << result << " cannot be used in a vector";
+
+    auto baseType = type_dyn_cast<FIRRTLBaseType>(result);
     if (baseType)
       result = FVectorType::get(baseType, size);
     else
@@ -1023,8 +1028,7 @@ using SymbolValueEntry = llvm::PointerUnion<Value, UnbundledID>;
 
 using ModuleSymbolTable =
     llvm::StringMap<std::pair<SMLoc, SymbolValueEntry>, llvm::BumpPtrAllocator>;
-using ModuleSymbolTableEntry =
-    llvm::StringMapEntry<std::pair<SMLoc, SymbolValueEntry>>;
+using ModuleSymbolTableEntry = ModuleSymbolTable::MapEntryTy;
 
 using UnbundledValueEntry = SmallVector<std::pair<Attribute, Value>>;
 using UnbundledValuesList = std::vector<UnbundledValueEntry>;
@@ -1331,8 +1335,9 @@ struct LazyLocationListener : public OpBuilder::Listener {
         using ILH = FIRParserOptions::InfoLocHandling;
         switch (parser.getConstants().options.infoLocatorHandling) {
         case ILH::IgnoreInfo:
-          assert(0 && "Should not parse info locations if ignoring");
-          LLVM_FALLTHROUGH;
+          // Shouldn't have an infoLoc, but if we do ignore it.
+          opAndSMLoc.first->setLoc(parser.translateLocation(opAndSMLoc.second));
+          break;
         case ILH::PreferInfo:
           opAndSMLoc.first->setLoc(infoLoc);
           break;
@@ -1404,12 +1409,13 @@ namespace {
 struct FIRStmtParser : public FIRParser {
   explicit FIRStmtParser(Block &blockToInsertInto,
                          FIRModuleContext &moduleContext,
-                         Namespace &modNameSpace, FIRVersion &version)
+                         Namespace &modNameSpace, FIRVersion &version,
+                         SymbolRefAttr groupSym = {})
       : FIRParser(moduleContext.getConstants(), moduleContext.getLexer(),
                   version),
         builder(UnknownLoc::get(getContext()), getContext()),
         locationProcessor(this->builder), moduleContext(moduleContext),
-        modNameSpace(modNameSpace) {
+        modNameSpace(modNameSpace), groupSym(groupSym) {
     builder.setInsertionPointToEnd(&blockToInsertInto);
   }
 
@@ -1471,6 +1477,8 @@ private:
   std::optional<ParseResult> parseExpWithLeadingKeyword(FIRToken keyword);
 
   // Stmt Parsing
+  ParseResult parseSubBlock(Block &blockToInsertInto, unsigned indent,
+                            SymbolRefAttr groupSym);
   ParseResult parseAttach();
   ParseResult parseMemPort(MemDirAttr direction);
   ParseResult parsePrintf();
@@ -1493,6 +1501,7 @@ private:
   ParseResult parseLeadingExpStmt(Value lhs);
   ParseResult parseConnect();
   ParseResult parseInvalidate();
+  ParseResult parseGroup(unsigned indent);
 
   // Declarations
   ParseResult parseInstance();
@@ -1512,6 +1521,10 @@ private:
   FIRModuleContext &moduleContext;
 
   Namespace &modNameSpace;
+
+  // An optional symbol that contains the current group that we are in.  This is
+  // used to construct a nested symbol for a group definition operation.
+  SymbolRefAttr groupSym;
 };
 
 } // end anonymous namespace
@@ -1519,7 +1532,7 @@ private:
 /// Attach invalid values to every element of the value.
 // NOLINTNEXTLINE(misc-no-recursion)
 void FIRStmtParser::emitInvalidate(Value val, Flow flow) {
-  auto tpe = dyn_cast<FIRRTLBaseType>(val.getType());
+  auto tpe = type_dyn_cast<FIRRTLBaseType>(val.getType());
   // Invalidate does nothing for non-base types.
   // When aggregates-of-refs are supported, instead check 'containsReference'
   // below.
@@ -1530,7 +1543,7 @@ void FIRStmtParser::emitInvalidate(Value val, Flow flow) {
   if (props.isPassive && !props.containsAnalog) {
     if (flow == Flow::Source)
       return;
-    builder.create<StrictConnectOp>(val, builder.create<InvalidValueOp>(tpe));
+    emitConnect(builder, val, builder.create<InvalidValueOp>(tpe));
     return;
   }
 
@@ -1570,17 +1583,17 @@ void FIRStmtParser::emitInvalidate(Value val, Flow flow) {
 
 void FIRStmtParser::emitPartialConnect(ImplicitLocOpBuilder &builder, Value dst,
                                        Value src) {
-  auto dstType = dyn_cast<FIRRTLBaseType>(dst.getType());
-  auto srcType = dyn_cast<FIRRTLBaseType>(src.getType());
+  auto dstType = type_dyn_cast<FIRRTLBaseType>(dst.getType());
+  auto srcType = type_dyn_cast<FIRRTLBaseType>(src.getType());
   if (!dstType || !srcType)
     return emitConnect(builder, dst, src);
 
-  if (isa<AnalogType>(dstType)) {
+  if (type_isa<AnalogType>(dstType)) {
     builder.create<AttachOp>(ArrayRef<Value>{dst, src});
   } else if (dstType == srcType && !dstType.containsAnalog()) {
     emitConnect(builder, dst, src);
-  } else if (auto dstBundle = dyn_cast<BundleType>(dstType)) {
-    auto srcBundle = cast<BundleType>(srcType);
+  } else if (auto dstBundle = type_dyn_cast<BundleType>(dstType)) {
+    auto srcBundle = type_cast<BundleType>(srcType);
     auto numElements = dstBundle.getNumElements();
     for (size_t dstIndex = 0; dstIndex < numElements; ++dstIndex) {
       // Find a matching field by name in the other bundle.
@@ -1612,8 +1625,8 @@ void FIRStmtParser::emitPartialConnect(ImplicitLocOpBuilder &builder, Value dst,
       else
         emitPartialConnect(builder, srcField, dstField);
     }
-  } else if (auto dstVector = dyn_cast<FVectorType>(dstType)) {
-    auto srcVector = cast<FVectorType>(srcType);
+  } else if (auto dstVector = type_dyn_cast<FVectorType>(dstType)) {
+    auto srcVector = type_cast<FVectorType>(srcType);
     auto dstNumElements = dstVector.getNumElements();
     auto srcNumEelemnts = srcVector.getNumElements();
     // Partial connect will connect all elements up to the end of the array.
@@ -1862,11 +1875,11 @@ ParseResult FIRStmtParser::parsePostFixFieldId(Value &result) {
   for (auto fieldName : fields) {
     std::optional<unsigned> indexV;
     auto type = result.getType();
-    if (auto refTy = dyn_cast<RefType>(type))
+    if (auto refTy = type_dyn_cast<RefType>(type))
       type = refTy.getType();
-    if (auto bundle = dyn_cast<BundleType>(type))
+    if (auto bundle = type_dyn_cast<BundleType>(type))
       indexV = bundle.getElementIndex(fieldName);
-    else if (auto bundle = dyn_cast<OpenBundleType>(type))
+    else if (auto bundle = type_dyn_cast<OpenBundleType>(type))
       indexV = bundle.getElementIndex(fieldName);
     else
       return emitError(loc, "subfield requires bundle operand ");
@@ -1876,14 +1889,14 @@ ParseResult FIRStmtParser::parsePostFixFieldId(Value &result) {
     auto indexNo = *indexV;
 
     FailureOr<Value> subResult;
-    if (isa<RefType>(result.getType())) {
+    if (type_isa<RefType>(result.getType())) {
       NamedAttribute attrs = {getConstants().indexIdentifier,
                               builder.getI32IntegerAttr(indexNo)};
       subResult = emitCachedSubAccess<RefSubOp>(result, attrs, indexNo, loc);
     } else {
       NamedAttribute attrs = {getConstants().fieldIndexIdentifier,
                               builder.getI32IntegerAttr(indexNo)};
-      if (isa<BundleType>(type))
+      if (type_isa<BundleType>(type))
         subResult =
             emitCachedSubAccess<SubfieldOp>(result, attrs, indexNo, loc);
       else
@@ -1920,9 +1933,9 @@ ParseResult FIRStmtParser::parsePostFixIntSubscript(Value &result) {
                           builder.getI32IntegerAttr(indexNo)};
 
   FailureOr<Value> subResult;
-  if (isa<RefType>(result.getType()))
+  if (type_isa<RefType>(result.getType()))
     subResult = emitCachedSubAccess<RefSubOp>(result, attrs, indexNo, loc);
-  else if (isa<FVectorType>(result.getType()))
+  else if (type_isa<FVectorType>(result.getType()))
     subResult = emitCachedSubAccess<SubindexOp>(result, attrs, indexNo, loc);
   else
     subResult =
@@ -1946,7 +1959,7 @@ ParseResult FIRStmtParser::parsePostFixDynamicSubscript(Value &result) {
     return failure();
 
   // If the index expression is a flip type, strip it off.
-  auto indexType = dyn_cast<FIRRTLBaseType>(index.getType());
+  auto indexType = type_dyn_cast<FIRRTLBaseType>(index.getType());
   if (!indexType)
     return emitError("expected base type for index expression");
   indexType = indexType.getPassiveType();
@@ -2005,7 +2018,7 @@ ParseResult FIRStmtParser::parsePrimExp(Value &result) {
 
   SmallVector<FIRRTLType, 3> opTypes;
   for (auto v : operands)
-    opTypes.push_back(cast<FIRRTLType>(v.getType()));
+    opTypes.push_back(type_cast<FIRRTLType>(v.getType()));
 
   unsigned numOperandsExpected;
   SmallVector<StringAttr, 2> attrNames;
@@ -2297,6 +2310,13 @@ ParseResult FIRStmtParser::parseSimpleStmtImpl(unsigned stmtIndent) {
     return parseRefRelease();
   case FIRToken::lp_release_initial:
     return parseRefReleaseInitial();
+  case FIRToken::kw_group:
+    if (FIRVersion::compare(version, FIRVersion({3, 1, 0})) < 0)
+      return emitError()
+             << "unexpected token: optional groups are a FIRRTL 3.1.0+ "
+                "feature, but the specified FIRRTL version was "
+             << version;
+    return parseGroup(stmtIndent);
 
   default: {
     // Statement productions that start with an expression.
@@ -2329,6 +2349,38 @@ ParseResult FIRStmtParser::parseSimpleStmtImpl(unsigned stmtIndent) {
   case FIRToken::kw_regreset:
     return parseRegisterWithReset();
   }
+}
+
+ParseResult FIRStmtParser::parseSubBlock(Block &blockToInsertInto,
+                                         unsigned indent,
+                                         SymbolRefAttr groupSym) {
+  // Declarations within the suite are scoped to within the suite.
+  auto suiteScope = std::make_unique<FIRModuleContext::ContextScope>(
+      moduleContext, &blockToInsertInto);
+
+  // After parsing the when region, we can release any new entries in
+  // unbundledValues since the symbol table entries that refer to them will be
+  // gone.
+  UnbundledValueRestorer x(moduleContext.unbundledValues);
+
+  // We parse the substatements into their own parser, so they get inserted
+  // into the specified 'when' region.
+  auto subParser = std::make_unique<FIRStmtParser>(
+      blockToInsertInto, moduleContext, modNameSpace, version, groupSym);
+
+  // Figure out whether the body is a single statement or a nested one.
+  auto stmtIndent = getIndentation();
+
+  // Parsing a single statment is straightforward.
+  if (!stmtIndent.has_value())
+    return subParser->parseSimpleStmt(indent);
+
+  if (*stmtIndent <= indent)
+    return emitError("statement must be indented more than previous statement"),
+           failure();
+
+  // Parse a block of statements that are indented more than the when.
+  return subParser->parseSimpleStmtBlock(indent);
 }
 
 /// attach ::= 'attach' '(' exp+ ')' info?
@@ -2385,7 +2437,7 @@ ParseResult FIRStmtParser::parseMemPort(MemDirAttr direction) {
       parseExp(clock, "expected clock expression") || parseOptionalInfo())
     return failure();
 
-  auto memVType = dyn_cast<CMemoryType>(memory.getType());
+  auto memVType = type_dyn_cast<CMemoryType>(memory.getType());
   if (!memVType)
     return emitError(startLoc,
                      "memory port should have behavioral memory type");
@@ -2573,39 +2625,8 @@ ParseResult FIRStmtParser::parseWhen(unsigned whenIndent) {
   // Create the IR representation for the when.
   auto whenStmt = builder.create<WhenOp>(condition, /*createElse*/ false);
 
-  // This is a function to parse a suite body.
-  auto parseSuite = [&](Block &blockToInsertInto) -> ParseResult {
-    // Declarations within the suite are scoped to within the suite.
-    FIRModuleContext::ContextScope suiteScope(moduleContext,
-                                              &blockToInsertInto);
-
-    // After parsing the when region, we can release any new entries in
-    // unbundledValues since the symbol table entries that refer to them will be
-    // gone.
-    UnbundledValueRestorer x(moduleContext.unbundledValues);
-
-    // We parse the substatements into their own parser, so they get inserted
-    // into the specified 'when' region.
-    FIRStmtParser subParser(blockToInsertInto, moduleContext, modNameSpace,
-                            version);
-
-    // Figure out whether the body is a single statement or a nested one.
-    auto stmtIndent = getIndentation();
-
-    // Parsing a single statment is straightforward.
-    if (!stmtIndent.has_value())
-      return subParser.parseSimpleStmt(whenIndent);
-
-    if (*stmtIndent <= whenIndent)
-      return emitError("statement must be indented more than 'when'"),
-             failure();
-
-    // Parse a block of statements that are indented more than the when.
-    return subParser.parseSimpleStmtBlock(whenIndent);
-  };
-
   // Parse the 'then' body into the 'then' region.
-  if (parseSuite(whenStmt.getThenBlock()))
+  if (parseSubBlock(whenStmt.getThenBlock(), whenIndent, groupSym))
     return failure();
 
   // If the else is present, handle it otherwise we're done.
@@ -2629,15 +2650,18 @@ ParseResult FIRStmtParser::parseWhen(unsigned whenIndent) {
   // the outer 'when'.
   if (getToken().is(FIRToken::kw_when)) {
     // We create a sub parser for the else block.
-    FIRStmtParser subParser(whenStmt.getElseBlock(), moduleContext,
-                            modNameSpace, version);
-    return subParser.parseSimpleStmt(whenIndent);
+    auto subParser =
+        std::make_unique<FIRStmtParser>(whenStmt.getElseBlock(), moduleContext,
+                                        modNameSpace, version, groupSym);
+
+    return subParser->parseSimpleStmt(whenIndent);
   }
 
   // Parse the 'else' body into the 'else' region.
   LocationAttr elseLoc; // ignore the else locator.
   if (parseToken(FIRToken::colon, "expected ':' after 'else'") ||
-      parseOptionalInfoLocator(elseLoc) || parseSuite(whenStmt.getElseBlock()))
+      parseOptionalInfoLocator(elseLoc) ||
+      parseSubBlock(whenStmt.getElseBlock(), whenIndent, groupSym))
     return failure();
 
   // TODO(firrtl spec): There is no reason for the 'else :' grammar to take an
@@ -2653,7 +2677,7 @@ ParseResult FIRStmtParser::parseEnumExp(Value &value) {
     return failure();
 
   // Check that the input type is a legal enumeration.
-  auto enumType = dyn_cast<FEnumType>(type);
+  auto enumType = type_dyn_cast<FEnumType>(type);
   if (!enumType)
     return emitError(startLoc,
                      "expected enumeration type in enumeration expression");
@@ -2699,7 +2723,7 @@ ParseResult FIRStmtParser::parseMatch(unsigned matchIndent) {
       parseOptionalInfo())
     return failure();
 
-  auto enumType = dyn_cast<FEnumType>(input.getType());
+  auto enumType = type_dyn_cast<FEnumType>(input.getType());
   if (!enumType)
     return mlir::emitError(
                input.getLoc(),
@@ -2766,8 +2790,9 @@ ParseResult FIRStmtParser::parseMatch(unsigned matchIndent) {
       return failure();
 
     // Parse a block of statements that are indented more than the case.
-    FIRStmtParser subParser(*caseBlock, moduleContext, modNameSpace, version);
-    if (subParser.parseSimpleStmtBlock(*caseIndent))
+    auto subParser = std::make_unique<FIRStmtParser>(
+        *caseBlock, moduleContext, modNameSpace, version, groupSym);
+    if (subParser->parseSimpleStmtBlock(*caseIndent))
       return failure();
   }
 
@@ -2835,11 +2860,11 @@ ParseResult FIRStmtParser::parseRefDefine() {
     return failure();
 
   // Check reference expressions are of reference type.
-  if (!isa<RefType>(target.getType()))
+  if (!type_isa<RefType>(target.getType()))
     return emitError(startTok.getLoc(), "expected reference-type expression in "
                                         "'define' target (LHS), got ")
            << target.getType();
-  if (!isa<RefType>(src.getType()))
+  if (!type_isa<RefType>(src.getType()))
     return emitError(startTok.getLoc(), "expected reference-type expression in "
                                         "'define' source (RHS), got ")
            << src.getType();
@@ -2875,7 +2900,7 @@ ParseResult FIRStmtParser::parseRefRead(Value &result) {
   locationProcessor.setLoc(startTok.getLoc());
 
   // Check argument is a ref-type value.
-  if (!isa<RefType>(ref.getType()))
+  if (!type_isa<RefType>(ref.getType()))
     return emitError(startTok.getLoc(),
                      "expected reference-type expression in 'read', got ")
            << ref.getType();
@@ -2898,7 +2923,7 @@ ParseResult FIRStmtParser::parseProbe(Value &result) {
   locationProcessor.setLoc(startTok.getLoc());
 
   // Check probe expression is base-type.
-  if (!isa<FIRRTLBaseType>(staticRef.getType()))
+  if (!type_isa<FIRRTLBaseType>(staticRef.getType()))
     return emitError(startTok.getLoc(),
                      "expected base-type expression in 'probe', got ")
            << staticRef.getType();
@@ -2931,31 +2956,36 @@ ParseResult FIRStmtParser::parseRWProbe(Value &result) {
   // Not public port (verifier)
 
   // Check probe expression is base-type.
-  if (!isa<FIRRTLBaseType>(staticRef.getType()))
+  if (!type_isa<FIRRTLBaseType>(staticRef.getType()))
     return emitError(startTok.getLoc(),
                      "expected base-type expression in 'rwprobe', got ")
            << staticRef.getType();
 
   // Check for other unsupported reference sources.
-  // TODO: Add to ref.send verifier / inferReturnTypes.
-  if (isa_and_nonnull<MemOp, CombMemOp, SeqMemOp, MemoryPortOp,
-                      MemoryDebugPortOp, MemoryPortAccessOp>(
-          staticRef.getDefiningOp()))
-    return emitError(startTok.getLoc(), "cannot probe memories or their ports");
+  auto fieldRef = getFieldRefFromValue(staticRef);
+  auto target = fieldRef.getValue();
 
   // TODO: Support for non-public ports.
-  if (isa<BlockArgument>(staticRef))
+  if (isa<BlockArgument>(target))
     return emitError(startTok.getLoc(), "rwprobe of port not yet supported");
-  auto *op = staticRef.getDefiningOp();
-  if (!op)
+
+  auto *definingOp = target.getDefiningOp();
+  if (!definingOp)
     return emitError(startTok.getLoc(),
                      "rwprobe value must be defined by an operation");
-  auto forceable = dyn_cast<Forceable>(op);
+
+  if (isa<MemOp, CombMemOp, SeqMemOp, MemoryPortOp, MemoryDebugPortOp,
+          MemoryPortAccessOp>(definingOp))
+    return emitError(startTok.getLoc(), "cannot probe memories or their ports");
+
+  auto forceable = dyn_cast<Forceable>(definingOp);
   if (!forceable || !forceable.isForceable() /* e.g., is/has const type*/)
     return emitError(startTok.getLoc(), "rwprobe target not forceable")
-        .attachNote(op->getLoc());
+        .attachNote(definingOp->getLoc());
 
-  result = forceable.getDataRef();
+  // TODO: do the ref.sub work while parsing the static expression.
+  result =
+      getValueByFieldID(builder, forceable.getDataRef(), fieldRef.getFieldID());
 
   return success();
 }
@@ -2974,13 +3004,13 @@ ParseResult FIRStmtParser::parseRefForce() {
     return failure();
 
   // Check reference expression is of reference type.
-  auto ref = dyn_cast<RefType>(dest.getType());
+  auto ref = type_dyn_cast<RefType>(dest.getType());
   if (!ref || !ref.getForceable())
     return emitError(
                startTok.getLoc(),
                "expected rwprobe-type expression for force destination, got ")
            << dest.getType();
-  auto srcBaseType = dyn_cast<FIRRTLBaseType>(src.getType());
+  auto srcBaseType = type_dyn_cast<FIRRTLBaseType>(src.getType());
   if (!srcBaseType)
     return emitError(startTok.getLoc(),
                      "expected base-type for force source, got ")
@@ -3015,12 +3045,12 @@ ParseResult FIRStmtParser::parseRefForceInitial() {
     return failure();
 
   // Check reference expression is of reference type.
-  auto ref = dyn_cast<RefType>(dest.getType());
+  auto ref = type_dyn_cast<RefType>(dest.getType());
   if (!ref || !ref.getForceable())
     return emitError(startTok.getLoc(), "expected rwprobe-type expression for "
                                         "force_initial destination, got ")
            << dest.getType();
-  auto srcBaseType = dyn_cast<FIRRTLBaseType>(src.getType());
+  auto srcBaseType = type_dyn_cast<FIRRTLBaseType>(src.getType());
   if (!srcBaseType)
     return emitError(startTok.getLoc(),
                      "expected base-type expression for force_initial "
@@ -3064,7 +3094,8 @@ ParseResult FIRStmtParser::parseRefRelease() {
     return failure();
 
   // Check reference expression is of reference type.
-  if (auto ref = dyn_cast<RefType>(dest.getType()); !ref || !ref.getForceable())
+  if (auto ref = type_dyn_cast<RefType>(dest.getType());
+      !ref || !ref.getForceable())
     return emitError(
                startTok.getLoc(),
                "expected rwprobe-type expression for release destination, got ")
@@ -3090,7 +3121,8 @@ ParseResult FIRStmtParser::parseRefReleaseInitial() {
     return failure();
 
   // Check reference expression is of reference type.
-  if (auto ref = dyn_cast<RefType>(dest.getType()); !ref || !ref.getForceable())
+  if (auto ref = type_dyn_cast<RefType>(dest.getType());
+      !ref || !ref.getForceable())
     return emitError(startTok.getLoc(), "expected rwprobe-type expression for "
                                         "release_initial destination, got ")
            << dest.getType();
@@ -3119,8 +3151,8 @@ ParseResult FIRStmtParser::parseConnect() {
       parseExp(rhs, "expected connect expression") || parseOptionalInfo())
     return failure();
 
-  auto lhsType = dyn_cast<FIRRTLBaseType>(lhs.getType());
-  auto rhsType = dyn_cast<FIRRTLBaseType>(rhs.getType());
+  auto lhsType = type_dyn_cast<FIRRTLBaseType>(lhs.getType());
+  auto rhsType = type_dyn_cast<FIRRTLBaseType>(rhs.getType());
   if (!lhsType || !rhsType)
     return emitError(loc, "cannot connect reference or property types");
   // TODO: Once support lands for agg-of-ref, add test for this check!
@@ -3146,8 +3178,8 @@ ParseResult FIRStmtParser::parsePropAssign() {
       parseExp(rhs, "expected propassign expression") || parseOptionalInfo())
     return failure();
 
-  auto lhsType = dyn_cast<PropertyType>(lhs.getType());
-  auto rhsType = dyn_cast<PropertyType>(rhs.getType());
+  auto lhsType = type_dyn_cast<PropertyType>(lhs.getType());
+  auto rhsType = type_dyn_cast<PropertyType>(rhs.getType());
   if (!lhsType || !rhsType)
     return emitError(loc, "can only propassign property types");
   if (lhsType != rhsType)
@@ -3168,6 +3200,42 @@ ParseResult FIRStmtParser::parseInvalidate() {
 
   locationProcessor.setLoc(startTok.getLoc());
   emitInvalidate(lhs);
+  return success();
+}
+
+ParseResult FIRStmtParser::parseGroup(unsigned indent) {
+
+  auto startTok = consumeToken(FIRToken::kw_group);
+  auto loc = startTok.getLoc();
+
+  StringRef id;
+  if (parseId(id, "expected group identifer") ||
+      parseToken(FIRToken::colon, "expected ':' at end of group") ||
+      parseOptionalInfo())
+    return failure();
+
+  locationProcessor.setLoc(loc);
+
+  StringRef rootGroup;
+  SmallVector<FlatSymbolRefAttr> nestedGroups;
+  if (!groupSym) {
+    rootGroup = id;
+  } else {
+    rootGroup = groupSym.getRootReference();
+    auto nestedRefs = groupSym.getNestedReferences();
+    nestedGroups.append(nestedRefs.begin(), nestedRefs.end());
+    nestedGroups.push_back(FlatSymbolRefAttr::get(builder.getContext(), id));
+  }
+
+  auto groupOp = builder.create<GroupOp>(
+      SymbolRefAttr::get(builder.getContext(), rootGroup, nestedGroups));
+  groupOp->getRegion(0).push_back(new Block());
+
+  if (getIndentation() > indent)
+    if (parseSubBlock(groupOp.getRegion().front(), indent,
+                      groupOp.getGroupName()))
+      return failure();
+
   return success();
 }
 
@@ -3210,8 +3278,8 @@ ParseResult FIRStmtParser::parseLeadingExpStmt(Value lhs) {
 
   locationProcessor.setLoc(loc);
 
-  auto lhsType = dyn_cast<FIRRTLBaseType>(lhs.getType());
-  auto rhsType = dyn_cast<FIRRTLBaseType>(rhs.getType());
+  auto lhsType = type_dyn_cast<FIRRTLBaseType>(lhs.getType());
+  auto rhsType = type_dyn_cast<FIRRTLBaseType>(rhs.getType());
   if (!lhsType || !rhsType)
     return emitError(loc, "cannot connect reference or property types");
   // TODO: Once support lands for agg-of-ref, add test for this check!
@@ -3321,7 +3389,7 @@ ParseResult FIRStmtParser::parseCombMem() {
   locationProcessor.setLoc(startTok.getLoc());
 
   // Transform the parsed vector type into a memory type.
-  auto vectorType = dyn_cast<FVectorType>(type);
+  auto vectorType = type_dyn_cast<FVectorType>(type);
   if (!vectorType)
     return emitError("cmem requires vector type");
 
@@ -3356,7 +3424,7 @@ ParseResult FIRStmtParser::parseSeqMem() {
   locationProcessor.setLoc(startTok.getLoc());
 
   // Transform the parsed vector type into a memory type.
-  auto vectorType = dyn_cast<FVectorType>(type);
+  auto vectorType = type_dyn_cast<FVectorType>(type);
   if (!vectorType)
     return emitError("smem requires vector type");
 
@@ -3453,7 +3521,7 @@ ParseResult FIRStmtParser::parseMem(unsigned memIndent) {
     StringRef portName;
     if (parseId(portName, "expected port name"))
       return failure();
-    auto baseType = dyn_cast<FIRRTLBaseType>(type);
+    auto baseType = type_dyn_cast<FIRRTLBaseType>(type);
     if (!baseType)
       return emitError("unexpected type, must be base type");
     ports.push_back({builder.getStringAttr(portName),
@@ -3538,9 +3606,10 @@ ParseResult FIRStmtParser::parseNode() {
   // this is added to align with the SFC. (2) is less restrictive than
   // the SFC to accomodate for situations where the node is something
   // weird like a module output or an instance input.
-  auto initializerType = cast<FIRRTLType>(initializer.getType());
-  auto initializerBaseType = dyn_cast<FIRRTLBaseType>(initializer.getType());
-  if (isa<AnalogType>(initializerType) ||
+  auto initializerType = type_cast<FIRRTLType>(initializer.getType());
+  auto initializerBaseType =
+      type_dyn_cast<FIRRTLBaseType>(initializer.getType());
+  if (type_isa<AnalogType>(initializerType) ||
       !(initializerBaseType && initializerBaseType.isPassive())) {
     emitError(startTok.getLoc())
         << "Node cannot be analog and must be passive or passive under a flip "
@@ -3576,7 +3645,7 @@ ParseResult FIRStmtParser::parseWire() {
       parseType(type, "expected wire type") || parseOptionalInfo())
     return failure();
 
-  if (!isa<FIRRTLBaseType>(type))
+  if (!type_isa<FIRRTLBaseType>(type))
     return emitError(startTok.getLoc(), "wire must have base type");
 
   locationProcessor.setLoc(startTok.getLoc());
@@ -3621,7 +3690,7 @@ ParseResult FIRStmtParser::parseRegister(unsigned regIndent) {
       parseExp(clock, "expected expression for register clock"))
     return failure();
 
-  if (!isa<FIRRTLBaseType>(type))
+  if (!type_isa<FIRRTLBaseType>(type))
     return emitError(startTok.getLoc(), "register must have base type");
 
   // Parse the 'with' specifier if present.
@@ -3715,7 +3784,7 @@ ParseResult FIRStmtParser::parseRegisterWithReset() {
       parseOptionalInfo())
     return failure();
 
-  if (!isa<FIRRTLBaseType>(type))
+  if (!type_isa<FIRRTLBaseType>(type))
     return emitError(startTok.getLoc(), "register must have base type");
 
   locationProcessor.setLoc(startTok.getLoc());
@@ -3766,6 +3835,10 @@ private:
   ParseResult parsePortList(SmallVectorImpl<PortInfo> &resultPorts,
                             SmallVectorImpl<SMLoc> &resultPortLocs,
                             unsigned indent);
+
+  ParseResult parseTypeDecl();
+
+  ParseResult parseGroupDecl(CircuitOp circuit);
 
   struct DeferredModuleToParse {
     FModuleOp moduleOp;
@@ -3932,7 +4005,7 @@ ParseResult FIRCircuitParser::parseModule(CircuitOp circuit,
   // Helper for the temporary check rejecting input-oriented refs.
   std::function<bool(Type, bool)> hasInputRef = [&](Type type,
                                                     bool output) -> bool {
-    auto ftype = dyn_cast<FIRRTLType>(type);
+    auto ftype = type_dyn_cast<FIRRTLType>(type);
     if (!ftype || !ftype.containsReference())
       return false;
     return TypeSwitch<FIRRTLType, bool>(ftype)
@@ -4001,7 +4074,9 @@ ParseResult FIRCircuitParser::parseModule(CircuitOp circuit,
       case FIRToken::error:
         return success();
 
-        // If we got to the next module, then we're done.
+      // If we got to another declaration, then we're done.
+      case FIRToken::kw_declgroup:
+      case FIRToken::kw_type:
       case FIRToken::kw_module:
       case FIRToken::kw_extmodule:
       case FIRToken::kw_intmodule:
@@ -4136,7 +4211,7 @@ ParseResult FIRCircuitParser::parseModule(CircuitOp circuit,
   // Build paths array.  One entry for each ref-type port.
   SmallVector<Attribute> internalPathAttrs;
   auto refPorts = llvm::make_filter_range(
-      portList, [&](auto &port) { return isa<RefType>(port.type); });
+      portList, [&](auto &port) { return type_isa<RefType>(port.type); });
   llvm::SmallBitVector usedRefs(refStatements.size());
   for (auto &port : refPorts) {
     // Reject input reftype ports on extmodule's per spec,
@@ -4180,6 +4255,90 @@ ParseResult FIRCircuitParser::parseModule(CircuitOp circuit,
     builder.create<FIntModuleOp>(info.getLoc(), name, portList, intName,
                                  annotations, builder.getArrayAttr(parameters),
                                  internalPaths);
+  return success();
+}
+
+// Parse a type declaration.
+ParseResult FIRCircuitParser::parseTypeDecl() {
+  StringRef id;
+  FIRRTLType type;
+  consumeToken();
+  auto loc = getToken().getLoc();
+  if (parseId(id, "expected type name") ||
+      parseToken(FIRToken::equal, "expected '=' in type decl") ||
+      parseType(type, "expected a type"))
+    return failure();
+  auto name = StringAttr::get(type.getContext(), id);
+  // Create type alias only for base types. Otherwise just pass through the
+  // type.
+  if (auto base = type_dyn_cast<FIRRTLBaseType>(type))
+    type = BaseTypeAliasType::get(name, base);
+  else
+    emitWarning(loc)
+        << "type alias for non-base type " << type
+        << " is currently not supported. Type alias is stripped immediately";
+
+  if (!getConstants().aliasMap.insert({id, type}).second)
+    return emitError(loc) << "type alias `" << name.getValue()
+                          << "` is already defined";
+  return success();
+}
+
+// Parse a group declaration.
+ParseResult FIRCircuitParser::parseGroupDecl(CircuitOp circuit) {
+  auto baseIndent = getIndentation();
+
+  // A stack of all groups that are possibly parents of the current group.
+  SmallVector<std::pair<std::optional<unsigned>, GroupDeclOp>> groupStack;
+
+  // Parse a single group and add it to the groupStack.
+  auto parseOne = [&](Block *block) -> ParseResult {
+    auto indent = getIndentation();
+    StringRef id, convention;
+    LocWithInfo info(getToken().getLoc(), this);
+    consumeToken();
+    if (parseId(id, "expected group name") || parseGetSpelling(convention))
+      return failure();
+    auto groupConvention = symbolizeGroupConvention(convention);
+    if (!groupConvention) {
+      emitError() << "unknown convention '" << convention
+                  << "' (did you misspell it?)";
+      return failure();
+    }
+    consumeToken();
+    if (parseToken(FIRToken::colon, "expected ':' after group definition") ||
+        info.parseOptionalInfo())
+      return failure();
+    auto builder = OpBuilder::atBlockEnd(block);
+    // Create the group declaration and give it an empty block.
+    auto groupDeclOp =
+        builder.create<GroupDeclOp>(info.getLoc(), id, *groupConvention);
+    groupDeclOp->getRegion(0).push_back(new Block());
+    groupStack.push_back({indent, groupDeclOp});
+    return success();
+  };
+
+  if (parseOne(circuit.getBodyBlock()))
+    return failure();
+
+  // Parse any nested groups.
+  while (getIndentation() > baseIndent) {
+    switch (getToken().getKind()) {
+    case FIRToken::kw_declgroup: {
+      // Pop nested groups off the stack until we find out what group to insert
+      // this into.
+      while (groupStack.back().first >= getIndentation())
+        groupStack.pop_back();
+      auto parentGroup = groupStack.back().second;
+      if (parseOne(&parentGroup.getBody().front()))
+        return failure();
+      break;
+    }
+    default:
+      return emitError("expected 'declgroup'"), failure();
+    }
+  }
+
   return success();
 }
 
@@ -4350,6 +4509,23 @@ ParseResult FIRCircuitParser::parseCircuit(
       emitError("unexpected token in circuit");
       return failure();
 
+    case FIRToken::kw_type: {
+      if (parseTypeDecl())
+        return failure();
+      break;
+    }
+
+    case FIRToken::kw_declgroup: {
+      if (FIRVersion::compare(version, FIRVersion({3, 1, 0})) < 0)
+        return emitError()
+               << "unexpected token: optional groups are a FIRRTL 3.1.0+ "
+                  "feature, but the specified FIRRTL version was "
+               << version;
+      if (parseGroupDecl(circuit))
+        return failure();
+      break;
+    }
+
     case FIRToken::kw_module:
     case FIRToken::kw_extmodule:
     case FIRToken::kw_intmodule: {
@@ -4394,6 +4570,10 @@ DoneParsing:
       return mlir::emitError(circuit.getLoc())
              << "no modules found, circuit must contain one or more modules";
     }
+    if (auto *notModule = circuit.lookupSymbol(circuit.getName())) {
+      return notModule->emitOpError()
+             << "cannot have the same name as the circuit";
+    }
     return mlir::emitError(circuit.getLoc())
            << "no main module found, circuit '" << circuit.getName()
            << "' must contain a module named '" << circuit.getName() << "'";
@@ -4410,7 +4590,7 @@ DoneParsing:
     // This should be checked in verifier for all public FModuleLike's but
     // they're used internally so check this here.
     for (auto &pi : mainMod.getPorts()) {
-      if (!pi.isOutput() && isa<RefType>(pi.type))
+      if (!pi.isOutput() && type_isa<RefType>(pi.type))
         return mlir::emitError(pi.loc)
                << "main module may not contain input references";
     }
@@ -4447,7 +4627,7 @@ circt::firrtl::importFIRFile(SourceMgr &sourceMgr, MLIRContext *context,
                           /*column=*/0)));
   SharedParserConstants state(context, options);
   FIRLexer lexer(sourceMgr, context);
-  FIRVersion version = defaultFIRVersion;
+  FIRVersion version = FIRVersion::defaultFIRVersion();
   if (FIRCircuitParser(state, lexer, *module, version)
           .parseCircuit(annotationsBufs, omirBufs, ts))
     return nullptr;

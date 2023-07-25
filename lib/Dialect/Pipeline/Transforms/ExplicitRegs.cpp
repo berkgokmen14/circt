@@ -110,10 +110,15 @@ void ExplicitRegsPass::runOnOperation() {
   OpBuilder b(getOperation().getContext());
   bb = std::make_shared<BackedgeBuilder>(b, getOperation().getLoc());
 
-  // Cache external inputs in a set for fast lookup.
-  llvm::DenseSet<Value> extInputs;
+  // Cache external-like inputs in a set for fast lookup. This also includes
+  // clock, reset, and stall.
+  llvm::DenseSet<Value> extLikeInputs;
   for (auto extInput : pipeline.getInnerExtInputs())
-    extInputs.insert(extInput);
+    extLikeInputs.insert(extInput);
+  extLikeInputs.insert(pipeline.getInnerClock());
+  extLikeInputs.insert(pipeline.getInnerReset());
+  if (pipeline.hasStall())
+    extLikeInputs.insert(pipeline.getInnerStall());
 
   // Iterate over the pipeline body in-order (!).
   stageMap = pipeline.getStageMap();
@@ -124,7 +129,7 @@ void ExplicitRegsPass::runOnOperation() {
       // Check the operands of this operation to see if any of them cross a
       // stage boundary.
       for (OpOperand &operand : op->getOpOperands()) {
-        if (extInputs.contains(operand.get())) {
+        if (extLikeInputs.contains(operand.get())) {
           // Never route external inputs through a stage.
           continue;
         }
@@ -172,19 +177,20 @@ void ExplicitRegsPass::runOnOperation() {
         passIns.push_back(value);
     }
 
-    // Append arguments to the predecessor stage terminator, which feeds this
-    // stage.
+    // Replace the predecessor stage terminator, which feeds this stage, with
+    // a new terminator that has materialized arguments.
     StageOp terminator = cast<StageOp>(predecessorStage->getTerminator());
-    terminator.getRegistersMutable().append(regIns);
-    terminator.getPassthroughsMutable().append(passIns);
+    b.setInsertionPoint(terminator);
+    b.create<StageOp>(terminator.getLoc(), terminator.getNextStage(), regIns,
+                      passIns);
+    terminator.erase();
 
     // ... add arguments to the next stage. Registers first, then passthroughs.
     llvm::SmallVector<Type> regAndPassTypes;
     llvm::append_range(regAndPassTypes, ValueRange(regIns).getTypes());
     llvm::append_range(regAndPassTypes, ValueRange(passIns).getTypes());
-    stage->addArguments(regAndPassTypes,
-                        llvm::SmallVector<Location>(regAndPassTypes.size(),
-                                                    UnknownLoc::get(ctx)));
+    for (auto [i, type] : llvm::enumerate(regAndPassTypes))
+      stage->insertArgument(i, type, UnknownLoc::get(ctx));
 
     // Replace backedges for the next stage with the new arguments.
     for (auto it : llvm::enumerate(regMap)) {

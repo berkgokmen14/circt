@@ -481,24 +481,27 @@ public:
   }
 };
 
-static hw::ModulePortInfo getModulePortInfo(TypeConverter &tc,
-                                            handshake::FuncOp funcOp) {
+static hw::ModulePortInfo getModulePortInfoHS(TypeConverter &tc,
+                                              handshake::FuncOp funcOp) {
   hw::ModulePortInfo ports({}, {});
   auto *ctx = funcOp->getContext();
   auto ft = funcOp.getFunctionType();
 
   // Add all inputs of funcOp.
   for (auto [index, type] : llvm::enumerate(ft.getInputs())) {
-    ports.inputs.push_back({StringAttr::get(ctx, "in" + std::to_string(index)),
-                            hw::PortDirection::INPUT, tc.convertType(type),
-                            index, hw::InnerSymAttr{}});
+    ports.inputs.push_back(
+        {{StringAttr::get(ctx, "in" + std::to_string(index)),
+          tc.convertType(type), hw::ModulePort::Direction::Input},
+         index,
+         hw::InnerSymAttr{}});
   }
 
   // Add all outputs of funcOp.
   for (auto [index, type] : llvm::enumerate(ft.getResults())) {
     ports.outputs.push_back(
-        {StringAttr::get(ctx, "out" + std::to_string(index)),
-         hw::PortDirection::OUTPUT, tc.convertType(type), index,
+        {{StringAttr::get(ctx, "out" + std::to_string(index)),
+          tc.convertType(type), hw::ModulePort::Direction::Output},
+         index,
          hw::InnerSymAttr{}});
   }
 
@@ -519,7 +522,7 @@ public:
   LogicalResult
   matchAndRewrite(handshake::FuncOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    ModulePortInfo ports = getModulePortInfo(*getTypeConverter(), op);
+    ModulePortInfo ports = getModulePortInfoHS(*getTypeConverter(), op);
 
     if (op.isExternal()) {
       rewriter.create<hw::HWModuleExternOp>(

@@ -318,6 +318,8 @@ LogicalResult LoopSchedulePipelineStageOp::verify() {
     auto num = res.getResultNumber();
     auto &termOperand = term->getOpOperand(num);
     auto *op = termOperand.get().getDefiningOp();
+    if (op == nullptr)
+      continue;
     if (!isa<memref::LoadOp, arith::MulIOp>(op))
       continue;
     uint64_t cycles = 0;
@@ -326,8 +328,10 @@ LogicalResult LoopSchedulePipelineStageOp::verify() {
     } else if (isa<arith::MulIOp>(op)) {
       cycles = 4;
     }
-    auto correctStep = *getStageAfter(stage, cycles);
-    if (res.isUsedOutsideOfBlock(&correctStep.getBodyBlock()))
+    auto correctStep = getStageAfter(stage, cycles);
+    if (!correctStep.has_value())
+      continue;
+    if (res.isUsedOutsideOfBlock(&correctStep->getBodyBlock()))
       return emitOpError(
           "pipelined ops can only be used the cycle results are ready");
   }

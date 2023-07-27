@@ -62,11 +62,12 @@ def LoadOpLoweringInterface : OpInterface<"LoadLoweringInterface"> {
       (ins)>,
     InterfaceMethod<
       "This returns the value of the associated memory",
-      "std::optional<mlir::Block*>",
+      "LogicalResult",
       "connectToMemInterface",
       (ins "mlir::OpBuilder&":$rewriter, "calyx::GroupInterface":$group,
            "const calyx::ComponentOp&":$component, 
-           "calyx::ComponentLoweringStateInterface&":$state)>
+           "calyx::ComponentLoweringStateInterface&":$state,
+           "std::optional<Block *>&":$blockSched)>
   ];
   /* let verify = [{ return verifyGroupInterface(op); }]; */
 }
@@ -97,11 +98,12 @@ def StoreOpLoweringInterface : OpInterface<"StoreLoweringInterface"> {
       (ins)>,
     InterfaceMethod<
       "This returns the value of the associated memory",
-      "std::optional<mlir::Block*>",
+      "LogicalResult",
       "connectToMemInterface",
       (ins "mlir::OpBuilder&":$rewriter, "calyx::GroupInterface":$group,
            "const calyx::ComponentOp&":$component, 
-           "calyx::ComponentLoweringStateInterface&":$state)>
+           "calyx::ComponentLoweringStateInterface&":$state,
+           "std::optional<Block *>&":$blockSched)>
   ];
   /* let verify = [{ return verifyGroupInterface(op); }]; */
 }

@@ -118,6 +118,21 @@ def LoadOpInterface : OpInterface<"LoadInterface"> {
       "getLimit",
       (ins)>,
     InterfaceMethod<
+      "This returns the value being loaded from.",
+      "Value",
+      "getMemoryValue",
+      (ins)>,
+    InterfaceMethod<
+      "This returns the result.",
+      "Value",
+      "getResult",
+      (ins)>,
+    InterfaceMethod<
+      "This returns the result.",
+      "bool",
+      "hasDependence",
+      (ins "Operation *":$otherOp)>,
+    InterfaceMethod<
       "This returns the unique identifier of the associated memory",
       "std::string",
       "getUniqueId",
@@ -146,6 +161,16 @@ def StoreOpInterface : OpInterface<"StoreInterface"> {
       "getLimit",
       (ins)>,
     InterfaceMethod<
+      "This returns the value being stored to.",
+      "Value",
+      "getMemoryValue",
+      (ins)>,
+    InterfaceMethod<
+      "This returns the result.",
+      "bool",
+      "hasDependence",
+      (ins "Operation *":$otherOp)>,
+    InterfaceMethod<
       "This returns the unique identifier of the associated memory",
       "std::string",
       "getUniqueId",
@@ -154,7 +179,7 @@ def StoreOpInterface : OpInterface<"StoreInterface"> {
   /* let verify = [{ return verifyGroupInterface(op); }]; */
 }
 
-// Op interface for AffineLoads.
+// Op interface for AffineOps.
 def SchedulableAffineOpInterface : OpInterface<"SchedulableAffineInterface"> {
   let cppNamespace = "::circt::loopschedule";
 
@@ -167,6 +192,16 @@ def SchedulableAffineOpInterface : OpInterface<"SchedulableAffineInterface"> {
       "Creates a new non-affine op equivalent to the original Op",
       "Operation*",
       "createNonAffineOp",
-      (ins "mlir::OpBuilder":$builder, "mlir::ValueRange":$indices)>
+      (ins "mlir::OpBuilder":$builder, "mlir::ValueRange":$indices)>,
+    InterfaceMethod<
+      "This returns the value being stored to.",
+      "Value",
+      "getMemoryValue",
+      (ins)>,
+    InterfaceMethod<
+      "This returns the result.",
+      "bool",
+      "hasDependence",
+      (ins "Operation *":$otherOp)>,
   ];
 }

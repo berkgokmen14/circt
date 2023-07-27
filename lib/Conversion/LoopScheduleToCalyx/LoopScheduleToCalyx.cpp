@@ -489,49 +489,23 @@ LogicalResult
 BuildOpGroups::buildOp(PatternRewriter &rewriter,
                        calyx::LoadLoweringInterface loadOp) const {
   Value memref = loadOp.getMemoryValue();
-  Block *block = loadOp->getBlock();
-
-  if (!calyx::singleLoadFromMemoryInBlock(memref, block)) {
-    loadOp->emitOpError("LoadOp has more than one load in block");
-    return failure();
-  }
-
-  if (!calyx::noStoresToMemoryInBlock(memref, block)) {
-    loadOp->emitOpError("LoadOp has stores in block");
-    return failure();
-  }
 
   auto memoryInterface =
       getState<ComponentLoweringState>().getMemoryInterface(memref);
-  // TODO: Check only one access to this memory per cycle
-  // Single load from memory; we do not need to write the
-  // output to a register. This is essentially a "combinational read" under
-  // current Calyx semantics with memory, and thus can be done in a
-  // combinational group. Note that if any stores are done to this memory,
-  // we require that the load and store be in separate non-combinational
-  // groups to avoid reading and writing to the same memory in the same group.
+
   auto group = createStaticGroupForOp(rewriter, loadOp, 1);
-  assignAddressPorts(rewriter, loadOp.getLoc(), group, memoryInterface,
-                     loadOp.getIndices());
   rewriter.setInsertionPointToEnd(group.getBodyBlock());
-  auto one =
-      calyx::createConstant(loadOp.getLoc(), rewriter, getComponent(), 1, 1);
-  rewriter.create<calyx::AssignOp>(loadOp.getLoc(), memoryInterface.readEn(),
-                                   one);
+  auto &state = getState<ComponentLoweringState>();
+  std::optional<Block *> blockOpt;
+  auto res = loadOp.connectToMemInterface(rewriter, group, getComponent(),
+                                          state, blockOpt);
+  if (res.failed())
+    return failure();
 
-  // We refrain from replacing the loadOp result with
-  // memoryInterface.readData, since multiple loadOp's need to be converted
-  // to a single memory's ReadData. If this replacement is done now, we lose
-  // the link between which SSA memref::LoadOp values map to which groups for
-  // loading a value from the Calyx memory. At this point of lowering, we
-  // keep the memref::LoadOp SSA value, and do value replacement _after_
-  // control has been generated (see LateSSAReplacement). This is *vital* for
-  // things such as InlineCombGroups to be able to properly track which
-  // memory assignment groups belong to which accesses.
-  getState<ComponentLoweringState>().registerEvaluatingGroup(
-      loadOp.getResult(), group);
+  // if (blockOpt.has_value()) {
+  //   state.addBlockSchedulable(blockOpt.value(), group);
+  // }
 
-  // loadOp.replaceAllUsesWith(memoryInterface.readData());
   return success();
 }
 
@@ -544,15 +518,15 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
 
   rewriter.setInsertionPointToEnd(group.getBodyBlock());
   auto &state = getState<ComponentLoweringState>();
-  auto blockOpt =
-      storeOp.connectToMemInterface(rewriter, group, getComponent(), state);
+  std::optional<Block *> blockOpt;
+  auto res = storeOp.connectToMemInterface(rewriter, group, getComponent(),
+                                           state, blockOpt);
+  if (res.failed())
+    return failure();
 
   if (blockOpt.has_value()) {
     state.addBlockSchedulable(blockOpt.value(), group);
   }
-
-  // By definition, StoreOps must be sink operations
-  // state.registerSinkOperations(storeOp, group);
 
   return success();
 }
@@ -1119,17 +1093,16 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
   partiallyLowerFuncToComp(FuncOp funcOp,
                            PatternRewriter &rewriter) const override {
     DenseMap<Value, calyx::RegisterOp> regMap;
-    funcOp.walk([&](LoopScheduleRegisterOp op) {
+    auto res = funcOp.walk([&](LoopScheduleRegisterOp op) {
       // Condition registers are handled in BuildWhileGroups.
       auto *parent = op->getParentOp();
       auto phase = dyn_cast<PhaseInterface>(parent);
       if (!phase)
-        return;
+        return WalkResult::advance();
 
       // Create a register for each phase.
       for (auto &operand : op->getOpOperands()) {
         Value value = operand.get();
-        value.dump();
         unsigned i = operand.getOperandNumber();
         // Iter args are created in BuildWhileGroups, so just mark the iter arg
         // register as the appropriate pipeline register.
@@ -1160,8 +1133,8 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
 
         // If value is produced by a sequential op just pass it 
         // on to next phase.
-        if (auto cell = value.getDefiningOp<calyx::CellInterface>(); 
-            cell && !cell.isCombinational()) {
+        if (auto cell = value.getDefiningOp<calyx::CellInterface>();
+            cell && !cell.isCombinational() && !isa<calyx::RegisterOp>(cell)) {
           auto *op = cell.getOperation();
           Value v;
           if (auto mul = dyn_cast<calyx::MultPipeLibOp>(op); mul) {
@@ -1171,13 +1144,19 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
           } else if (auto seqMem = dyn_cast<calyx::SeqMemoryOp>(op); seqMem) {
             v = seqMem.readData();
           } else {
-            assert(false && "Unsupported pipelined cell op");
+            funcOp->getParentOfType<ModuleOp>().dump();
+            phase.dump();
+            op->dump();
+            // assert(false && "Unsupported pipelined cell op");
+            funcOp.emitOpError("Unsupported pipelined cell op ") << op;
+            return WalkResult::interrupt();
           }
           getState<ComponentLoweringState>().addPhaseReg(phase, v, i);
           continue;
         }
 
-        if (auto load = value.getDefiningOp<memref::LoadOp>()) {
+        if (isa<memref::LoadOp, calyx::LoadLoweringInterface>(
+                value.getDefiningOp())) {
           getState<ComponentLoweringState>().addPhaseReg(phase, value, i);
           continue;
         }
@@ -1186,7 +1165,12 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
         Type resultType = value.getType();
         assert(resultType.isa<IntegerType>() &&
                "unsupported pipeline result type");
-        auto name = SmallString<20>(phase.getRegisterNamePrefix());
+
+        auto name =
+            SmallString<20>(getState<ComponentLoweringState>().getUniqueName(
+                phase->getParentOfType<LoopInterface>()));
+        name += "_";
+        name += phase.getRegisterNamePrefix();
         name += "_register_";
         name += std::to_string(i);
         unsigned width = resultType.getIntOrFloatBitWidth();
@@ -1200,8 +1184,9 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
         // replace all uses inside BuildPipelineGroups, once the pipeline
         // register created here has been assigned to.
       }
+      return WalkResult::advance();
     });
-    return success();
+    return res.wasInterrupted() ? failure() : success();
   }
 };
 
@@ -1262,6 +1247,7 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
     assert(numPhases > 0);
 
     buildPhaseGuards(op, phase, rewriter);
+    // phase.dump();
 
     getState<ComponentLoweringState>().addBlockSchedulable(phase->getBlock(),
                                                            phase);
@@ -1283,6 +1269,7 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
     for (auto &operand : operands) {
       unsigned i = operand.getOperandNumber();
       Value value = operand.get();
+      // value.dump();
 
       // Get the pipeline register for that result.
       auto reg = pipelineRegisters[i];
@@ -1293,6 +1280,12 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
         assert(isa<calyx::StaticGroupOp>(evaluatingGroup.value()));
         addBodyGroup(dyn_cast<calyx::StaticGroupOp>(evaluatingGroup.value().getOperation()));
         phase->getResult(i).replaceAllUsesWith(*valuePtr);
+        auto name =
+            getState<ComponentLoweringState>().getUniqueName("phase_reg");
+        auto newGroup = calyx::createGroup<calyx::CombGroupOp>(
+            rewriter, getComponent(), value.getLoc(), name);
+        getState<ComponentLoweringState>().registerEvaluatingGroup(value,
+                                                                   newGroup);
         continue;
       }
 
@@ -1305,7 +1298,6 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
         phase->getResult(i).replaceAllUsesWith(pipelineRegister.getOut());
         continue;
       }
-
       // Get the evaluating group for that value.
       auto evaluatingGroup =
           getState<ComponentLoweringState>().getEvaluatingGroup(value);
@@ -1702,16 +1694,25 @@ class LateSSAReplacement : public calyx::FuncOpPartialLoweringPattern {
   LogicalResult partiallyLowerFuncToComp(FuncOp funcOp,
                                          PatternRewriter &) const override {
     funcOp.walk([&](memref::LoadOp loadOp) {
-      // if (calyx::singleLoadFromMemory(loadOp)) {
-        /// In buildOpGroups we did not replace loadOp's results, to ensure a
-        /// link between evaluating groups (which fix the input addresses of a
-        /// memory op) and a readData result. Now, we may replace these SSA
-        /// values with their memoryOp readData output.
-        loadOp.getResult().replaceAllUsesWith(
-            getState<ComponentLoweringState>()
-                .getMemoryInterface(loadOp.getMemref())
-                .readData());
-      // }
+      /// In buildOpGroups we did not replace loadOp's results, to ensure a
+      /// link between evaluating groups (which fix the input addresses of a
+      /// memory op) and a readData result. Now, we may replace these SSA
+      /// values with their memoryOp readData output.
+      loadOp.getResult().replaceAllUsesWith(
+          getState<ComponentLoweringState>()
+              .getMemoryInterface(loadOp.getMemref())
+              .readData());
+    });
+
+    funcOp.walk([&](calyx::LoadLoweringInterface loadOp) {
+      /// In buildOpGroups we did not replace loadOp's results, to ensure a
+      /// link between evaluating groups (which fix the input addresses of a
+      /// memory op) and a readData result. Now, we may replace these SSA
+      /// values with their memoryOp readData output.
+      loadOp.getResult().replaceAllUsesWith(
+          getState<ComponentLoweringState>()
+              .getMemoryInterface(loadOp.getMemoryValue())
+              .readData());
     });
 
     return success();

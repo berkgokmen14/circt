@@ -124,7 +124,7 @@ void circt::analysis::CyclicSchedulingAnalysis::analyzeForOp(
   // terminator to ensure the problem schedules them before the terminator.
   auto *anchor = forOp.getBody()->getTerminator();
   forOp.getBody()->walk([&](Operation *op) {
-    if (!isa<AffineStoreOp, memref::StoreOp>(op))
+    if (!isa<AffineStoreOp, memref::StoreOp, StoreInterface>(op))
       return;
     Problem::Dependence dep(op, anchor);
     auto depInserted = problem.insertDependence(dep);
@@ -210,8 +210,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeForOp(
     for (auto &region : op->getRegions()) {
       for (auto loop : region.getOps<LoopInterface>()) {
         loop.getBodyBlock()->walk([&](Operation *op) {
-          if (isa<AffineLoadOp>(op) || isa<AffineStoreOp>(op) ||
-              isa<memref::LoadOp>(op) || isa<memref::StoreOp>(op)) {
+          if (isa<AffineLoadOp, AffineStoreOp, memref::LoadOp, memref::StoreOp,
+                  LoadInterface, StoreInterface>(op)) {
             memOps[op].push_back(loop);
           }
         });
@@ -226,7 +226,7 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeForOp(
       for (const MemoryDependence &memoryDep : dependences) {
         if (!hasDependence(memoryDep.dependenceType))
           continue;
-        
+
         for (auto otherLoop : memOps[memoryDep.source]) {
           if (loop == otherLoop || !loop->isAncestor(otherLoop))
             continue;
@@ -284,7 +284,7 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeForOp(
     if (op->getParentOfType<LoopScheduleSequentialOp>() != nullptr ||
         op->getParentOfType<LoopSchedulePipelineOp>() != nullptr)
       return;
-    if (!isa<AffineStoreOp, memref::StoreOp>(op))
+    if (!isa<AffineStoreOp, memref::StoreOp, StoreInterface>(op))
       return;
     Problem::Dependence dep(op, anchor);
     auto depInserted = problem.insertDependence(dep);
@@ -316,6 +316,7 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
       return;
 
     for (const MemoryDependence &memoryDep : dependences) {
+      memoryDep.source->dump();
       // Don't insert a dependence into the problem if there is no dependence.
       if (!hasDependence(memoryDep.dependenceType))
         continue;
@@ -330,8 +331,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
   DenseMap<Operation *, SmallVector<LoopInterface>> memOps;
   funcOp.getBody().walk([&](LoopInterface loop) {
     loop.getBodyBlock()->walk([&](Operation *op) {
-      if (isa<AffineLoadOp>(op) || isa<AffineStoreOp>(op) ||
-          isa<memref::LoadOp>(op) || isa<memref::StoreOp>(op)) {
+      if (isa<AffineLoadOp, AffineStoreOp, memref::LoadOp, memref::StoreOp,
+              LoadInterface, StoreInterface>(op)) {
         memOps[op].push_back(loop);
       }
     });
@@ -401,7 +402,7 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
     if (op->getParentOfType<LoopScheduleSequentialOp>() != nullptr ||
         op->getParentOfType<LoopSchedulePipelineOp>() != nullptr)
       return;
-    if (!isa<AffineStoreOp, memref::StoreOp>(op))
+    if (!isa<AffineStoreOp, memref::StoreOp, StoreInterface>(op))
       return;
     Problem::Dependence dep(op, anchor);
     auto depInserted = problem.insertDependence(dep);

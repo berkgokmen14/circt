@@ -79,7 +79,7 @@ Problem::PropertyStringVector Problem::getProperties() { return {}; }
 
 LogicalResult Problem::checkLinkedOperatorType(Operation *op) {
   if (!getLinkedOperatorType(op))
-    return op->emitError("Operation is not linked to an operator type");
+    return op->emitError("Operation is not linked to an operator type ") << op;
   if (!hasOperatorType(*getLinkedOperatorType(op)))
     return op->emitError("Operation uses an unregistered operator type");
   return success();

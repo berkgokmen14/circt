@@ -427,7 +427,6 @@ calyx::RegisterOp ComponentLoweringStateInterface::getReturnReg(unsigned idx) {
 
 void ComponentLoweringStateInterface::registerMemoryInterface(
     Value memref, const calyx::MemoryInterface &memoryInterface) {
-  assert(memref.getType().isa<MemRefType>());
   assert(memories.find(memref) == memories.end() &&
          "Memory already registered for memref");
   memories[memref] = memoryInterface;
@@ -435,7 +434,6 @@ void ComponentLoweringStateInterface::registerMemoryInterface(
 
 calyx::MemoryInterface
 ComponentLoweringStateInterface::getMemoryInterface(Value memref) {
-  assert(memref.getType().isa<MemRefType>());
   auto it = memories.find(memref);
   assert(it != memories.end() && "No memory registered for memref");
   return it->second;
@@ -449,7 +447,8 @@ std::optional<calyx::MemoryInterface>
 ComponentLoweringStateInterface::isInputPortOfMemory(Value v) {
   for (auto &memIf : memories) {
     auto &mem = memIf.getSecond();
-    if (mem.writeEn() == v || mem.writeData() == v ||
+    if ((mem.writeEnOpt().has_value() && mem.writeEn() == v) ||
+        (mem.writeDataOpt() && mem.writeData() == v) ||
         llvm::any_of(mem.addrPorts(), [=](Value port) { return port == v; }))
       return {mem};
   }
@@ -479,7 +478,7 @@ unsigned ComponentLoweringStateInterface::getFuncOpResultMapping(
 
 CalyxLoweringState::CalyxLoweringState(mlir::ModuleOp module,
                                        StringRef topLevelFunction)
-    : topLevelFunction(topLevelFunction), module(module) {}
+    : topLevelFunction(topLevelFunction), module(module), asmState(module) {}
 
 mlir::ModuleOp CalyxLoweringState::getModule() {
   assert(module.getOperation() != nullptr);
@@ -491,9 +490,15 @@ StringRef CalyxLoweringState::getTopLevelFunction() const {
 }
 
 std::string CalyxLoweringState::blockName(Block *b) {
+  auto it = blockNameMap.find(b);
+  if (it != blockNameMap.end()) {
+    return it->getSecond();
+  }
+
   std::string blockName = irName(*b);
   blockName.erase(std::remove(blockName.begin(), blockName.end(), '^'),
                   blockName.end());
+  blockNameMap.insert(std::pair(b, blockName));
   return blockName;
 }
 

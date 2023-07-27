@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "circt/Analysis/DependenceAnalysis.h"
+#include "circt/Dialect/LoopSchedule/LoopScheduleOps.h"
 #include "mlir/Dialect/Affine/Analysis/AffineAnalysis.h"
 #include "mlir/Dialect/Affine/Analysis/AffineStructures.h"
 #include "mlir/Dialect/Affine/Analysis/Utils.h"
@@ -24,6 +25,43 @@
 using namespace mlir;
 using namespace mlir::affine;
 using namespace circt::analysis;
+using namespace circt::loopschedule;
+
+/// Returns the closest surrounding block common to `opA` and `opB`. `opA` and
+/// `opB` should be in the same affine scope. Returns nullptr if such a block
+/// does not exist (when the two ops are in different blocks of an op starting
+/// an `AffineScope`).
+static Block *getCommonBlockInAffineScope(Operation *opA, Operation *opB) {
+  // Get the chain of ancestor blocks for the given `MemRefAccess` instance. The
+  // chain extends up to and includnig an op that starts an affine scope.
+  auto getChainOfAncestorBlocks =
+      [&](Operation *op, SmallVectorImpl<Block *> &ancestorBlocks) {
+        Block *currBlock = op->getBlock();
+        // Loop terminates when the currBlock is nullptr or its parent operation
+        // holds an affine scope.
+        while (currBlock &&
+               !currBlock->getParentOp()->hasTrait<OpTrait::AffineScope>()) {
+          ancestorBlocks.push_back(currBlock);
+          currBlock = currBlock->getParentOp()->getBlock();
+        }
+        assert(currBlock &&
+               "parent op starting an affine scope is always expected");
+        ancestorBlocks.push_back(currBlock);
+      };
+
+  // Find the closest common block.
+  SmallVector<Block *, 4> srcAncestorBlocks, dstAncestorBlocks;
+  getChainOfAncestorBlocks(opA, srcAncestorBlocks);
+  getChainOfAncestorBlocks(opB, dstAncestorBlocks);
+
+  Block *commonBlock = nullptr;
+  for (int i = srcAncestorBlocks.size() - 1, j = dstAncestorBlocks.size() - 1;
+       i >= 0 && j >= 0 && srcAncestorBlocks[i] == dstAncestorBlocks[j];
+       i--, j--)
+    commonBlock = srcAncestorBlocks[i];
+
+  return commonBlock;
+}
 
 /// Helper to iterate through memory operation pairs and check for dependences
 /// at a given loop nesting depth.
@@ -35,30 +73,67 @@ static void checkMemrefDependence(SmallVectorImpl<Operation *> &memoryOps,
       if (source == destination)
         continue;
 
+      // Requested depth might not be a valid comparison if they do not belong
+      // to the same loop nest
+      SmallVector<AffineForOp> surroundingLoops;
+      // llvm::errs() << "depth: " << depth << ", " <<
+      // getInnermostCommonLoopDepth({source, destination});
+      if (depth >
+          getInnermostCommonLoopDepth({source, destination}, &surroundingLoops))
+        continue;
+
       // Initialize the dependence list for this destination.
       if (results.count(destination) == 0)
         results[destination] = SmallVector<MemoryDependence>();
 
-      // Look for inter-iteration dependences on the same memory location.
-      MemRefAccess src(source);
-      MemRefAccess dst(destination);
-      FlatAffineValueConstraints dependenceConstraints;
-      SmallVector<DependenceComponent, 2> depComps;
+      if (auto sched = dyn_cast<SchedulableAffineInterface>(source)) {
+        // Check if the src or its ancestor is before the dst or its ancestor.
+        if (auto *commonBlock =
+                getCommonBlockInAffineScope(source, destination)) {
+          Operation *srcOrAncestor =
+              commonBlock->findAncestorOpInBlock(*source);
+          Operation *dstOrAncestor =
+              commonBlock->findAncestorOpInBlock(*destination);
+          if (srcOrAncestor == nullptr || dstOrAncestor == nullptr)
+            continue;
 
-      // Requested depth might not be a valid comparison if they do not belong
-      // to the same loop nest
-      if (depth > getInnermostCommonLoopDepth({source, destination}))
+          // Check if the src or its ancestor is before the dst or its ancestor.
+          if (srcOrAncestor->isBeforeInBlock(dstOrAncestor)) {
+            SmallVector<AffineForOp> enclosingLoops;
+            getAffineForIVs(*destination, &enclosingLoops);
+
+            if (sched.hasDependence(destination)) {
+              SmallVector<DependenceComponent> depComps;
+              DependenceComponent comp;
+              comp.lb = 1;
+              comp.ub = 1;
+              comp.op = enclosingLoops.back();
+              depComps.push_back(comp);
+              results[source].emplace_back(
+                  destination, DependenceResult::HasDependence, depComps);
+            }
+          }
+        }
+      } else if (isa<SchedulableAffineInterface>(destination)) {
         continue;
+      } else {
 
-      DependenceResult result = checkMemrefAccessDependence(
-          src, dst, depth, &dependenceConstraints, &depComps, true);
+        // Look for inter-iteration dependences on the same memory location.
+        MemRefAccess src(source);
+        MemRefAccess dst(destination);
+        FlatAffineValueConstraints dependenceConstraints;
+        SmallVector<DependenceComponent, 2> depComps;
 
-      results[destination].emplace_back(source, result.value, depComps);
+        DependenceResult result = checkMemrefAccessDependence(
+            src, dst, depth, &dependenceConstraints, &depComps, true);
 
-      // Also consider intra-iteration dependences on the same memory location.
-      // This currently does not consider aliasing.
-      if (src != dst)
-        continue;
+        results[destination].emplace_back(source, result.value, depComps);
+
+        // Also consider intra-iteration dependences on the same memory
+        // location. This currently does not consider aliasing.
+        if (src != dst)
+          continue;
+      }
 
       // Collect surrounding loops to use in dependence components. Only proceed
       // if we are in the innermost loop.
@@ -141,7 +216,8 @@ circt::analysis::MemoryDependenceAnalysis::MemoryDependenceAnalysis(
   // Collect load and store operations to check.
   SmallVector<Operation *> memoryOps;
   funcOp.walk([&](Operation *op) {
-    if (isa<AffineReadOpInterface, AffineWriteOpInterface>(op))
+    if (isa<AffineReadOpInterface, AffineWriteOpInterface,
+            SchedulableAffineInterface>(op))
       memoryOps.push_back(op);
   });
 

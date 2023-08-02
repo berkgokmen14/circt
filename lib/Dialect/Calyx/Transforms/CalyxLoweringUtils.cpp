@@ -264,8 +264,7 @@ std::optional<Value> MemoryInterface::writeDataOpt() {
     return memOp->writeData();
   }
   auto writeData = std::get<MemoryPortsImpl>(impl).writeData;
-  assert(writeData.has_value());
-  return writeData.value();
+  return writeData;
 }
 
 std::optional<Value> MemoryInterface::writeEnOpt() {
@@ -662,11 +661,17 @@ void InlineCombGroups::recurseInlineCombGroups(
     //   return values have at the current point of conversion not yet
     //   been rewritten to their register outputs, see comment in
     //   LateSSAReplacement)
+    // Needed to add memory interfaces as well
     if (src.isa<BlockArgument>() ||
         isa<calyx::RegisterOp, calyx::MemoryOp, calyx::SeqMemoryOp,
             hw::ConstantOp, mlir::arith::ConstantOp, calyx::MultPipeLibOp,
             calyx::DivUPipeLibOp, calyx::DivSPipeLibOp, calyx::RemSPipeLibOp,
-            calyx::RemUPipeLibOp, mlir::scf::WhileOp>(src.getDefiningOp()))
+            calyx::RemUPipeLibOp, mlir::scf::WhileOp>(src.getDefiningOp()) ||
+        isa<LoadLoweringInterface, StoreLoweringInterface,
+            AllocLoweringInterface>(src.getDefiningOp()) ||
+        // TODO: amc::CalyxInstanceOp does not fulfill any of these interfaces.
+        // So the hack is to blacklist by dialect name
+        src.getDefiningOp()->getName().getDialectNamespace() == "amc")
       continue;
 
     auto srcCombGroup = dyn_cast<calyx::CombGroupOp>(

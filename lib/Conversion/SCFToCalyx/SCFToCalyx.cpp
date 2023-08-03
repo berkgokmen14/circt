@@ -146,6 +146,9 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
 
 private:
   /// Op builder specializations.
+  calyx::StaticGroupOp createStaticGroupForOp(PatternRewriter &rewriter,
+                                              Operation *op,
+                                              uint64_t latency) const;
   LogicalResult buildOp(PatternRewriter &rewriter, scf::YieldOp yieldOp) const;
   LogicalResult buildOp(PatternRewriter &rewriter,
                         BranchOpInterface brOp) const;
@@ -320,6 +323,16 @@ private:
   }
 };
 
+calyx::StaticGroupOp
+BuildOpGroups::createStaticGroupForOp(PatternRewriter &rewriter, Operation *op,
+                                      uint64_t latency) const {
+  auto name = op->getName().getStringRef().split(".").second;
+  auto groupName = getState<ComponentLoweringState>().getUniqueName(name);
+  return calyx::createStaticGroup(
+      rewriter, getState<ComponentLoweringState>().getComponentOp(),
+      op->getLoc(), groupName, latency);
+}
+
 LogicalResult
 BuildOpGroups::buildOp(PatternRewriter &rewriter,
                        calyx::LoadLoweringInterface loadOp) const {
@@ -328,7 +341,7 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
   auto memoryInterface =
       getState<ComponentLoweringState>().getMemoryInterface(memref);
 
-  auto group = createStaticGroupForOp(rewriter, loadOp, 1);
+  auto group = createGroupForOp<calyx::GroupOp>(rewriter, loadOp);
   rewriter.setInsertionPointToEnd(group.getBodyBlock());
   auto &state = getState<ComponentLoweringState>();
   std::optional<Block *> blockOpt;
@@ -336,6 +349,10 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                           state, blockOpt);
   if (res.failed())
     return failure();
+
+  // if (blockOpt.has_value()) {
+  //   state.addBlockSchedulable(blockOpt.value(), group);
+  // }
 
   return success();
 }
@@ -349,8 +366,11 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
 
   rewriter.setInsertionPointToEnd(group.getBodyBlock());
   auto &state = getState<ComponentLoweringState>();
-  auto blockOpt =
-      storeOp.connectToMemInterface(rewriter, group, getComponent(), state);
+  std::optional<Block *> blockOpt;
+  auto res = storeOp.connectToMemInterface(rewriter, group, getComponent(),
+                                           state, blockOpt);
+  if (res.failed())
+    return failure();
 
   if (blockOpt.has_value()) {
     state.addBlockSchedulable(blockOpt.value(), group);

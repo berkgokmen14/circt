@@ -196,28 +196,6 @@ def LoopScheduleToCalyx : Pass<"lower-loopschedule-to-calyx", "mlir::ModuleOp"> 
   ];
 }
 
-//===----------------------------------------------------------------------===//
-// STGToCalyx
-//===----------------------------------------------------------------------===//
-
-def STGToCalyx : Pass<"lower-stg-to-calyx", "mlir::ModuleOp"> {
-  let summary = "Lower STG to Calyx";
-  let description = [{
-    This pass lowers STG to Calyx.
-  }];
-  let constructor = "circt::createSTGToCalyxPass()";
-  let dependentDialects = [
-    "calyx::CalyxDialect", "::mlir::scf::SCFDialect", "hw::HWDialect",
-    "comb::CombDialect"
-  ];
-  let options = [
-    Option<"topLevelFunctionOpt", "top-level-function", "std::string", "",
-            "Identifier of top-level function to be the entry-point component"
-            " of the Calyx program.">,
-    Option<"ciderSourceLocationMetadata", "cider-source-location-metadata", "bool", "",
-            "Whether to track source location for the Cider debugger.">
-  ];
-}
 
 //===----------------------------------------------------------------------===//
 // PipelineTHW
@@ -623,26 +601,6 @@ def MaximizeSSA : Pass<"maximize-ssa", "::mlir::ModuleOp"> {
     necessary to forward values to the block(s) where they are used.
   }];
   let constructor = "circt::createMaximizeSSAPass()";
-}
-
-//===----------------------------------------------------------------------===//
-// SCFToSTG
-//===----------------------------------------------------------------------===//
-
-def AffineToSTG : Pass<"convert-affine-to-stg", "mlir::func::FuncOp"> {
-  let summary = "Convert SCF dialect to scheduled STG";
-  let description = [{
-  }];
-  let constructor = "circt::createAffineToSTGPass()";
-  let dependentDialects = [
-    "circt::loopschedule::LoopScheduleDialect",
-    "circt::stg::STGDialect",
-    "mlir::arith::ArithDialect",
-    "mlir::cf::ControlFlowDialect",
-    "mlir::memref::MemRefDialect",
-    "mlir::scf::SCFDialect",
-    "mlir::func::FuncDialect"
-  ];
 }
 
 

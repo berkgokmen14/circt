@@ -61,8 +61,6 @@ target_link_libraries(circt-opt
   CIRCTLoopScheduleToCalyx
   CIRCTLTL
   CIRCTSCFToCalyx
-  CIRCTSTGToCalyx
-  CIRCTAffineToSTG
   CIRCTScheduling
   CIRCTSeq
   CIRCTSeqTransforms

@@ -129,10 +129,6 @@ namespace systemc {
 class SystemCDialect;
 } // namespace systemc
 
-namespace stg {
-class STGDialect;
-} // namespace stg
-
 namespace verif {
 class VerifDialect;
 } // namespace verif

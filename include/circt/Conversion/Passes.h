@@ -14,7 +14,6 @@
 #define CIRCT_CONVERSION_PASSES_H
 
 #include "circt/Conversion/AffineToLoopSchedule.h"
-#include "circt/Conversion/AffineToSTG.h"
 #include "circt/Conversion/ArcToLLVM.h"
 #include "circt/Conversion/CalyxToFSM.h"
 #include "circt/Conversion/CalyxToHW.h"
@@ -37,7 +36,6 @@
 #include "circt/Conversion/MooreToCore.h"
 #include "circt/Conversion/PipelineToHW.h"
 #include "circt/Conversion/SCFToCalyx.h"
-#include "circt/Conversion/STGToCalyx.h"
 #include "circt/Conversion/StandardToHandshake.h"
 #include "circt/Conversion/VerifToSV.h"
 #include "mlir/IR/DialectRegistry.h"

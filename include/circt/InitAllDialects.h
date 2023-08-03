@@ -69,7 +69,6 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
     msft::MSFTDialect,
     om::OMDialect,
     pipeline::PipelineDialect,
-    stg::STGDialect,
     hls::HLSDialect,
     hwarith::HWArithDialect,
     seq::SeqDialect,

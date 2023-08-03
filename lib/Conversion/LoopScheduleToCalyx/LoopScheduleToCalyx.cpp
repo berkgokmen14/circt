@@ -502,9 +502,9 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
   if (res.failed())
     return failure();
 
-  // if (blockOpt.has_value()) {
-  //   state.addBlockSchedulable(blockOpt.value(), group);
-  // }
+  if (blockOpt.has_value()) {
+    state.addBlockSchedulable(blockOpt.value(), group);
+  }
 
   return success();
 }

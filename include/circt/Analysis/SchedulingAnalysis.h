@@ -50,18 +50,20 @@ private:
   DenseMap<Operation *, CyclicProblem> problems;
 };
 
-/// SharedOperatorsSchedulingAnalysis constructs a SharedOperatorsProblem for each AffineForOp by
-/// performing a memory dependence analysis and inserting dependences into the
-/// problem. The client should retrieve the partially complete problem to add
-/// and associate operator types.
+/// SharedOperatorsSchedulingAnalysis constructs a SharedOperatorsProblem for
+/// each AffineForOp by performing a memory dependence analysis and inserting
+/// dependences into the problem. The client should retrieve the partially
+/// complete problem to add and associate operator types.
 struct SharedOperatorsSchedulingAnalysis {
   SharedOperatorsSchedulingAnalysis(Operation *funcOp, AnalysisManager &am);
 
   SharedOperatorsProblem &getProblem(Operation *op);
 
 private:
-  void analyzeWhileOp(WhileOp whileOp, MemoryDependenceAnalysis memoryAnalysis);
-  void analyzeFuncOp(func::FuncOp funcOp, MemoryDependenceAnalysis memoryAnalysis);
+  void analyzeForOp(affine::AffineForOp forOp,
+                    MemoryDependenceAnalysis memoryAnalysis);
+  void analyzeFuncOp(func::FuncOp funcOp,
+                     MemoryDependenceAnalysis memoryAnalysis);
 
   MemoryDependenceAnalysis &memoryAnalysis;
   DenseMap<Operation *, SharedOperatorsProblem> problems;

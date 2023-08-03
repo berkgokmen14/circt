@@ -54,6 +54,10 @@ public:
     return getOperation().getAfterArguments();
   }
 
+  Operation::operand_range getInits() override {
+    return getOperation().getInits();
+  }
+
   Block *getBodyBlock() override { return &getOperation().getAfter().front(); }
 
   Block *getConditionBlock() override {
@@ -71,24 +75,21 @@ public:
 // Lowering state classes
 //===----------------------------------------------------------------------===//
 
-struct WhileScheduleable {
+struct WhileSchedulable {
   /// While operation to schedule.
   ScfWhileOp whileOp;
-  /// The group(s) to schedule before the while operation These groups should
-  /// set the initial value(s) of the loop init_args register(s).
-  SmallVector<calyx::GroupOp> initGroups;
 };
 
 /// A variant of types representing scheduleable operations.
-using Scheduleable = std::variant<calyx::GroupOp, WhileScheduleable>;
+using Schedulable = std::variant<calyx::GroupOp, WhileSchedulable>;
 
 /// Handles the current state of lowering of a Calyx component. It is mainly
 /// used as a key/value store for recording information during partial lowering,
 /// which is required at later lowering passes.
 class ComponentLoweringState
     : public calyx::ComponentLoweringStateInterface,
-      public calyx::LoopLoweringStateInterface<ScfWhileOp>,
-      public calyx::SchedulerInterface<Scheduleable> {
+      public calyx::LoopLoweringStateInterface<ScfWhileOp, calyx::GroupOp>,
+      public calyx::SchedulerInterface<Schedulable> {
 public:
   ComponentLoweringState(calyx::ComponentOp component)
       : calyx::ComponentLoweringStateInterface(component) {}
@@ -260,8 +261,8 @@ private:
     // Operation pipelines are not combinational, so a GroupOp is required.
     auto group = createGroupForOp<calyx::GroupOp>(rewriter, op);
     OpBuilder builder(group->getRegion(0));
-    getState<ComponentLoweringState>().addBlockScheduleable(op->getBlock(),
-                                                            group);
+    getState<ComponentLoweringState>().addBlockSchedulable(op->getBlock(),
+                                                           group);
 
     rewriter.setInsertionPointToEnd(group.getBodyBlock());
     rewriter.create<calyx::AssignOp>(loc, opPipe.getLeft(), op.getLhs());
@@ -322,40 +323,19 @@ private:
 LogicalResult
 BuildOpGroups::buildOp(PatternRewriter &rewriter,
                        calyx::LoadLoweringInterface loadOp) const {
-  Value val = loadOp.getMemoryValue();
-  // if (noStoresToMemory(port) && singleLoadFromMemory(port)) {
-  //   loadOp.dump();
-  //   // Single load from memory; we do not need to write the
-  //   auto group = createGroupForOp<calyx::GroupOp>(rewriter, loadOp);
-  //   assignAddressPorts(rewriter, loadOp.getLoc(), group, memoryInterface,
-  //                      loadOp.getIndices());
+  Value memref = loadOp.getMemoryValue();
 
-  //   rewriter.setInsertionPointToEnd(group.getBodyBlock());
-  //   rewriter.create<calyx::AssignOp>(
-  //       loadOp.getLoc(), memoryInterface.readEn().value(),
-  //       createConstant(loadOp.getLoc(), rewriter, getComponent(), 1, 1));
+  auto memoryInterface =
+      getState<ComponentLoweringState>().getMemoryInterface(memref);
 
-  //   rewriter.create<calyx::GroupDoneOp>(loadOp.getLoc(),
-  //                                       memoryInterface.readDone().value());
-  //   loadOp.getResult().replaceAllUsesWith(memoryInterface.readData().value());
-  //   getState<ComponentLoweringState>().addBlockScheduleable(loadOp->getBlock(),
-  //                                                           group);
-
-  //   getState<ComponentLoweringState>().registerEvaluatingGroup(memoryInterface.readData().value(),
-  //   group);
-  // } else {
-  // assert(calyx::singleLoadFromMemory(val) && "Only single loads per port
-  // supported for now");
-
-  auto group = createGroupForOp<calyx::GroupOp>(rewriter, loadOp);
+  auto group = createStaticGroupForOp(rewriter, loadOp, 1);
   rewriter.setInsertionPointToEnd(group.getBodyBlock());
   auto &state = getState<ComponentLoweringState>();
-  auto blockOpt =
-      loadOp.connectToMemInterface(rewriter, group, getComponent(), state);
-
-  if (blockOpt.has_value()) {
-    state.addBlockScheduleable(blockOpt.value(), group);
-  }
+  std::optional<Block *> blockOpt;
+  auto res = loadOp.connectToMemInterface(rewriter, group, getComponent(),
+                                          state, blockOpt);
+  if (res.failed())
+    return failure();
 
   return success();
 }
@@ -373,7 +353,7 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
       storeOp.connectToMemInterface(rewriter, group, getComponent(), state);
 
   if (blockOpt.has_value()) {
-    state.addBlockScheduleable(blockOpt.value(), group);
+    state.addBlockSchedulable(blockOpt.value(), group);
   }
 
   return success();
@@ -453,8 +433,8 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   }
 
   getState<ComponentLoweringState>().registerEvaluatingGroup(res, group);
-  getState<ComponentLoweringState>().addBlockScheduleable(loadOp->getBlock(),
-                                                          group);
+  getState<ComponentLoweringState>().addBlockSchedulable(loadOp->getBlock(),
+                                                         group);
   return success();
 }
 
@@ -466,8 +446,8 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
 
   // This is a sequential group, so register it as being scheduleable for the
   // block.
-  getState<ComponentLoweringState>().addBlockScheduleable(storeOp->getBlock(),
-                                                          group);
+  getState<ComponentLoweringState>().addBlockSchedulable(storeOp->getBlock(),
+                                                         group);
   assignAddressPorts(rewriter, storeOp.getLoc(), group, memoryInterface,
                      storeOp.getIndices());
   rewriter.setInsertionPointToEnd(group.getBodyBlock());
@@ -659,8 +639,8 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
         reg, op.value());
   }
   /// Schedule group for execution for when executing the return op block.
-  getState<ComponentLoweringState>().addBlockScheduleable(retOp->getBlock(),
-                                                          groupOp);
+  getState<ComponentLoweringState>().addBlockSchedulable(retOp->getBlock(),
+                                                         groupOp);
   return success();
 }
 
@@ -781,12 +761,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   // Only need to add the whileOp to the BlockSchedulables scheduler interface.
   // Everything else was handled in the `BuildWhileGroups` pattern.
   ScfWhileOp scfWhileOp(whileOp);
-  SmallVector<calyx::GroupOp> initWhileGroups =
-      getState<ComponentLoweringState>().getLoopInitGroups(scfWhileOp);
-  getState<ComponentLoweringState>().addBlockScheduleable(
-      whileOp.getOperation()->getBlock(), WhileScheduleable{
+  getState<ComponentLoweringState>().addBlockSchedulable(
+      whileOp.getOperation()->getBlock(), WhileSchedulable{
                                               scfWhileOp,
-                                              initWhileGroups,
                                           });
   return success();
 }
@@ -1028,7 +1005,6 @@ class BuildWhileGroups : public calyx::FuncOpPartialLoweringPattern {
       }
 
       /// Create iter args initial value assignment group(s), one per register.
-      SmallVector<calyx::GroupOp> initGroups;
       auto numOperands = whileOp.getOperation()->getNumOperands();
       for (size_t i = 0; i < numOperands; ++i) {
         auto initGroupOp =
@@ -1039,10 +1015,9 @@ class BuildWhileGroups : public calyx::FuncOpPartialLoweringPattern {
                     whileOp.getOperation()) +
                     "_init_" + std::to_string(i),
                 whileOp.getOperation()->getOpOperand(i));
-        initGroups.push_back(initGroupOp);
+        getState<ComponentLoweringState>().addLoopInitGroup(whileOp,
+                                                            initGroupOp);
       }
-
-      getState<ComponentLoweringState>().setLoopInitGroups(whileOp, initGroups);
 
       return WalkResult::advance();
     });
@@ -1077,26 +1052,26 @@ private:
                                    const DenseSet<Block *> &path,
                                    mlir::Block *parentCtrlBlock,
                                    mlir::Block *block) const {
-    auto compBlockScheduleables =
-        getState<ComponentLoweringState>().getBlockScheduleables(block);
+    auto compBlockSchedulables =
+        getState<ComponentLoweringState>().getBlockSchedulables(block);
     auto loc = block->front().getLoc();
 
-    if (compBlockScheduleables.size() > 1) {
+    if (compBlockSchedulables.size() > 1) {
       auto seqOp = rewriter.create<calyx::SeqOp>(loc);
       parentCtrlBlock = seqOp.getBodyBlock();
     }
 
-    for (auto &group : compBlockScheduleables) {
+    for (auto &group : compBlockSchedulables) {
       rewriter.setInsertionPointToEnd(parentCtrlBlock);
       if (auto groupPtr = std::get_if<calyx::GroupOp>(&group); groupPtr) {
         rewriter.create<calyx::EnableOp>(groupPtr->getLoc(),
                                          groupPtr->getSymName());
-      } else if (auto whileSchedPtr = std::get_if<WhileScheduleable>(&group);
+      } else if (auto whileSchedPtr = std::get_if<WhileSchedulable>(&group);
                  whileSchedPtr) {
         auto &whileOp = whileSchedPtr->whileOp;
-
-        auto whileCtrlOp =
-            buildWhileCtrlOp(whileOp, whileSchedPtr->initGroups, rewriter);
+        auto initGroups =
+            getState<ComponentLoweringState>().getLoopInitGroups(whileOp);
+        auto whileCtrlOp = buildWhileCtrlOp(whileOp, initGroups, rewriter);
         rewriter.setInsertionPointToEnd(whileCtrlOp.getBodyBlock());
         auto whileBodyOp =
             rewriter.create<calyx::SeqOp>(whileOp.getOperation()->getLoc());
@@ -1138,7 +1113,7 @@ private:
     rewriter.setInsertionPointToEnd(preSeqOp.getBodyBlock());
     for (auto barg :
          getState<ComponentLoweringState>().getBlockArgGroups(from, to))
-      rewriter.create<calyx::EnableOp>(barg.getLoc(), barg.getSymName());
+      rewriter.create<calyx::EnableOp>(barg.getLoc(), barg.symName());
 
     return buildCFGControl(path, rewriter, parentCtrlBlock, from, to);
   }
@@ -1176,7 +1151,7 @@ private:
         auto condGroup = getState<ComponentLoweringState>()
                              .getEvaluatingGroup<calyx::CombGroupOp>(cond);
         auto symbolAttr = FlatSymbolRefAttr::get(
-            StringAttr::get(getContext(), condGroup.getSymName()));
+            StringAttr::get(getContext(), condGroup->getSymName()));
 
         auto ifOp = rewriter.create<calyx::IfOp>(
             brOp->getLoc(), cond, symbolAttr, /*initializeElseBody=*/true);
@@ -1198,17 +1173,17 @@ private:
         }
 
         return success(trueBrSchedSuccess && falseBrSchedSuccess);
-      } else {
-        /// Schedule sequentially within the current parent control block.
-        return schedulePath(rewriter, path, brOp.getLoc(), block,
-                            successors.front(), parentCtrlBlock);
       }
+
+      /// Schedule sequentially within the current parent control block.
+      return schedulePath(rewriter, path, brOp.getLoc(), block,
+                          successors.front(), parentCtrlBlock);
     }
     return success();
   }
 
   calyx::WhileOp buildWhileCtrlOp(ScfWhileOp whileOp,
-                                  SmallVector<calyx::GroupOp> initGroups,
+                                  SmallVector<calyx::GroupInterface> initGroups,
                                   PatternRewriter &rewriter) const {
     Location loc = whileOp.getLoc();
     /// Insert while iter arg initialization group(s). Emit a
@@ -1217,8 +1192,8 @@ private:
       PatternRewriter::InsertionGuard g(rewriter);
       auto parOp = rewriter.create<calyx::ParOp>(loc);
       rewriter.setInsertionPointToStart(parOp.getBodyBlock());
-      for (calyx::GroupOp group : initGroups)
-        rewriter.create<calyx::EnableOp>(group.getLoc(), group.getName());
+      for (calyx::GroupInterface group : initGroups)
+        rewriter.create<calyx::EnableOp>(group.getLoc(), group.symName());
     }
 
     /// Insert the while op itself.
@@ -1226,7 +1201,7 @@ private:
     auto condGroup = getState<ComponentLoweringState>()
                          .getEvaluatingGroup<calyx::CombGroupOp>(cond);
     auto symbolAttr = FlatSymbolRefAttr::get(
-        StringAttr::get(getContext(), condGroup.getSymName()));
+        StringAttr::get(getContext(), condGroup->getSymName()));
     return rewriter.create<calyx::WhileOp>(loc, cond, symbolAttr);
   }
 };

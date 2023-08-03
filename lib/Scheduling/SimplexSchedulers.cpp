@@ -850,6 +850,10 @@ LogicalResult CyclicSimplexScheduler::schedule() {
 //===----------------------------------------------------------------------===//
 
 static bool isLimited(Operation *op, SharedOperatorsProblem &prob) {
+  for (auto extra : prob.getExtraLimitingTypes(op)) {
+    if (prob.getLimit(extra).value_or(0) > 0)
+      return true;
+  }
   return prob.getLimit(*prob.getLinkedOperatorType(op)).value_or(0) > 0;
 }
 
@@ -906,14 +910,25 @@ LogicalResult SharedOperatorsSimplexScheduler::schedule() {
 
   for (auto *op : limitedOps) {
     auto opr = *prob.getLinkedOperatorType(op);
-    unsigned limit = prob.getLimit(opr).value_or(0);
-    assert(limit > 0);
+    auto extraOprs = prob.getExtraLimitingTypes(op);
+    auto limit = prob.getLimit(opr);
 
     // Find the first time step (beginning at the current start time in the
     // partial schedule) in which an operator instance is available.
     unsigned startTimeVar = startTimeVariables[op];
     unsigned candTime = getStartTime(startTimeVar);
-    while (reservationTable[opr].lookup(candTime) == limit)
+    auto canSchedule = [&](unsigned candTime) {
+      if (limit.has_value() && reservationTable[opr].lookup(candTime) == *limit)
+        return false;
+      for (auto extraOpr : extraOprs) {
+        auto extraLimit = prob.getLimit(extraOpr);
+        if (extraLimit.has_value() && 
+            reservationTable[extraOpr].lookup(candTime) == *extraLimit)
+          return false;
+      }
+      return true;
+    };
+    while (!canSchedule(candTime))
       ++candTime;
 
     // Fix the start time. As explained above, this cannot make the problem
@@ -924,6 +939,9 @@ LogicalResult SharedOperatorsSimplexScheduler::schedule() {
 
     // Record the operator use.
     ++reservationTable[opr][candTime];
+
+    for (auto extraOpr : extraOprs)
+      ++reservationTable[extraOpr][candTime];
 
     LLVM_DEBUG(dbgs() << "After scheduling " << startTimeVar
                       << " to t=" << candTime << ":\n";

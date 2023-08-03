@@ -31,15 +31,6 @@ def AllocOpLoweringInterface : OpInterface<"AllocLoweringInterface"> {
   /* let verify = [{ return verifyGroupInterface(op); }]; */
 }
 
-// Op interface for allocations.
-def SequentialOpInterface : OpInterface<"SequentialInterface"> {
-  let cppNamespace = "::circt::calyx";
-
-  let description = [{
-    This is an op interface for alloc ops to be lowered.
-  }];
-}
-
 // Op interface for loads.
 def LoadOpLoweringInterface : OpInterface<"LoadLoweringInterface"> {
   let cppNamespace = "::circt::calyx";
@@ -65,12 +56,18 @@ def LoadOpLoweringInterface : OpInterface<"LoadLoweringInterface"> {
       "getResult",
       (ins)>,
     InterfaceMethod<
+      "This returns the latency of the store.",
+      "std::optional<unsigned int>",
+      "getLatency",
+      (ins)>,
+    InterfaceMethod<
       "This returns the value of the associated memory",
-      "std::optional<mlir::Block*>",
+      "LogicalResult",
       "connectToMemInterface",
-      (ins "mlir::OpBuilder&":$rewriter, "calyx::GroupOp&":$group,
+      (ins "mlir::OpBuilder&":$rewriter, "calyx::GroupInterface":$group,
            "const calyx::ComponentOp&":$component, 
-           "calyx::ComponentLoweringStateInterface&":$state)>
+           "calyx::ComponentLoweringStateInterface&":$state,
+           "std::optional<Block *>&":$blockSched)>
   ];
   /* let verify = [{ return verifyGroupInterface(op); }]; */
 }
@@ -95,12 +92,18 @@ def StoreOpLoweringInterface : OpInterface<"StoreLoweringInterface"> {
       "getIndices",
       (ins)>,
     InterfaceMethod<
+      "This returns the latency of the store.",
+      "std::optional<unsigned int>",
+      "getLatency",
+      (ins)>,
+    InterfaceMethod<
       "This returns the value of the associated memory",
-      "std::optional<mlir::Block*>",
+      "LogicalResult",
       "connectToMemInterface",
-      (ins "mlir::OpBuilder&":$rewriter, "calyx::GroupOp&":$group,
+      (ins "mlir::OpBuilder&":$rewriter, "calyx::GroupInterface":$group,
            "const calyx::ComponentOp&":$component, 
-           "calyx::ComponentLoweringStateInterface&":$state)>
+           "calyx::ComponentLoweringStateInterface&":$state,
+           "std::optional<Block *>&":$blockSched)>
   ];
   /* let verify = [{ return verifyGroupInterface(op); }]; */
 }

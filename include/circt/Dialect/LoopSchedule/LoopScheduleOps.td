@@ -17,11 +17,12 @@ include "mlir/IR/OpBase.td"
 include "mlir/IR/SymbolInterfaces.td"
 include "mlir/IR/RegionKindInterface.td"
 include "circt/Dialect/LoopSchedule/LoopSchedule.td"
+include "circt/Dialect/LoopSchedule/LoopScheduleInterfaces.td"
 
 class LoopScheduleOp<string mnemonic, list<Trait> traits = []> :
   Op<LoopSchedule_Dialect, mnemonic, traits>;
 
-def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", []> {
+def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
   let summary = "LoopSchedule dialect pipeline-loop.";
   let description = [{
     The `loopschedule.pipeline` operation represents a statically scheduled
@@ -36,35 +37,35 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", []> {
     not isolated from above, but could be if this is helpful. A pipeline
     contains two regions: `condition` and `stages`.
 
-    The pipeline may accept an optional `iter_args`, similar to the SCF dialect,
+    The pipeline may accept an optional `inits`, similar to the SCF dialect,
     for representing loop-carried values like induction variables or reductions.
-    When the pipeline starts execution, the registers indicated as `iter_args`
-    by `pipeline.terminator` should be initialized to the initial
-    values specified in the `iter_args` section here. The `iter_args` relate to
+    When the pipeline starts execution, the registers indicated as `inits`
+    by `loopschedule.terminator` should be initialized to the initial
+    values specified in the `inits` section here. The `inits` relate to
     the initiation interval of the loop. The maximum distance in stages between
-    where an `iter_arg` is used and where that `iter_arg` is registered must be
+    where an `init` is used and where that `init` is registered must be
     less than the loop's initiation interval. For example, with II=1, each
-    `iter_arg` must be used and registered in the same stage.
+    `init` must be used and registered in the same stage.
 
     The single-block `condition` region dictates the condition under which the
     pipeline should execute. It has a `register` terminator, and the
     pipeline initiates new iterations while the registered value is `true : i1`.
-    It may access SSA values dominating the pipeline, as well as `iter_args`,
+    It may access SSA values dominating the pipeline, as well as `inits`,
     which are block arguments. The body of the block may only contain
     "combinational" operations, which are currently defined to be simple
     arithmetic, comparisons, and selects from the `Standard` dialect.
 
     The single-block `stages` region wraps `loopschedule.pipeline.stage`
     operations. It has a `loopschedule.terminator` terminator, which can
-    both return results from the pipeline and register `iter_args`. Stages may
-    access SSA values dominating the pipeline, as well as `iter_args`, which are
+    both return results from the pipeline and register `inits`. Stages may
+    access SSA values dominating the pipeline, as well as `inits`, which are
     block arguments.
   }];
 
   let arguments = (ins
     I64Attr:$II,
     OptionalAttr<I64Attr>:$tripCount,
-    Variadic<AnyType>:$iterArgs
+    Variadic<AnyType>:$inits
   );
 
   let results = (outs
@@ -84,17 +85,46 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", []> {
   let builders = [
     OpBuilder<(ins "mlir::TypeRange":$resultTypes, "mlir::IntegerAttr":$II,
                    "std::optional<IntegerAttr>": $tripCount,
-                   "mlir::ValueRange":$iterArgs)>
+                   "mlir::ValueRange":$inits)>
   ];
 
   let extraClassDeclaration = [{
     Block &getCondBlock() { return getCondition().front(); }
     Block &getStagesBlock() { return getStages().front(); }
+
+    Block::BlockArgListType getBodyArgs() {
+      return getStagesBlock().getArguments();
+    }
+    Block *getBodyBlock() {
+      return &getStagesBlock();
+    }
+    Block *getConditionBlock() {
+      return &getCondBlock();
+    }
+    Value getConditionValue() {
+      return getCondBlock().getTerminator()->getOperand(0);
+    }
+    Operation::operand_range getTerminatorIterArgs();
+    std::optional<uint64_t> getBound() {
+      return getTripCount();
+    }
+    bool isPipelined() {
+      return true;
+    }
+
+    uint64_t getBodyLatency();
+  }];
+
+  let extraClassDefinition = [{
+    Operation::operand_range $cppClass::getTerminatorIterArgs() {
+      return cast<LoopScheduleTerminatorOp>(getBodyBlock()->getTerminator()).getIterArgs();
+    }
   }];
 }
 
 def LoopSchedulePipelineStageOp : LoopScheduleOp<"pipeline.stage",
-    [HasParent<"LoopSchedulePipelineOp">]> {
+    [HasParent<"LoopSchedulePipelineOp">,
+     PhaseOpInterface]> {
   let summary = "LoopSchedule dialect pipeline stage.";
   let description = [{
     This operation has a single-block region which dictates the operations that
@@ -111,18 +141,19 @@ def LoopSchedulePipelineStageOp : LoopScheduleOp<"pipeline.stage",
     It has a `register` terminator, which passes the concurrently
     computed values forward to the next stage.
 
-    Any stage may access `iter_args`. If a stage accesses an `iter_arg` after
+    Any stage may access `inits`. If a stage accesses an `init` after
     the stage in which it is defined, it is up to lowering passes to preserve
     this value until the last stage that needs it.
 
-    Other than `iter_args`, stages may only access SSA values dominating the
+    Other than `inits`, stages may only access SSA values dominating the
     pipeline or SSA values computed by any previous stage. This ensures the
     stages capture the coarse-grained schedule of the pipeline and how values
     feed forward and backward.
   }];
 
   let arguments = (ins
-    SI64Attr:$start,
+    I64Attr:$start,
+    I64Attr:$end,
     Optional<I1>:$when
   );
 
@@ -135,24 +166,187 @@ def LoopSchedulePipelineStageOp : LoopScheduleOp<"pipeline.stage",
   );
 
   let assemblyFormat = [{
-    `start` `=` $start (`when` $when^)? $body (`:` qualified(type($results))^)? attr-dict
+    `start` `=` $start `end` `=` $end (`when` $when^)? $body (`:` qualified(type($results))^)? attr-dict
   }];
 
   let hasVerifier = 1;
 
   let skipDefaultBuilders = 1;
   let builders = [
-    OpBuilder<(ins "mlir::TypeRange":$resultTypes, "mlir::IntegerAttr":$start)>
+    OpBuilder<(ins "mlir::TypeRange":$resultTypes, "mlir::IntegerAttr":$start,
+               "mlir::IntegerAttr":$end)>
   ];
 
   let extraClassDeclaration = [{
     Block &getBodyBlock() { return getBody().front(); }
     unsigned getStageNumber();
+
+    std::string getRegisterNamePrefix() {
+      return "stage_" + std::to_string(getStageNumber());
+    }
+    bool isStatic() {
+      return true;
+    }
+    std::optional<uint64_t> getStartTime() {
+      return getStart();
+    }
+  }];
+}
+
+def LoopScheduleSequentialOp : LoopScheduleOp<"sequential", [LoopOpInterface]> {
+  let summary = "LoopSchedule dialect sequential while-loop.";
+  let description = [{
+    The `loopschedule.sequential` operation represents a statically scheduled
+    sequential loop that executes while a condition is true.
+
+    A sequential loop captures the result of scheduling, and is not generally 
+    safe to transform, besides lowering to hardware dialects. For more 
+    discussion about relaxing this, see:
+    https://github.com/llvm/circt/issues/2204.
+
+    This is the top-level operation representing a sequential loop. It is
+    not isolated from above, but could be if this is helpful. A sequential
+    loop contains two regions: `condition` and `stages`.
+
+    The sequential loop may accept an optional `inits`, similar to the SCF 
+    dialect, for representing loop-carried values like induction variables or 
+    reductions. When the sequential loop starts execution, the registers 
+    indicated as `inits` by `loopschedule.terminator` should be initialized 
+    to the initial values specified in the `inits` section here.
+
+    The single-block `condition` region dictates the condition under which the
+    sequential loop should execute. It has a `register` terminator, and the
+    loop initiates new iterations while the registered value is `true : i1`.
+    It may access SSA values dominating the loop, as well as `inits`,
+    which are block arguments.
+
+    The single-block `steps` region wraps `loopschedule.step`
+    operations. It has a `loopschedule.terminator` terminator, which can
+    both return results from the loop and register `inits`. Steps may
+    access SSA values dominating the loop, as well as `inits`, which are
+    block arguments.
+
+    In contrast to the `loopschedule.pipeline` op, sequential loops guarantee
+    that only one iteration is in-flight at a time. `loopschedule.sequential`
+    ops are also allowed to nest other sequential or pipeline loops within
+    to represent nested loops.
+  }];
+
+  let arguments = (ins
+    OptionalAttr<I64Attr>:$tripCount,
+    Variadic<AnyType>:$inits
+  );
+
+  let results = (outs
+    Variadic<AnyType>:$results
+  );
+
+  let regions = (region
+    SizedRegion<1>:$condition,
+    SizedRegion<1>:$schedule
+  );
+
+  let hasCustomAssemblyFormat = 1;
+
+  let hasVerifier = 1;
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::TypeRange":$resultTypes,
+                   "std::optional<IntegerAttr>": $tripCount,
+                   "mlir::ValueRange":$inits)>
+  ];
+
+  let extraClassDeclaration = [{
+    Block &getCondBlock() { return getCondition().front(); }
+    Block &getScheduleBlock() { return getSchedule().front(); }
+    Block::BlockArgListType getBodyArgs() {
+      return getScheduleBlock().getArguments();
+    }
+    Block *getBodyBlock() {
+      return &getScheduleBlock();
+    }
+    Block *getConditionBlock() {
+      return &getCondBlock();
+    }
+    Value getConditionValue() {
+      return getCondBlock().getTerminator()->getOperand(0);
+    }
+    Operation::operand_range getTerminatorIterArgs();
+    std::optional<uint64_t> getBound() {
+      return getTripCount();
+    }
+    bool isPipelined() {
+      return false;
+    }
+  }];
+
+  let extraClassDefinition = [{
+    Operation::operand_range $cppClass::getTerminatorIterArgs() {
+      return cast<LoopScheduleTerminatorOp>(getBodyBlock()->getTerminator()).getIterArgs();
+    }
+  }];
+}
+
+def LoopScheduleStepOp : LoopScheduleOp<"step",
+    [ParentOneOf<["LoopScheduleSequentialOp", "mlir::func::FuncOp"]>,
+     SingleBlockImplicitTerminator<"LoopScheduleRegisterOp">,
+     PhaseOpInterface]> {
+  let summary = "LoopSchedule dialect schedule step.";
+  let description = [{
+    This operation has a single-block region which dictates the operations that
+    must start concurrently.
+
+    It may have an optional `when` predicate, which supports conditional
+    execution for each step. A step with a `when` predicate should only 
+    execute when the predicate is `true : i1`, and continue onto the next
+    step otherwise.
+
+    It has a `register` terminator, which passes the concurrently
+    computed values forward to a future step.
+  }];
+
+  let arguments = (ins
+    Optional<I1>:$when
+  );
+
+  let results = (outs
+    Variadic<AnyType>:$results
+  );
+
+  let regions = (region
+    SizedRegion<1>:$body
+  );
+
+  let assemblyFormat = [{
+    (`when` $when^)? $body (`:` qualified(type($results))^)? attr-dict
+  }];
+
+  let hasVerifier = 1;
+
+  let skipDefaultBuilders = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::TypeRange":$resultTypes)>
+  ];
+
+  let extraClassDeclaration = [{
+    Block &getBodyBlock() { return getBody().front(); }
+    unsigned getStepNumber();
+
+    std::string getRegisterNamePrefix() {
+      return "step_" + std::to_string(getStepNumber());
+    }
+    bool isStatic() {
+      return false;
+    }
+    std::optional<uint64_t> getStartTime() {
+      return std::nullopt;
+    }
   }];
 }
 
 def LoopScheduleRegisterOp : LoopScheduleOp<"register",
-    [ParentOneOf<["LoopSchedulePipelineOp", "LoopSchedulePipelineStageOp"]>, Terminator]> {
+    [ParentOneOf<["LoopSchedulePipelineOp", "LoopSchedulePipelineStageOp", "LoopScheduleSequentialOp", "LoopScheduleStepOp"]>, Terminator]> {
   let summary = "LoopSchedule dialect loop register.";
   let description = [{
     The `loopschedule.register` terminates a pipeline stage and
@@ -168,11 +362,13 @@ def LoopScheduleRegisterOp : LoopScheduleOp<"register",
     $operands (`:` qualified(type($operands))^)? attr-dict
   }];
 
+  let builders = [OpBuilder<(ins), [{ return; }]>];
+
   let hasVerifier = 1;
 }
 
 def LoopScheduleTerminatorOp : LoopScheduleOp<"terminator",
-    [HasParent<"LoopSchedulePipelineOp">, Terminator, AttrSizedOperandSegments]> {
+    [ParentOneOf<["LoopSchedulePipelineOp", "LoopScheduleSequentialOp"]>, Terminator, AttrSizedOperandSegments]> {
   let summary = "LoopSchedule dialect terminator.";
   let description = [{
     The `loopschedule.terminator` operation represents the terminator of

@@ -10,6 +10,7 @@
 #define CIRCT_DIALECT_LOOPSCHEDULE_LOOPSCHEDULEOPS_H
 
 #include "circt/Support/LLVM.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -20,6 +21,16 @@
 #include "mlir/IR/Operation.h"
 
 #include "circt/Dialect/LoopSchedule/LoopScheduleDialect.h"
+
+namespace circt {
+namespace loopschedule {
+
+LogicalResult verifyLoop(Operation *op);
+
+} // namespace loopschedule
+} // namespace circt
+
+#include "circt/Dialect/LoopSchedule/LoopScheduleInterfaces.h.inc"
 
 #define GET_OP_CLASSES
 #include "circt/Dialect/LoopSchedule/LoopSchedule.h.inc"

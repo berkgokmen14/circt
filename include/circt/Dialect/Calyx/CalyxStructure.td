@@ -645,12 +645,14 @@ def CycleOp : CalyxOp<"cycle", [
     /// Returns the latency of the parent static group.
     uint32_t getGroupLatency();
   }];
+  let skipDefaultBuilders = true;
   let builders = [
     OpBuilder<(ins "uint32_t":$start), [{
       $_state.addAttribute(
         getStartAttrName($_state.name),
         mlir::IntegerAttr::get(IntegerType::get($_state.getContext(), 32), start)
       );
+      $_state.addTypes($_builder.getI1Type());
     }]>,
     OpBuilder<(ins "uint32_t":$start, "uint32_t":$end), [{
       $_state.addAttribute(
@@ -661,6 +663,7 @@ def CycleOp : CalyxOp<"cycle", [
         getEndAttrName($_state.name),
         mlir::IntegerAttr::get(IntegerType::get($_state.getContext(), 32), end)
       );
+      $_state.addTypes($_builder.getI1Type());
     }]>
   ];
   let hasCustomAssemblyFormat = 1;

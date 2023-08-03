@@ -82,10 +82,17 @@ TGroup createGroup(OpBuilder &builder, calyx::ComponentOp compOp, Location loc,
   return builder.create<TGroup>(loc, uniqueName.str());
 }
 
+// Creates a new calyx::StaticGroupOp group within compOp.
+StaticGroupOp createStaticGroup(OpBuilder &builder, calyx::ComponentOp compOp,
+                                Location loc, Twine uniqueName,
+                                uint64_t latency);
+
+unsigned getBitWidth(Type t);
+
 /// Creates register assignment operations within the provided groupOp.
 /// The component operation will house the constants.
 void buildAssignmentsForRegisterWrite(OpBuilder &builder,
-                                      calyx::GroupOp groupOp,
+                                      calyx::GroupInterface groupOp,
                                       calyx::ComponentOp componentOp,
                                       calyx::RegisterOp &reg, Value inputValue);
 
@@ -137,10 +144,13 @@ public:
   // Returns the arguments to this loop operation.
   virtual Block::BlockArgListType getBodyArgs() = 0;
 
+  // Returns the initial values for iter args.
+  virtual Operation::operand_range getInits() = 0;
+
   // Returns body of this loop operation.
   virtual Block *getBodyBlock() = 0;
 
-  // Returns the Block in which the condition exists.
+  // Returns the condition block.
   virtual Block *getConditionBlock() = 0;
 
   // Returns the condition as a Value.
@@ -177,35 +187,34 @@ private:
 template <typename T>
 class SchedulerInterface {
 public:
-  /// Register 'scheduleable' as being generated through lowering 'block'.
+  /// Register 'schedulable' as being generated through lowering 'block'.
   ///
   /// TODO(mortbopet): Add a post-insertion check to ensure that the use-def
   /// ordering invariant holds for the groups. When the control schedule is
-  /// generated, scheduleables within a block are emitted sequentially based on
+  /// generated, schedulables within a block are emitted sequentially based on
   /// the order that this function was called during conversion.
   ///
   /// Currently, we assume this to always be true. Walking the FuncOp IR implies
   /// sequential iteration over operations within basic blocks.
-  void addBlockScheduleable(mlir::Block *block, const T &scheduleable) {
-    blockScheduleables[block].push_back(scheduleable);
+  void addBlockSchedulable(mlir::Block *block, const T &schedulable) {
+    blockSchedulables[block].push_back(schedulable);
   }
 
   /// Returns an ordered list of schedulables which registered themselves to be
   /// a result of lowering the block in the source program. The list order
-  /// follows def-use chains between the scheduleables in the block.
-  SmallVector<T> getBlockScheduleables(mlir::Block *block) {
-    if (auto it = blockScheduleables.find(block);
-        it != blockScheduleables.end())
+  /// follows def-use chains between the schedulables in the block.
+  SmallVector<T> getBlockSchedulables(mlir::Block *block) {
+    if (auto it = blockSchedulables.find(block); it != blockSchedulables.end())
       return it->second;
     /// In cases of a block resulting in purely combinational logic, no
-    /// scheduleables registered themselves with the block.
+    /// schedulables registered themselves with the block.
     return {};
   }
 
 private:
-  /// BlockScheduleables is a list of scheduleables that should be
+  /// BlockSchedulables is a list of schedulables that should be
   /// sequentially executed when executing the associated basic block.
-  DenseMap<mlir::Block *, SmallVector<T>> blockScheduleables;
+  DenseMap<mlir::Block *, SmallVector<T>> blockSchedulables;
 };
 
 //===----------------------------------------------------------------------===//
@@ -214,9 +223,11 @@ private:
 
 // Handles state during the lowering of a loop. It will be used for
 // several lowering patterns.
-template <typename Loop>
+template <typename Loop, typename Group>
 class LoopLoweringStateInterface {
   static_assert(std::is_base_of_v<LoopInterface, Loop>);
+  static_assert(std::is_same<GroupOp, Group>() ||
+                std::is_same<StaticGroupOp, Group>());
 
 public:
   ~LoopLoweringStateInterface() = default;
@@ -245,7 +256,7 @@ public:
   }
 
   /// Registers grp to be the loop latch group of `op`.
-  void setLoopLatchGroup(Loop op, calyx::GroupOp group) {
+  void setLoopLatchGroup(Loop op, Group group) {
     Operation *operation = op.getOperation();
     assert(loopLatchGroups.count(operation) == 0 &&
            "A latch group was already set for this loopOp");
@@ -253,23 +264,21 @@ public:
   }
 
   /// Retrieve the loop latch group registered for `op`.
-  calyx::GroupOp getLoopLatchGroup(Loop op) {
+  Group getLoopLatchGroup(Loop op) {
     auto it = loopLatchGroups.find(op.getOperation());
     assert(it != loopLatchGroups.end() &&
            "No loop latch group was set for this loopOp");
-    return it->second;
+    return cast<Group>(it->second);
   }
 
   /// Registers groups to be the loop init groups of `op`.
-  void setLoopInitGroups(Loop op, SmallVector<calyx::GroupOp> groups) {
+  void addLoopInitGroup(Loop op, calyx::GroupInterface group) {
     Operation *operation = op.getOperation();
-    assert(loopInitGroups.count(operation) == 0 &&
-           "Init group(s) was already set for this loopOp");
-    loopInitGroups[operation] = std::move(groups);
+    loopInitGroups[operation].push_back(group);
   }
 
   /// Retrieve the loop init groups registered for `op`.
-  SmallVector<calyx::GroupOp> getLoopInitGroups(Loop op) {
+  SmallVector<calyx::GroupInterface> getLoopInitGroups(Loop op) {
     auto it = loopInitGroups.find(op.getOperation());
     assert(it != loopInitGroups.end() &&
            "No init group(s) was set for this loopOp");
@@ -278,15 +287,21 @@ public:
 
   /// Creates a new group that assigns the 'ops' values to the iter arg
   /// registers of the loop operation.
-  calyx::GroupOp buildLoopIterArgAssignments(OpBuilder &builder, Loop op,
-                                             calyx::ComponentOp componentOp,
-                                             Twine uniqueSuffix,
-                                             MutableArrayRef<OpOperand> ops) {
+  Group buildLoopIterArgAssignments(OpBuilder &builder, Loop op,
+                                    calyx::ComponentOp componentOp,
+                                    Twine uniqueSuffix,
+                                    MutableArrayRef<OpOperand> ops) {
     /// Pass iteration arguments through registers. This follows closely
     /// to what is done for branch ops.
     std::string groupName = "assign_" + uniqueSuffix.str();
-    auto groupOp = calyx::createGroup<calyx::GroupOp>(builder, componentOp,
-                                                      op.getLoc(), groupName);
+    GroupInterface groupOp;
+    if (std::is_same<StaticGroupOp, Group>()) {
+      groupOp = calyx::createStaticGroup(builder, componentOp, op.getLoc(),
+                                         groupName, 1);
+    } else {
+      groupOp = calyx::createGroup<GroupOp>(builder, componentOp, op.getLoc(),
+                                            groupName);
+    }
     /// Create register assignment for each iter_arg. a calyx::GroupDone signal
     /// is created for each register. These will be &'ed together in
     /// MultipleGroupDonePattern.
@@ -295,7 +310,7 @@ public:
       buildAssignmentsForRegisterWrite(builder, groupOp, componentOp, reg,
                                        arg.get());
     }
-    return groupOp;
+    return cast<Group>(groupOp);
   }
 
 private:
@@ -305,11 +320,11 @@ private:
   /// A loop latch group is a group that should be sequentially executed when
   /// finishing a loop body. The execution of this group will write the
   /// yield'ed loop body values to the iteration argument registers.
-  DenseMap<Operation *, calyx::GroupOp> loopLatchGroups;
+  DenseMap<Operation *, calyx::GroupInterface> loopLatchGroups;
 
   /// Loop init groups are to be scheduled before the while operation. These
   /// groups should set the initial value(s) of the loop init_args register(s).
-  DenseMap<Operation *, SmallVector<calyx::GroupOp>> loopInitGroups;
+  DenseMap<Operation *, SmallVector<calyx::GroupInterface>> loopInitGroups;
 };
 
 // Handles state during the lowering of a Calyx component. This provides common
@@ -333,11 +348,11 @@ public:
 
   /// Register 'grp' as a group which performs block argument
   /// register transfer when transitioning from basic block 'from' to 'to'.
-  void addBlockArgGroup(Block *from, Block *to, calyx::GroupOp grp);
+  void addBlockArgGroup(Block *from, Block *to, calyx::GroupInterface grp);
 
   /// Returns a list of groups to be evaluated to perform the block argument
   /// register assignments when transitioning from basic block 'from' to 'to'.
-  ArrayRef<calyx::GroupOp> getBlockArgGroups(Block *from, Block *to);
+  ArrayRef<calyx::GroupInterface> getBlockArgGroups(Block *from, Block *to);
 
   /// Returns a unique name within compOp with the provided prefix.
   std::string getUniqueName(StringRef prefix);
@@ -347,6 +362,10 @@ public:
 
   /// Registers a unique name for a given operation using a provided prefix.
   void setUniqueName(Operation *op, StringRef prefix);
+
+  /// Register group to start evaluation of value v, only applies to
+  /// sequential ops.
+  // void registerStartGroup(Value v, calyx::StaticGroupOp group);
 
   /// Register value v as being evaluated when scheduling group.
   void registerEvaluatingGroup(Value v, calyx::GroupInterface group);
@@ -365,6 +384,9 @@ public:
   /// Returns the memory interface registered for the given memref.
   calyx::MemoryInterface getMemoryInterface(Value memref);
 
+  /// Returns true if a memory interface exists for provided value.
+  bool hasMemoryInterface(Value memref);
+
   /// If v is an input to any memory registered within this component, returns
   /// the memory. If not, returns null.
   std::optional<calyx::MemoryInterface> isInputPortOfMemory(Value v);
@@ -377,10 +399,16 @@ public:
   /// the original function maps to.
   unsigned getFuncOpResultMapping(unsigned funcReturnIdx);
 
+  /// Return the start group for value v.
+  // calyx::StaticGroupOp getStartGroup(Value v);
+
   /// Return the group which evaluates the value v. Optionally, caller may
   /// specify the expected type of the group.
   template <typename TGroupOp = calyx::GroupInterface>
-  TGroupOp getEvaluatingGroup(Value v) {
+  std::optional<TGroupOp> getEvaluatingGroup(Value v) {
+    if (!valueGroupAssigns.contains(v)) {
+      return std::nullopt;
+    }
     auto it = valueGroupAssigns.find(v);
     if (it == valueGroupAssigns.end())
       v.dump();
@@ -428,9 +456,9 @@ private:
 
   /// Block arg groups is a list of groups that should be sequentially
   /// executed when passing control from the source to destination block.
-  /// Block arg groups are executed before blockScheduleables (akin to a
+  /// Block arg groups are executed before blockSchedulables (akin to a
   /// phi-node).
-  DenseMap<Block *, DenseMap<Block *, SmallVector<calyx::GroupOp>>>
+  DenseMap<Block *, DenseMap<Block *, SmallVector<calyx::GroupInterface>>>
       blockArgGroups;
 
   /// A mapping of string prefixes and the current uniqueness counter for that
@@ -439,6 +467,9 @@ private:
 
   /// A mapping from Operations and previously assigned unique name of the op.
   std::map<Operation *, std::string> opNames;
+
+  /// A mapping between SSA values and their start group.
+  DenseMap<Value, calyx::StaticGroupOp> valueStartGroups;
 
   /// A mapping between SSA values and the groups which assign them.
   DenseMap<Value, calyx::GroupInterface> valueGroupAssigns;
@@ -453,6 +484,10 @@ private:
   /// output port indices of this componentOp.
   DenseMap<unsigned, unsigned> funcOpResultMapping;
 };
+
+Value buildCombAndTree(OpBuilder &builder,
+                       calyx::ComponentLoweringStateInterface &state,
+                       Location loc, SmallVector<Value> values);
 
 /// An interface for conversion passes that lower Calyx programs. This handles
 /// state during the lowering of a Calyx program.
@@ -494,7 +529,6 @@ public:
   std::string irName(ValueOrBlock &v) {
     std::string s;
     llvm::raw_string_ostream os(s);
-    // mlir::AsmState asmState(module);
     v.printAsOperand(os, asmState);
     return s;
   }

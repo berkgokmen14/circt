@@ -114,6 +114,9 @@ static void checkMemrefDependence(SmallVectorImpl<Operation *> &memoryOps,
             }
           }
         }
+
+        if (!sched.hasIntraIterationDeps())
+          continue;
       } else if (isa<SchedulableAffineInterface>(destination)) {
         continue;
       } else {

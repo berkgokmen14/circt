@@ -2557,7 +2557,7 @@ LogicalResult SliceLibOp::verify() {
   return success();
 }
 
-#define ImplBinPipeOpCellInterface(OpType, outName)                            \
+#define ImplBinSeqOpCellInterface(OpType, outName)                             \
   SmallVector<StringRef> OpType::portNames() {                                 \
     return {"clk", "reset", "go", "left", "right", outName, "done"};           \
   }                                                                            \
@@ -2620,12 +2620,76 @@ LogicalResult SliceLibOp::verify() {
             DictionaryAttr::get(getContext())};                                \
   }
 
+#define ImplBinPipeOpCellInterface(OpType, outName)                            \
+  SmallVector<StringRef> OpType::portNames() {                                 \
+    return {"clk", "reset", "left", "right", outName};                         \
+  }                                                                            \
+                                                                               \
+  SmallVector<Direction> OpType::portDirections() {                            \
+    return {Input, Input, Input, Input, Output};                               \
+  }                                                                            \
+                                                                               \
+  void OpType::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {              \
+    getCellAsmResultNames(setNameFn, *this, this->portNames());                \
+  }                                                                            \
+                                                                               \
+  SmallVector<DictionaryAttr> OpType::portAttributes() {                       \
+    MLIRContext *context = getContext();                                       \
+    IntegerAttr isSet = IntegerAttr::get(IntegerType::get(context, 1), 1);     \
+    NamedAttrList clk, reset;                                                  \
+    clk.append("clk", isSet);                                                  \
+    reset.append("reset", isSet);                                              \
+    return {                                                                   \
+        clk.getDictionary(context),   /* Clk    */                             \
+        reset.getDictionary(context), /* Reset  */                             \
+        DictionaryAttr::get(context), /* Lhs    */                             \
+        DictionaryAttr::get(context), /* Rhs    */                             \
+        DictionaryAttr::get(context)  /* Out    */                             \
+    };                                                                         \
+  }                                                                            \
+                                                                               \
+  bool OpType::isCombinational() { return false; }
+
+#define ImplBinStallOpCellInterface(OpType, outName)                           \
+  SmallVector<StringRef> OpType::portNames() {                                 \
+    return {"clk", "reset", "stall", "left", "right", outName};                \
+  }                                                                            \
+                                                                               \
+  SmallVector<Direction> OpType::portDirections() {                            \
+    return {Input, Input, Input, Input, Input, Output};                        \
+  }                                                                            \
+                                                                               \
+  void OpType::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {              \
+    getCellAsmResultNames(setNameFn, *this, this->portNames());                \
+  }                                                                            \
+                                                                               \
+  SmallVector<DictionaryAttr> OpType::portAttributes() {                       \
+    MLIRContext *context = getContext();                                       \
+    IntegerAttr isSet = IntegerAttr::get(IntegerType::get(context, 1), 1);     \
+    NamedAttrList clk, reset;                                                  \
+    clk.append("clk", isSet);                                                  \
+    reset.append("reset", isSet);                                              \
+    return {                                                                   \
+        clk.getDictionary(context),   /* Clk    */                             \
+        reset.getDictionary(context), /* Reset  */                             \
+        DictionaryAttr::get(context), /* Stall  */                             \
+        DictionaryAttr::get(context), /* Lhs    */                             \
+        DictionaryAttr::get(context), /* Rhs    */                             \
+        DictionaryAttr::get(context)  /* Out    */                             \
+    };                                                                         \
+  }                                                                            \
+                                                                               \
+  bool OpType::isCombinational() { return false; }
+
 // clang-format off
-ImplBinPipeOpCellInterface(MultPipeLibOp, "out")
-ImplBinPipeOpCellInterface(DivUPipeLibOp, "out_quotient")
-ImplBinPipeOpCellInterface(DivSPipeLibOp, "out_quotient")
-ImplBinPipeOpCellInterface(RemUPipeLibOp, "out_remainder")
-ImplBinPipeOpCellInterface(RemSPipeLibOp, "out_remainder")
+ImplBinSeqOpCellInterface(SeqMultLibOp, "out")
+ImplBinSeqOpCellInterface(SeqDivULibOp, "out_quotient")
+ImplBinSeqOpCellInterface(SeqDivSLibOp, "out_quotient")
+ImplBinSeqOpCellInterface(SeqRemULibOp, "out_remainder")
+ImplBinSeqOpCellInterface(SeqRemSLibOp, "out_remainder")
+
+ImplBinPipeOpCellInterface(PipelinedMultLibOp, "out")
+ImplBinStallOpCellInterface(StallableMultLibOp, "out")
 
 ImplUnaryOpCellInterface(PadLibOp)
 ImplUnaryOpCellInterface(SliceLibOp)

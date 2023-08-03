@@ -537,9 +537,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   Type width = op.getResult().getType(), one = rewriter.getI1Type();
   auto mulPipe =
       getState<ComponentLoweringState>()
-          .getNewLibraryOpInstance<calyx::MultPipeLibOp>(
-              rewriter, loc, {one, one, one, width, width, width, one});
-  return buildLibraryBinaryPipeOp<calyx::MultPipeLibOp>(
+          .getNewLibraryOpInstance<calyx::PipelinedMultLibOp>(
+              rewriter, loc, {one, one, width, width, width});
+  return buildLibraryBinaryPipeOp<calyx::PipelinedMultLibOp>(
       rewriter, op, mulPipe,
       /*out=*/mulPipe.getOut());
 }
@@ -550,9 +550,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   Type width = op.getResult().getType(), one = rewriter.getI1Type();
   auto divPipe =
       getState<ComponentLoweringState>()
-          .getNewLibraryOpInstance<calyx::DivUPipeLibOp>(
+          .getNewLibraryOpInstance<calyx::SeqDivULibOp>(
               rewriter, loc, {one, one, one, width, width, width, width, one});
-  return buildLibraryBinaryPipeOp<calyx::DivUPipeLibOp>(
+  return buildLibraryBinaryPipeOp<calyx::SeqDivULibOp>(
       rewriter, op, divPipe,
       /*out=*/divPipe.getOut());
 }
@@ -563,9 +563,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   Type width = op.getResult().getType(), one = rewriter.getI1Type();
   auto remPipe =
       getState<ComponentLoweringState>()
-          .getNewLibraryOpInstance<calyx::DivUPipeLibOp>(
+          .getNewLibraryOpInstance<calyx::SeqDivULibOp>(
               rewriter, loc, {one, one, one, width, width, width, width, one});
-  return buildLibraryBinaryPipeOp<calyx::DivUPipeLibOp>(
+  return buildLibraryBinaryPipeOp<calyx::SeqDivULibOp>(
       rewriter, op, remPipe,
       /*out=*/remPipe.getOut());
 }
@@ -1137,9 +1137,9 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
             cell && !cell.isCombinational() && !isa<calyx::RegisterOp>(cell)) {
           auto *op = cell.getOperation();
           Value v;
-          if (auto mul = dyn_cast<calyx::MultPipeLibOp>(op); mul) {
+          if (auto mul = dyn_cast<calyx::PipelinedMultLibOp>(op); mul) {
             v = mul.getOut();
-          } else if (auto divu = dyn_cast<calyx::DivUPipeLibOp>(op); divu) {
+          } else if (auto divu = dyn_cast<calyx::SeqDivULibOp>(op); divu) {
             v = divu.getOut();
           } else if (auto seqMem = dyn_cast<calyx::SeqMemoryOp>(op); seqMem) {
             v = seqMem.readData();

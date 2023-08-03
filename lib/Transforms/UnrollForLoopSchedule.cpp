@@ -90,7 +90,8 @@ bool UnrollForLoopSchedule::usesExternalMemory(AffineForOp affineFor) {
         .Default([&](Operation *op) { return WalkResult::advance(); });
   });
 
-  return result.wasInterrupted();
+  return result.wasInterrupted() &&
+         affineFor->getAttr("hls.parallel") == nullptr;
 }
 
 // We need to keep track of memory ops in within the body to understand the

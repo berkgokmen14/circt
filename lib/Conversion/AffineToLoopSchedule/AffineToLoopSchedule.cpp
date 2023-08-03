@@ -224,7 +224,7 @@ void AffineToLoopSchedule::runOnOperation() {
 
   // llvm::errs() << "\nlowered affine\n\n";
 
-  getOperation().dump();
+  // getOperation().dump();
 
   // getOperation().walk([&](Operation *op) {
   //   if (!isa<AffineLoadOp, AffineStoreOp, memref::LoadOp,
@@ -296,7 +296,7 @@ void AffineToLoopSchedule::runOnOperation() {
       return signalPassFailure();
   }
 
-  getOperation().dump();
+  // getOperation().dump();
 
   // Schedule all remaining loops
   auto *seqSchedulingAnalysis =
@@ -366,6 +366,7 @@ void AffineToLoopSchedule::runOnOperation() {
   getAnalysisManager().invalidate(mlir::detail::PreservedAnalyses());
   seqSchedulingAnalysis = &getAnalysis<SharedOperatorsSchedulingAnalysis>();
   auto problem = seqSchedulingAnalysis->getProblem(funcOp);
+
   DenseMap<LoopInterface, SmallVector<Operation *>> memOps;
   funcOp.getBody().walk([&](LoopInterface loop) {
     loop.getBodyBlock()->walk([&](Operation *op) {
@@ -409,7 +410,7 @@ void AffineToLoopSchedule::runOnOperation() {
   if (failed(createFuncLoopSchedule(funcOp, problem)))
     return signalPassFailure();
 
-  getOperation().dump();
+  // getOperation().dump();
 }
 
 /// Apply the affine map from an 'affine.load' operation to its operands, and
@@ -732,10 +733,10 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
           auto loadOp = cast<loopschedule::LoadInterface>(*op);
           auto latencyOpt = loadOp.getLatency();
           auto limitOpt = loadOp.getLimit();
-          assert(latencyOpt.has_value() && "Load op must have latency");
+          // assert(latencyOpt.has_value() && "Load op must have latency");
           Problem::OperatorType portOpr =
               problem.getOrInsertOperatorType(loadOp.getUniqueId());
-          problem.setLatency(portOpr, latencyOpt.value());
+          problem.setLatency(portOpr, latencyOpt.value_or(1));
           if (limitOpt.has_value())
             problem.setLimit(portOpr, limitOpt.value());
           problem.setLinkedOperatorType(op, portOpr);
@@ -746,10 +747,10 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
           auto storeOp = cast<loopschedule::StoreInterface>(*op);
           auto latencyOpt = storeOp.getLatency();
           auto limitOpt = storeOp.getLimit();
-          assert(latencyOpt.has_value() && "Store op must have latency");
+          // assert(latencyOpt.has_value() && "Store op must have latency");
           Problem::OperatorType portOpr =
               problem.getOrInsertOperatorType(storeOp.getUniqueId());
-          problem.setLatency(portOpr, latencyOpt.value());
+          problem.setLatency(portOpr, latencyOpt.value_or(1));
           if (limitOpt.has_value())
             problem.setLimit(portOpr, limitOpt.value());
           problem.setLinkedOperatorType(op, portOpr);

@@ -716,9 +716,10 @@ void InlineCombGroups::recurseInlineCombGroups(
     //   LateSSAReplacement)
     if (src.isa<BlockArgument>() ||
         isa<calyx::RegisterOp, calyx::MemoryOp, calyx::SeqMemoryOp,
-            hw::ConstantOp, mlir::arith::ConstantOp, calyx::MultPipeLibOp,
-            calyx::DivUPipeLibOp, calyx::DivSPipeLibOp, calyx::RemSPipeLibOp,
-            calyx::RemUPipeLibOp, mlir::scf::WhileOp>(src.getDefiningOp()))
+            hw::ConstantOp, mlir::arith::ConstantOp, calyx::SeqMultLibOp,
+            calyx::SeqDivULibOp, calyx::SeqDivSLibOp, calyx::SeqRemSLibOp,
+            calyx::SeqRemULibOp, calyx::PipelinedMultLibOp,
+            mlir::scf::WhileOp, calyx::StallableMultLibOp>(src.getDefiningOp()))
       continue;
 
     auto evalGroupOpt = state.getEvaluatingGroup(src);

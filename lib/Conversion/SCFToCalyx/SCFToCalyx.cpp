@@ -1260,6 +1260,17 @@ class LateSSAReplacement : public calyx::FuncOpPartialLoweringPattern {
       }
     });
 
+    funcOp.walk([&](calyx::LoadLoweringInterface loadOp) {
+        /// In buildOpGroups we did not replace loadOp's results, to ensure a
+        /// link between evaluating groups (which fix the input addresses of a
+        /// memory op) and a readData result. Now, we may replace these SSA
+        /// values with their memoryOp readData output.
+        loadOp.getResult().replaceAllUsesWith(
+            getState<ComponentLoweringState>()
+                .getMemoryInterface(loadOp.getMemoryValue())
+                .readData());
+    });
+
     return success();
   }
 };

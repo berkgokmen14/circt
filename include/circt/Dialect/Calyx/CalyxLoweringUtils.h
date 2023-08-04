@@ -204,7 +204,8 @@ public:
   /// a result of lowering the block in the source program. The list order
   /// follows def-use chains between the schedulables in the block.
   SmallVector<T> getBlockSchedulables(mlir::Block *block) {
-    if (auto it = blockSchedulables.find(block); it != blockSchedulables.end())
+    if (auto it = blockSchedulables.find(block);
+        it != blockSchedulables.end())
       return it->second;
     /// In cases of a block resulting in purely combinational logic, no
     /// schedulables registered themselves with the block.
@@ -410,9 +411,6 @@ public:
       return std::nullopt;
     }
     auto it = valueGroupAssigns.find(v);
-    if (it == valueGroupAssigns.end())
-      v.dump();
-    assert(it != valueGroupAssigns.end() && "No group evaluating value!");
     if constexpr (std::is_same_v<TGroupOp, calyx::GroupInterface>)
       return it->second;
     else {

@@ -310,6 +310,10 @@ std::optional<Value> MemoryInterface::writeDataOpt() {
   if (auto *memOp = std::get_if<calyx::SeqMemoryOp>(&impl); memOp) {
     return memOp->writeData();
   }
+
+  if (auto *memOp = std::get_if<calyx::SeqMemoryOp>(&impl); memOp) {
+    return memOp->writeData();
+  }
   auto writeData = std::get<MemoryPortsImpl>(impl).writeData;
   return writeData;
 }
@@ -477,10 +481,6 @@ unsigned ComponentLoweringStateInterface::getFuncOpResultMapping(
   return it->second;
 }
 
-// calyx::StaticGroupOp ComponentLoweringStateInterface::getStartGroup(Value v)
-// {
-//   return valueStartGroups[v];
-// }
 //===----------------------------------------------------------------------===//
 // CalyxLoweringState
 //===----------------------------------------------------------------------===//
@@ -726,9 +726,10 @@ void InlineCombGroups::recurseInlineCombGroups(
     // Needed to add memory interfaces as well
     if (src.isa<BlockArgument>() ||
         isa<calyx::RegisterOp, calyx::MemoryOp, calyx::SeqMemoryOp,
-            hw::ConstantOp, mlir::arith::ConstantOp, calyx::MultPipeLibOp,
-            calyx::DivUPipeLibOp, calyx::DivSPipeLibOp, calyx::RemSPipeLibOp,
-            calyx::RemUPipeLibOp, mlir::scf::WhileOp>(src.getDefiningOp()) ||
+            hw::ConstantOp, mlir::arith::ConstantOp, calyx::SeqMultLibOp,
+            calyx::SeqDivULibOp, calyx::SeqDivSLibOp, calyx::SeqRemSLibOp,
+            calyx::SeqRemULibOp, calyx::PipelinedMultLibOp,
+            calyx::SeqRemULibOp, mlir::scf::WhileOp, calyx::StallableMultLibOp>(src.getDefiningOp()) ||
         isa<LoadLoweringInterface, StoreLoweringInterface,
             AllocLoweringInterface>(src.getDefiningOp()) ||
         // TODO: amc::CalyxInstanceOp does not fulfill any of these interfaces.

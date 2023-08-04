@@ -267,17 +267,60 @@ def AndLibOp  : CombinationalArithBinaryLibraryOp<"and"> {}
 def OrLibOp   : CombinationalArithBinaryLibraryOp<"or"> {}
 def XorLibOp  : CombinationalArithBinaryLibraryOp<"xor"> {}
 
-class ArithBinaryPipeLibraryOp<string mnemonic> : ArithBinaryLibraryOp<mnemonic # "_pipe", [
+class SequentialArithBinaryLibraryOp<string mnemonic> : ArithBinaryLibraryOp<mnemonic # "_seq", [
     SameTypeConstraint<"left", "out">
   ]> {
   let results = (outs I1:$clk, I1:$reset, I1:$go, AnyType:$left, AnyType:$right, AnyType:$out, I1:$done);
 }
 
-def MultPipeLibOp : ArithBinaryPipeLibraryOp<"mult"> {}
-def DivSPipeLibOp : ArithBinaryPipeLibraryOp<"divs"> {}
-def DivUPipeLibOp : ArithBinaryPipeLibraryOp<"divu"> {}
-def RemUPipeLibOp : ArithBinaryPipeLibraryOp<"remu"> {}
-def RemSPipeLibOp : ArithBinaryPipeLibraryOp<"rems"> {}
+def SeqMultLibOp : SequentialArithBinaryLibraryOp<"mult"> {}
+def SeqDivSLibOp : SequentialArithBinaryLibraryOp<"divs"> {}
+def SeqDivULibOp : SequentialArithBinaryLibraryOp<"divu"> {}
+def SeqRemULibOp : SequentialArithBinaryLibraryOp<"remu"> {}
+def SeqRemSLibOp : SequentialArithBinaryLibraryOp<"rems"> {}
+
+class ArithBinaryPipeLibraryOp<string mnemonic> : CalyxPrimitive<"pipelined_" # mnemonic, [
+    SameTypeConstraint<"left", "out">
+  ]> {
+  let summary = "Defines an operation which maps to a Calyx pipelined primitive";
+  let description = [{
+    This operation represents an instance of a Calyx pipelined primitive.
+    A library primitive maps to some hardware-implemented component within the
+    native Calyx compiler.
+
+    ```mlir
+      // A 32-bit adder. This falls under the binary library operations.
+      %add.left, %add.right, %add.out = calyx.std_add @add : i32, i32, i32
+
+      // An 8-bit comparison operator (with a 1-bit output). This falls under
+      // the boolean binary library operations.
+      %gt.left, %gt.right, %gt.out = calyx.std_gt @gt : i8, i8, i1
+
+      // An 8-bit to 16-bit pad operator. This falls under the unary
+      // library operations.
+      %pad.in, %pad.out = calyx.std_pad @pad : i8, i16
+    ```
+  }];
+
+  let arguments = (ins SymbolNameAttr:$sym_name);
+  let builders = [
+    OpBuilder<(ins "StringRef":$sym_name, "::mlir::TypeRange":$resultTypes), [{
+      $_state.addAttribute(mlir::SymbolTable::getSymbolAttrName(), $_builder.getStringAttr(sym_name));
+      $_state.addTypes(resultTypes);
+    }]>
+  ];
+  let results = (outs I1:$clk, I1:$reset, AnyType:$left, AnyType:$right, AnyType:$out);
+}
+
+def PipelinedMultLibOp : ArithBinaryPipeLibraryOp<"mult"> {}
+
+class ArithBinaryStallableLibraryOp<string mnemonic> : ArithBinaryLibraryOp<"stallable_" # mnemonic, [
+    SameTypeConstraint<"left", "out">
+  ]> {
+  let results = (outs I1:$clk, I1:$reset, I1:$stall, AnyType:$left, AnyType:$right, AnyType:$out);
+}
+
+def StallableMultLibOp : ArithBinaryStallableLibraryOp<"mult"> {}
 
 class UnaryLibraryOp<string mnemonic, list<Trait> traits = []> :
     CalyxLibraryOp<mnemonic, !listconcat(traits, [Combinational])> {

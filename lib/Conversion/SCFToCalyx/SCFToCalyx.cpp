@@ -488,9 +488,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   Type width = mul.getResult().getType(), one = rewriter.getI1Type();
   auto mulPipe =
       getState<ComponentLoweringState>()
-          .getNewLibraryOpInstance<calyx::MultPipeLibOp>(
+          .getNewLibraryOpInstance<calyx::SeqMultLibOp>(
               rewriter, loc, {one, one, one, width, width, width, one});
-  return buildLibraryBinaryPipeOp<calyx::MultPipeLibOp>(
+  return buildLibraryBinaryPipeOp<calyx::SeqMultLibOp>(
       rewriter, mul, mulPipe,
       /*out=*/mulPipe.getOut());
 }
@@ -501,9 +501,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   Type width = div.getResult().getType(), one = rewriter.getI1Type();
   auto divPipe =
       getState<ComponentLoweringState>()
-          .getNewLibraryOpInstance<calyx::DivUPipeLibOp>(
+          .getNewLibraryOpInstance<calyx::SeqDivULibOp>(
               rewriter, loc, {one, one, one, width, width, width, one});
-  return buildLibraryBinaryPipeOp<calyx::DivUPipeLibOp>(
+  return buildLibraryBinaryPipeOp<calyx::SeqDivULibOp>(
       rewriter, div, divPipe,
       /*out=*/divPipe.getOut());
 }
@@ -514,9 +514,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   Type width = div.getResult().getType(), one = rewriter.getI1Type();
   auto divPipe =
       getState<ComponentLoweringState>()
-          .getNewLibraryOpInstance<calyx::DivSPipeLibOp>(
+          .getNewLibraryOpInstance<calyx::SeqDivSLibOp>(
               rewriter, loc, {one, one, one, width, width, width, one});
-  return buildLibraryBinaryPipeOp<calyx::DivSPipeLibOp>(
+  return buildLibraryBinaryPipeOp<calyx::SeqDivSLibOp>(
       rewriter, div, divPipe,
       /*out=*/divPipe.getOut());
 }
@@ -527,9 +527,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   Type width = rem.getResult().getType(), one = rewriter.getI1Type();
   auto remPipe =
       getState<ComponentLoweringState>()
-          .getNewLibraryOpInstance<calyx::RemUPipeLibOp>(
+          .getNewLibraryOpInstance<calyx::SeqRemULibOp>(
               rewriter, loc, {one, one, one, width, width, width, one});
-  return buildLibraryBinaryPipeOp<calyx::RemUPipeLibOp>(
+  return buildLibraryBinaryPipeOp<calyx::SeqRemULibOp>(
       rewriter, rem, remPipe,
       /*out=*/remPipe.getOut());
 }
@@ -540,9 +540,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   Type width = rem.getResult().getType(), one = rewriter.getI1Type();
   auto remPipe =
       getState<ComponentLoweringState>()
-          .getNewLibraryOpInstance<calyx::RemSPipeLibOp>(
+          .getNewLibraryOpInstance<calyx::SeqRemSLibOp>(
               rewriter, loc, {one, one, one, width, width, width, one});
-  return buildLibraryBinaryPipeOp<calyx::RemSPipeLibOp>(
+  return buildLibraryBinaryPipeOp<calyx::SeqRemSLibOp>(
       rewriter, rem, remPipe,
       /*out=*/remPipe.getOut());
 }

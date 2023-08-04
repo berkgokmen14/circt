@@ -199,6 +199,11 @@ def SchedulableAffineOpInterface : OpInterface<"SchedulableAffineInterface"> {
       "getMemoryValue",
       (ins)>,
     InterfaceMethod<
+      "",
+      "bool",
+      "hasIntraIterationDeps",
+      (ins)>,
+    InterfaceMethod<
       "This returns the result.",
       "bool",
       "hasDependence",

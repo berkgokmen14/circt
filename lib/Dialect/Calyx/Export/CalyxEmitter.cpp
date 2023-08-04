@@ -134,8 +134,8 @@ private:
               return {sCore};
             })
         .Case<SgtLibOp, SltLibOp, SeqLibOp, SneqLibOp, SgeLibOp, SleLibOp,
-              SrshLibOp, MultPipeLibOp, RemUPipeLibOp, RemSPipeLibOp,
-              DivUPipeLibOp, DivSPipeLibOp>(
+              SrshLibOp, SeqMultLibOp, SeqRemULibOp, SeqRemSLibOp,
+              SeqDivULibOp, SeqDivSLibOp>(
             [&](auto op) -> FailureOr<StringRef> {
               static constexpr std::string_view sBinaryOperators =
                   "binary_operators";
@@ -143,6 +143,14 @@ private:
             })
         .Case<SeqMemoryOp>([&](auto op) -> FailureOr<StringRef> {
           static constexpr std::string_view sMemories = "memories";
+          return {sMemories};
+        })
+        .Case<PipelinedMultLibOp>([&](auto op) -> FailureOr<StringRef> {
+          static constexpr std::string_view sMemories = "pipelined";
+          return {sMemories};
+        })
+        .Case<StallableMultLibOp>([&](auto op) -> FailureOr<StringRef> {
+          static constexpr std::string_view sMemories = "stallable";
           return {sMemories};
         })
         /*.Case<>([&](auto op) { library = "math"; })*/
@@ -628,13 +636,13 @@ void Emitter::emitComponent(ComponentInterface op) {
                 SubLibOp, ShruLibOp, RshLibOp, SrshLibOp, LshLibOp, AndLibOp,
                 NotLibOp, OrLibOp, XorLibOp, WireLibOp>(
               [&](auto op) { emitLibraryPrimTypedByFirstInputPort(op); })
-          .Case<MultPipeLibOp>(
+          .Case<SeqMultLibOp, PipelinedMultLibOp, StallableMultLibOp>(
               [&](auto op) { emitLibraryPrimTypedByFirstOutputPort(op); })
-          .Case<RemUPipeLibOp, DivUPipeLibOp>([&](auto op) {
+          .Case<SeqRemULibOp, SeqDivULibOp>([&](auto op) {
             emitLibraryPrimTypedByFirstOutputPort(
                 op, /*calyxLibName=*/{"std_div_pipe"});
           })
-          .Case<RemSPipeLibOp, DivSPipeLibOp>([&](auto op) {
+          .Case<SeqRemSLibOp, SeqDivSLibOp>([&](auto op) {
             emitLibraryPrimTypedByFirstOutputPort(
                 op, /*calyxLibName=*/{"std_sdiv_pipe"});
           })

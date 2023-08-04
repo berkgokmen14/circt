@@ -147,7 +147,9 @@ public:
     return incrGroup[loop];
   }
 
-  void setGuardValue(PhaseInterface phase, Value v) { guardValues[phase] = v; }
+  void setGuardValue(PhaseInterface phase, Value v) {
+    guardValues[phase] = v;
+  }
 
   std::optional<Value> getGuardValue(PhaseInterface phase) {
     if (!guardValues.contains(phase))
@@ -450,8 +452,8 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   // control has been generated (see LateSSAReplacement). This is *vital* for
   // things such as InlineCombGroups to be able to properly track which
   // memory assignment groups belong to which accesses.
-  getState<ComponentLoweringState>().registerEvaluatingGroup(loadOp.getResult(),
-                                                             group);
+  getState<ComponentLoweringState>().registerEvaluatingGroup(
+      loadOp.getResult(), group);
 
   // loadOp.replaceAllUsesWith(memoryInterface.readData());
   return success();
@@ -502,10 +504,6 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
   if (res.failed())
     return failure();
 
-  if (blockOpt.has_value()) {
-    state.addBlockSchedulable(blockOpt.value(), group);
-  }
-
   return success();
 }
 
@@ -537,9 +535,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   Type width = op.getResult().getType(), one = rewriter.getI1Type();
   auto mulPipe =
       getState<ComponentLoweringState>()
-          .getNewLibraryOpInstance<calyx::MultPipeLibOp>(
-              rewriter, loc, {one, one, one, width, width, width, one});
-  return buildLibraryBinaryPipeOp<calyx::MultPipeLibOp>(
+          .getNewLibraryOpInstance<calyx::PipelinedMultLibOp>(
+              rewriter, loc, {one, one, width, width, width});
+  return buildLibraryBinaryPipeOp<calyx::PipelinedMultLibOp>(
       rewriter, op, mulPipe,
       /*out=*/mulPipe.getOut());
 }
@@ -550,9 +548,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   Type width = op.getResult().getType(), one = rewriter.getI1Type();
   auto divPipe =
       getState<ComponentLoweringState>()
-          .getNewLibraryOpInstance<calyx::DivUPipeLibOp>(
+          .getNewLibraryOpInstance<calyx::SeqDivULibOp>(
               rewriter, loc, {one, one, one, width, width, width, width, one});
-  return buildLibraryBinaryPipeOp<calyx::DivUPipeLibOp>(
+  return buildLibraryBinaryPipeOp<calyx::SeqDivULibOp>(
       rewriter, op, divPipe,
       /*out=*/divPipe.getOut());
 }
@@ -563,9 +561,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   Type width = op.getResult().getType(), one = rewriter.getI1Type();
   auto remPipe =
       getState<ComponentLoweringState>()
-          .getNewLibraryOpInstance<calyx::DivUPipeLibOp>(
+          .getNewLibraryOpInstance<calyx::SeqDivULibOp>(
               rewriter, loc, {one, one, one, width, width, width, width, one});
-  return buildLibraryBinaryPipeOp<calyx::DivUPipeLibOp>(
+  return buildLibraryBinaryPipeOp<calyx::SeqDivULibOp>(
       rewriter, op, remPipe,
       /*out=*/remPipe.getOut());
 }
@@ -1145,9 +1143,9 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
             cell && !cell.isCombinational() && !isa<calyx::RegisterOp>(cell)) {
           auto *op = cell.getOperation();
           Value v;
-          if (auto mul = dyn_cast<calyx::MultPipeLibOp>(op); mul) {
+          if (auto mul = dyn_cast<calyx::PipelinedMultLibOp>(op); mul) {
             v = mul.getOut();
-          } else if (auto divu = dyn_cast<calyx::DivUPipeLibOp>(op); divu) {
+          } else if (auto divu = dyn_cast<calyx::SeqDivULibOp>(op); divu) {
             v = divu.getOut();
           } else if (auto seqMem = dyn_cast<calyx::SeqMemoryOp>(op); seqMem) {
             v = seqMem.readData();
@@ -1186,18 +1184,6 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
                                   width, name);
         getState<ComponentLoweringState>().addPhaseReg(phase, reg, i);
         regMap[phaseResult] = reg;
-
-        auto *defOp = value.getDefiningOp();
-        Block *block = defOp->getBlock();
-        auto groupName = getState<ComponentLoweringState>().getUniqueName(
-            loweringState().blockName(block));
-        auto group = calyx::createGroup<calyx::CombGroupOp>(
-            rewriter, getState<ComponentLoweringState>().getComponentOp(),
-            defOp->getLoc(), groupName);
-
-        // Register the values for the pipeline.
-        getState<ComponentLoweringState>().registerEvaluatingGroup(reg.getOut(),
-                                                                   group);
 
         // Note that we do not use replace all uses with here as in
         // BuildBasicBlockRegs. Instead, we wait until after BuildOpGroups, and

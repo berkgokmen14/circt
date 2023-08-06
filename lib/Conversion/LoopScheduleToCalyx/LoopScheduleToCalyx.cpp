@@ -147,9 +147,7 @@ public:
     return incrGroup[loop];
   }
 
-  void setGuardValue(PhaseInterface phase, Value v) {
-    guardValues[phase] = v;
-  }
+  void setGuardValue(PhaseInterface phase, Value v) { guardValues[phase] = v; }
 
   std::optional<Value> getGuardValue(PhaseInterface phase) {
     if (!guardValues.contains(phase))
@@ -452,8 +450,8 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   // control has been generated (see LateSSAReplacement). This is *vital* for
   // things such as InlineCombGroups to be able to properly track which
   // memory assignment groups belong to which accesses.
-  getState<ComponentLoweringState>().registerEvaluatingGroup(
-      loadOp.getResult(), group);
+  getState<ComponentLoweringState>().registerEvaluatingGroup(loadOp.getResult(),
+                                                             group);
 
   // loadOp.replaceAllUsesWith(memoryInterface.readData());
   return success();
@@ -533,10 +531,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      MulIOp op) const {
   Location loc = op.getLoc();
   Type width = op.getResult().getType(), one = rewriter.getI1Type();
-  auto mulPipe =
-      getState<ComponentLoweringState>()
-          .getNewLibraryOpInstance<calyx::PipelinedMultLibOp>(
-              rewriter, loc, {one, one, width, width, width});
+  auto mulPipe = getState<ComponentLoweringState>()
+                     .getNewLibraryOpInstance<calyx::PipelinedMultLibOp>(
+                         rewriter, loc, {one, one, width, width, width});
   return buildLibraryBinaryPipeOp<calyx::PipelinedMultLibOp>(
       rewriter, op, mulPipe,
       /*out=*/mulPipe.getOut());

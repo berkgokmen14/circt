@@ -2658,9 +2658,8 @@ Value InvokeOp::getInstGoValue() {
   Value ret = nullptr;
   llvm::TypeSwitch<Operation *>(operation)
       .Case<RegisterOp>([&](auto op) { ret = operation->getResult(1); })
-      .Case<MemoryOp, SeqDivSLibOp, SeqDivULibOp, SeqMultLibOp,
-            SeqRemSLibOp, SeqRemULibOp>(
-          [&](auto op) { ret = operation->getResult(2); })
+      .Case<MemoryOp, SeqDivSLibOp, SeqDivULibOp, SeqMultLibOp, SeqRemSLibOp,
+            SeqRemULibOp>([&](auto op) { ret = operation->getResult(2); })
       .Case<InstanceOp>([&](auto op) {
         auto portInfo = op.getReferencedComponent().getPortInfo();
         for (auto [portInfo, res] :

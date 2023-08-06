@@ -728,8 +728,9 @@ void InlineCombGroups::recurseInlineCombGroups(
         isa<calyx::RegisterOp, calyx::MemoryOp, calyx::SeqMemoryOp,
             hw::ConstantOp, mlir::arith::ConstantOp, calyx::SeqMultLibOp,
             calyx::SeqDivULibOp, calyx::SeqDivSLibOp, calyx::SeqRemSLibOp,
-            calyx::SeqRemULibOp, calyx::PipelinedMultLibOp,
-            calyx::SeqRemULibOp, mlir::scf::WhileOp, calyx::StallableMultLibOp>(src.getDefiningOp()) ||
+            calyx::SeqRemULibOp, calyx::PipelinedMultLibOp, calyx::SeqRemULibOp,
+            mlir::scf::WhileOp, calyx::StallableMultLibOp>(
+            src.getDefiningOp()) ||
         isa<LoadLoweringInterface, StoreLoweringInterface,
             AllocLoweringInterface>(src.getDefiningOp()) ||
         // TODO: amc::CalyxInstanceOp does not fulfill any of these interfaces.

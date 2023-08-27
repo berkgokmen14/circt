@@ -247,6 +247,7 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   // Since the unrolled loop may be optimized/promoted away, I put the for
   // loop in its own block to isolated the new anchoring ForOp
   IRMapping irMapping;
+  DenseSet<Operation *> movedOperations;
   DenseSet<Operation *> dontTouchSet;
   auto tmpFor = cloneIntoNewBlock(affineFor, irMapping, dontTouchSet);
   auto *tmpBlk = tmpFor->getBlock();
@@ -258,7 +259,7 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   IRRewriter rewriter(builder);
   Block *blockToFuse =
       loopIsPromoted ? tmpBlk : &tmpFor.getLoopBody().getBlocks().front();
-  AffineForOp *newAnchorOp = nullptr;
+  AffineForOp newAnchorOp = nullptr;
   unsigned fuseIterations = getFuseIterations(affineFor);
   for (unsigned i = 0; i < fuseIterations; ++i) {
     // Since we isolated the unrolled loop in its own block we have isolated all
@@ -275,8 +276,9 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
         for (const auto &dep : tmpDependence->getDependences(memOp))
           for (auto comp : dep.dependenceComponents)
             for (auto loopJ : innerLoops)
-              if (dep.dependenceType == DependenceResult::HasDependence &&
-                  loopI != loopJ && loopJ->isAncestor(comp.op)) {
+              if (loopI->getNumResults() > 0 ||
+                  (dep.dependenceType == DependenceResult::HasDependence &&
+                   loopI != loopJ && loopJ->isAncestor(comp.op))) {
                 tmpBlk->erase();
                 return success();
               }
@@ -296,6 +298,7 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
     SmallVector<Operation *> operationsToMove;
     for (auto *op : operations) {
       if (!isa<AffineForOp>(*op) || dontTouchSet.contains(op)) {
+        movedOperations.insert(op);
         operationsToMove.push_back(op);
         continue;
       }
@@ -313,6 +316,9 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
       operationsToMove.clear();
       auto &srcBlk = srcLoop.getRegion().getBlocks().back();
       destBlk.getTerminator()->erase();
+      for (auto &op : destBlk.getOperations())
+        movedOperations.insert(&op);
+
       rewriter.mergeBlocks(&srcBlk, &destBlk, destBlk.getArguments());
     }
 
@@ -322,7 +328,7 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
       innerLoop->erase();
 
     blockToFuse = &destLoop.getRegion().getBlocks().front();
-    newAnchorOp = &destLoop;
+    newAnchorOp = destLoop;
   }
   // Now we dump the fused-loop block in the location of the original loop
   rewriter.inlineBlockBefore(tmpBlk, affineFor,
@@ -331,13 +337,14 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   if (newAnchorOp != nullptr) {
     // Point old ops to the cloned & moved ones
     for (auto opMapping : irMapping.getOperationMap())
-      opMapping.first->replaceAllUsesWith(opMapping.second->getResults());
+      if (movedOperations.contains(opMapping.second))
+        opMapping.first->replaceAllUsesWith(opMapping.second->getResults());
 
     // Now do cleanup of duplicate Ops from cloning step
     auto *containingBlk = affineFor->getBlock();
     SmallVector<Operation *> prologueToDelete;
     for (auto &op : containingBlk->getOperations()) {
-      if (isa<AffineForOp>(op) && cast<AffineForOp>(op) == *newAnchorOp) {
+      if (isa<AffineForOp>(op) && cast<AffineForOp>(op) == newAnchorOp) {
         break;
       }
       if (op.getUses().empty() && !dontTouchSet.contains(&op))

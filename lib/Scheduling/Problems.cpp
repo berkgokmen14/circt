@@ -39,6 +39,12 @@ LogicalResult Problem::insertDependence(Dependence dep) {
     auxDependences[dst].insert(src);
 
   // auto-register the endpoints
+  assert(src != nullptr);
+  assert(dst != nullptr);
+  if (!operations.contains(src)) {
+    llvm::errs() << "src not in problem\n";
+    src->dump();
+  }
   operations.insert(src);
   operations.insert(dst);
 
@@ -79,6 +85,7 @@ Problem::PropertyStringVector Problem::getProperties(OperatorType opr) {
 Problem::PropertyStringVector Problem::getProperties() { return {}; }
 
 LogicalResult Problem::checkLinkedOperatorType(Operation *op) {
+  // op->dump();
   if (!getLinkedOperatorType(op))
     return op->emitError("Operation is not linked to an operator type ") << op;
   if (!hasOperatorType(*getLinkedOperatorType(op)))

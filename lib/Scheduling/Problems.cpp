@@ -41,10 +41,10 @@ LogicalResult Problem::insertDependence(Dependence dep) {
   // auto-register the endpoints
   assert(src != nullptr);
   assert(dst != nullptr);
-  if (!operations.contains(src)) {
-    llvm::errs() << "src not in problem\n";
-    src->dump();
-  }
+  // if (!operations.contains(src)) {
+  //   llvm::errs() << "src not in problem\n";
+  //   src->dump();
+  // }
   operations.insert(src);
   operations.insert(dst);
 

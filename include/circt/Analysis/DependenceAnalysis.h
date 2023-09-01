@@ -56,7 +56,7 @@ struct MemoryDependence {
 /// the operation to which the dependences exist, and the map value is zero or
 /// more MemoryDependences for that operation.
 using MemoryDependenceResult =
-    DenseMap<Operation *, SmallVector<MemoryDependence>>;
+    std::map<Operation *, SmallVector<MemoryDependence>>;
 
 /// MemoryDependenceAnalysis traverses any AffineForOps in the FuncOp body and
 /// checks for affine memory access dependences. Non-affine memory dependences
@@ -73,6 +73,9 @@ struct MemoryDependenceAnalysis {
 
   // Replaces the dependences, if any, from the oldOp to the newOp.
   void replaceOp(Operation *oldOp, Operation *newOp);
+
+  // Contains op
+  bool containsOp(Operation *op);
 
 private:
   // Store dependence results.

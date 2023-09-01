@@ -700,6 +700,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
 
     // Set pipeline iter value stuff
     auto pipeline = cast<LoopSchedulePipelineOp>(loop.getOperation());
+    if (pipeline.getII() != 1) {
+      return pipeline.emitOpError("LoopScheduleToCalyx currently does not support pipelines with II > 1");
+    }
     getState<ComponentLoweringState>().setIncrGroup(pipeline, incrGroup);
     getState<ComponentLoweringState>().setLoopIterValue(pipeline,
                                                         addOp.getOut());

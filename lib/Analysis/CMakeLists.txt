@@ -1,6 +1,7 @@
 set(LLVM_OPTIONAL_SOURCES
   DependenceAnalysis.cpp
   SchedulingAnalysis.cpp
+  LoopDependenceAnalysis.cpp
   TestPasses.cpp
   )
 

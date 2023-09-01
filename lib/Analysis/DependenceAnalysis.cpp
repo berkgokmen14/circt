@@ -20,7 +20,9 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/OperationSupport.h"
 
 using namespace mlir;
 using namespace mlir::affine;
@@ -63,8 +65,6 @@ static Block *getCommonBlockInAffineScope(Operation *opA, Operation *opB) {
   return commonBlock;
 }
 
-/// Helper to iterate through memory operation pairs and check for dependences
-/// at a given loop nesting depth.
 static void checkMemrefDependence(SmallVectorImpl<Operation *> &memoryOps,
                                   unsigned depth,
                                   MemoryDependenceResult &results) {
@@ -73,70 +73,30 @@ static void checkMemrefDependence(SmallVectorImpl<Operation *> &memoryOps,
       if (source == destination)
         continue;
 
-      // Requested depth might not be a valid comparison if they do not belong
-      // to the same loop nest
-      SmallVector<AffineForOp> surroundingLoops;
-      // llvm::errs() << "depth: " << depth << ", " <<
-      // getInnermostCommonLoopDepth({source, destination});
-      if (depth >
-          getInnermostCommonLoopDepth({source, destination}, &surroundingLoops))
-        continue;
-
       // Initialize the dependence list for this destination.
       if (results.count(destination) == 0)
         results[destination] = SmallVector<MemoryDependence>();
 
-      if (auto sched = dyn_cast<SchedulableAffineInterface>(source)) {
-        // Check if the src or its ancestor is before the dst or its ancestor.
-        if (auto *commonBlock =
-                getCommonBlockInAffineScope(source, destination)) {
-          Operation *srcOrAncestor =
-              commonBlock->findAncestorOpInBlock(*source);
-          Operation *dstOrAncestor =
-              commonBlock->findAncestorOpInBlock(*destination);
-          if (srcOrAncestor == nullptr || dstOrAncestor == nullptr)
-            continue;
+      // Look for inter-iteration dependences on the same memory location.
+      MemRefAccess src(source);
+      MemRefAccess dst(destination);
+      FlatAffineValueConstraints dependenceConstraints;
+      SmallVector<DependenceComponent, 2> depComps;
 
-          // Check if the src or its ancestor is before the dst or its ancestor.
-          if (srcOrAncestor->isBeforeInBlock(dstOrAncestor)) {
-            SmallVector<AffineForOp> enclosingLoops;
-            getAffineForIVs(*destination, &enclosingLoops);
-
-            if (sched.hasDependence(destination)) {
-              SmallVector<DependenceComponent> depComps;
-              DependenceComponent comp;
-              comp.lb = 1;
-              comp.ub = 1;
-              comp.op = enclosingLoops.back();
-              depComps.push_back(comp);
-              results[source].emplace_back(
-                  destination, DependenceResult::HasDependence, depComps);
-            }
-          }
-        }
-
-        if (!sched.hasIntraIterationDeps())
-          continue;
-      } else if (isa<SchedulableAffineInterface>(destination)) {
+      // Requested depth might not be a valid comparison if they do not belong
+      // to the same loop nest
+      if (depth > getInnermostCommonLoopDepth({source, destination}))
         continue;
-      } else {
 
-        // Look for inter-iteration dependences on the same memory location.
-        MemRefAccess src(source);
-        MemRefAccess dst(destination);
-        FlatAffineValueConstraints dependenceConstraints;
-        SmallVector<DependenceComponent, 2> depComps;
+      DependenceResult result = checkMemrefAccessDependence(
+          src, dst, depth, &dependenceConstraints, &depComps, true);
 
-        DependenceResult result = checkMemrefAccessDependence(
-            src, dst, depth, &dependenceConstraints, &depComps, true);
+      results[destination].emplace_back(source, result.value, depComps);
 
-        results[destination].emplace_back(source, result.value, depComps);
-
-        // Also consider intra-iteration dependences on the same memory
-        // location. This currently does not consider aliasing.
-        if (src != dst)
-          continue;
-      }
+      // Also consider intra-iteration dependences on the same memory location.
+      // This currently does not consider aliasing.
+      if (src != dst)
+        continue;
 
       // Collect surrounding loops to use in dependence components. Only proceed
       // if we are in the innermost loop.
@@ -197,13 +157,161 @@ static void checkMemrefDependence(SmallVectorImpl<Operation *> &memoryOps,
             intraDeps.push_back(depComp);
           }
 
-          results[destination].emplace_back(
-              source, DependenceResult::HasDependence, intraDeps);
+          results[dstOrAncestor].emplace_back(
+              srcOrAncestor, DependenceResult::HasDependence, intraDeps);
         }
       }
     }
   }
 }
+
+static Value getMemref(Operation *op) {
+  Value memref = isa<AffineStoreOp>(*op)  ? cast<AffineStoreOp>(*op).getMemRef()
+                 : isa<AffineLoadOp>(*op) ? cast<AffineLoadOp>(*op).getMemRef()
+                 : isa<memref::StoreOp>(*op)
+                     ? cast<memref::StoreOp>(*op).getMemRef()
+                     : cast<memref::LoadOp>(*op).getMemRef();
+  return memref;
+}
+
+/// Helper to iterate through memory operation pairs and check for dependencies
+/// at a given loop nesting depth.
+static void checkSchedInterfaceDependence(SmallVectorImpl<Operation *> &memoryOps,
+                                          MemoryDependenceResult &results) {
+
+  auto funcOp = memoryOps.front()->getParentOfType<func::FuncOp>();
+
+  for (auto *source : memoryOps) {
+    for (auto *destination : memoryOps) {
+      if (source == destination)
+        continue;
+
+      assert(isa<SchedulableAffineInterface>(source));
+      assert(isa<SchedulableAffineInterface>(destination));
+
+      // Initialize the dependence list for this destination.
+      if (results.count(destination) == 0)
+        results[destination] = SmallVector<MemoryDependence>();
+
+      // Insert inter-iteration dependencies for SchedulableAffineInterface
+      auto src = dyn_cast<SchedulableAffineInterface>(source);
+      auto dst = dyn_cast<SchedulableAffineInterface>(destination);
+
+      auto depth = getNumCommonSurroundingLoops(*src, *dst);
+
+      // Check if the src or its ancestor is before the dst or its ancestor.
+      if (depth > 0) {
+        if (auto *commonBlock =
+                getCommonBlockInAffineScope(source, destination)) {
+          
+          Operation *srcOrAncestor =
+              commonBlock->findAncestorOpInBlock(*source);
+          Operation *dstOrAncestor =
+              commonBlock->findAncestorOpInBlock(*destination);
+          if (srcOrAncestor == nullptr || dstOrAncestor == nullptr)
+            continue;
+
+          // Check if the dst or its ancestor is before the src or its ancestor.
+          // We want to dst to be before the src to insert iter-iteration deps.
+          // This is a short-term, conservative hack to avoid having to do real
+          // affine memory access analysis.
+          if (dstOrAncestor->isBeforeInBlock(srcOrAncestor)) {
+            SmallVector<AffineForOp> enclosingLoops;
+            getAffineForIVs(*destination, &enclosingLoops);
+
+            if (dst.hasDependence(src)) {
+              SmallVector<DependenceComponent> depComps;
+              for (unsigned i = 0; i < depth; ++i) {
+                DependenceComponent comp;
+                comp.lb = 1;
+                comp.ub = 1;
+                comp.op = enclosingLoops[i];
+                depComps.push_back(comp);
+              }
+              results[dstOrAncestor].emplace_back(
+                  srcOrAncestor, DependenceResult::HasDependence, depComps);
+            }
+          }
+        }
+      }
+
+      // Some AMC operations (dynamic ports) do not have intra-iteration deps
+      if (!src.hasIntraIterationDeps() || !dst.hasIntraIterationDeps())
+        continue;
+
+      // Collect surrounding loops to use in dependence components. Only proceed
+      // if we are in the innermost loop.
+      SmallVector<AffineForOp> enclosingLoops;
+      getAffineForIVs(*destination, &enclosingLoops);
+
+      // Look for the common parent that src and dst share. If there is none,
+      // there is nothing more to do.
+      SmallVector<Operation *> srcParents;
+      getEnclosingAffineOps(*source, &srcParents);
+      SmallVector<Operation *> dstParents;
+      getEnclosingAffineOps(*destination, &dstParents);
+
+      Operation *commonParent = nullptr;
+      for (auto *srcParent : llvm::reverse(srcParents)) {
+        for (auto *dstParent : llvm::reverse(dstParents)) {
+          if (srcParent == dstParent)
+            commonParent = srcParent;
+          if (commonParent != nullptr)
+            break;
+        }
+        if (commonParent != nullptr)
+          break;
+      }
+
+      if (commonParent == nullptr)
+        commonParent = source->getParentOfType<func::FuncOp>();
+
+      // Check the common parent's regions.
+      for (auto &commonRegion : commonParent->getRegions()) {
+        if (commonRegion.empty())
+          continue;
+
+        // Only support structured constructs with single-block regions for now.
+        assert(commonRegion.hasOneBlock() &&
+               "only single-block regions are supported");
+
+        Block &commonBlock = commonRegion.front();
+
+        // Find the src and dst ancestor in the common block, if any.
+        Operation *srcOrAncestor = commonBlock.findAncestorOpInBlock(*source);
+        Operation *dstOrAncestor =
+            commonBlock.findAncestorOpInBlock(*destination);
+        if (srcOrAncestor == nullptr || dstOrAncestor == nullptr)
+          continue;
+
+        // Check if the src or its ancestor is before the dst or its ancestor.
+        if (srcOrAncestor->isBeforeInBlock(dstOrAncestor)) {
+          // Build dependence components for each loop depth.
+          SmallVector<DependenceComponent> intraDeps;
+
+          // Func
+          DependenceComponent depComp;
+          depComp.op = funcOp;
+          depComp.lb = std::nullopt;
+          depComp.ub = std::nullopt;
+          intraDeps.push_back(depComp);
+
+          for (size_t i = 0; i < depth; ++i) {
+            DependenceComponent depComp;
+            depComp.op = enclosingLoops[i];
+            depComp.lb = 0;
+            depComp.ub = 0;
+            intraDeps.push_back(depComp);
+          }
+
+          results[dstOrAncestor].emplace_back(
+              srcOrAncestor, DependenceResult::HasDependence, intraDeps);
+        }
+      }
+    }
+  }
+}
+
 
 /// MemoryDependenceAnalysis traverses any AffineForOps in the FuncOp body and
 /// checks for memory access dependences. Results are captured in a
@@ -219,14 +327,24 @@ circt::analysis::MemoryDependenceAnalysis::MemoryDependenceAnalysis(
   // Collect load and store operations to check.
   SmallVector<Operation *> memoryOps;
   funcOp.walk([&](Operation *op) {
-    if (isa<AffineReadOpInterface, AffineWriteOpInterface,
-            SchedulableAffineInterface>(op))
+    if (isa<AffineReadOpInterface, AffineWriteOpInterface>(op))
       memoryOps.push_back(op);
   });
 
   // For each depth, check memref accesses.
   for (unsigned depth = 1, e = depthToLoops.size(); depth <= e; ++depth)
     checkMemrefDependence(memoryOps, depth, results);
+
+  SmallVector<Operation *> schedInterfaceOps;
+  funcOp.walk([&](Operation *op) {
+    if (isa<SchedulableAffineInterface>(op))
+      schedInterfaceOps.push_back(op);
+  });
+
+  if (schedInterfaceOps.empty())
+    return;
+
+  checkSchedInterfaceDependence(schedInterfaceOps, results);
 }
 
 /// Returns the dependences, if any, that the given Operation depends on.
@@ -235,12 +353,34 @@ circt::analysis::MemoryDependenceAnalysis::getDependences(Operation *op) {
   return results[op];
 }
 
+void dumpMap(MemoryDependenceResult &results) {
+  llvm::errs() << "\ndump map\n=======================================\n";
+  for (auto &it : results) {
+    auto *op = it.first;
+    llvm::errs() << "\nop\n";
+    op->dump();
+    // auto deps = it.getSecond();
+    // if (!deps.empty()) {
+    //   llvm::errs() << "deps\n";
+    //   for (auto &dep : deps) {
+    //     dep.source->dump();
+    //   }
+    // }
+  }
+}
+
 /// Replaces the dependences, if any, from the oldOp to the newOp.
 void circt::analysis::MemoryDependenceAnalysis::replaceOp(Operation *oldOp,
                                                           Operation *newOp) {
+  // llvm::errs() << "\noldOp: ";
+  // oldOp->dump();
+  // llvm::errs() << "newOp: ";
+  // newOp->dump();
   // llvm::errs() << "replace\n";
+  // newOp->dump();
+  // dumpMap(results);
   // If oldOp had any dependences.
-  auto deps = results.lookup(oldOp);
+  auto deps = results[oldOp];
   // llvm::errs() << "move dep\n";
   // Move the dependences to newOp.
   results[newOp] = deps;
@@ -250,12 +390,43 @@ void circt::analysis::MemoryDependenceAnalysis::replaceOp(Operation *oldOp,
   // if (test != results.end()) {
   //   test->first->dump();
   // }
+  // dumpMap(results);
 
   // Find any dependences originating from oldOp and make newOp the source.
   // TODO(mikeurbach): consider adding an inverted index to avoid this scan.
   for (auto &it : results)
     for (auto &dep : it.second)
-      if (dep.source == oldOp) {
+      if (OperationEquivalence::isEquivalentTo(dep.source, oldOp, OperationEquivalence::IgnoreLocations)) {
+        // llvm::errs() << "replace dest\n";
+        // it.first->dump();
+        // llvm::errs() << "replace src\n";
+        // dep.source->dump();
         dep.source = newOp;
       }
+
+  // dumpMap(results);
+}
+
+bool circt::analysis::MemoryDependenceAnalysis::containsOp(Operation *op) {
+  if (results.count(op) > 0 && !results[op].empty()) {
+    llvm::errs() << "contains\n";
+    op->dump();
+    for (auto dep : results[op]) {
+      llvm::errs() << "dep: ";
+      dep.source->dump();
+    }
+    return true;
+  }
+
+  for (auto &it : results)
+    for (auto &dep : it.second)
+      if (OperationEquivalence::isEquivalentTo(dep.source, op, OperationEquivalence::IgnoreLocations)) {
+        llvm::errs() << "dep.dest\n";
+        it.first->dump();
+        llvm::errs() << "dep.source\n";
+        op->dump();
+        return true;
+      }
+
+  return false;
 }

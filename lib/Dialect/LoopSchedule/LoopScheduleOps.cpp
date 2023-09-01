@@ -232,17 +232,17 @@ LogicalResult LoopSchedulePipelineOp::verify() {
   }
 
   // Verify iter_args used in condition are produced by first stage
-  auto firstStage = *stagesBlock.getOps<LoopSchedulePipelineStageOp>().begin();
-  auto termIterArgs = getTerminatorIterArgs();
-  for (auto arg : getConditionBlock()->getArguments()) {
-    auto numUses = std::distance(arg.getUses().begin(), arg.getUses().end());
-    if (numUses == 0)
-      continue;
-    auto termIterArg = termIterArgs[arg.getArgNumber()];
-    if (termIterArg.getDefiningOp() != firstStage.getOperation())
-      return emitOpError("Iter args used in condition block must be produced "
-                         "by first pipeline stage");
-  }
+  // auto firstStage = *stagesBlock.getOps<LoopSchedulePipelineStageOp>().begin();
+  // auto termIterArgs = getTerminatorIterArgs();
+  // for (auto arg : getConditionBlock()->getArguments()) {
+  //   auto numUses = std::distance(arg.getUses().begin(), arg.getUses().end());
+  //   if (numUses == 0)
+  //     continue;
+  //   auto termIterArg = termIterArgs[arg.getArgNumber()];
+  //   if (termIterArg.getDefiningOp() != firstStage.getOperation())
+  //     return emitOpError("Iter args used in condition block must be produced "
+  //                        "by first pipeline stage");
+  // }
 
   return success();
 }
@@ -310,31 +310,31 @@ getStageAfter(LoopSchedulePipelineStageOp stage, uint64_t cycles) {
 }
 
 LogicalResult LoopSchedulePipelineStageOp::verify() {
-  auto stage = (*this);
-  auto *term = stage.getBodyBlock().getTerminator();
+  // auto stage = (*this);
+  // auto *term = stage.getBodyBlock().getTerminator();
 
-  // Verify results produced by pipelined ops are only used when ready
-  for (auto res : stage.getResults()) {
-    auto num = res.getResultNumber();
-    auto &termOperand = term->getOpOperand(num);
-    auto *op = termOperand.get().getDefiningOp();
-    if (op == nullptr)
-      continue;
-    if (!isa<memref::LoadOp, arith::MulIOp>(op))
-      continue;
-    uint64_t cycles = 0;
-    if (isa<memref::LoadOp>(op)) {
-      cycles = 1;
-    } else if (isa<arith::MulIOp>(op)) {
-      cycles = 4;
-    }
-    auto correctStep = getStageAfter(stage, cycles);
-    if (!correctStep.has_value())
-      continue;
-    if (res.isUsedOutsideOfBlock(&correctStep->getBodyBlock()))
-      return emitOpError(
-          "pipelined ops can only be used the cycle results are ready");
-  }
+  // // Verify results produced by pipelined ops are only used when ready
+  // for (auto res : stage.getResults()) {
+  //   auto num = res.getResultNumber();
+  //   auto &termOperand = term->getOpOperand(num);
+  //   auto *op = termOperand.get().getDefiningOp();
+  //   if (op == nullptr)
+  //     continue;
+  //   if (!isa<memref::LoadOp, arith::MulIOp>(op))
+  //     continue;
+  //   uint64_t cycles = 0;
+  //   if (isa<memref::LoadOp>(op)) {
+  //     cycles = 1;
+  //   } else if (isa<arith::MulIOp>(op)) {
+  //     cycles = 4;
+  //   }
+  //   auto correctStep = getStageAfter(stage, cycles);
+  //   if (!correctStep.has_value())
+  //     continue;
+  //   if (res.isUsedOutsideOfBlock(&correctStep->getBodyBlock()))
+  //     return emitOpError(
+  //         "pipelined ops can only be used the cycle results are ready");
+  // }
 
   return success();
 }

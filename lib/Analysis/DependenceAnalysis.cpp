@@ -68,6 +68,9 @@ static Block *getCommonBlockInAffineScope(Operation *opA, Operation *opB) {
 static void checkMemrefDependence(SmallVectorImpl<Operation *> &memoryOps,
                                   unsigned depth,
                                   MemoryDependenceResult &results) {
+
+  auto funcOp = memoryOps.front()->getParentOfType<func::FuncOp>();
+
   for (auto *source : memoryOps) {
     for (auto *destination : memoryOps) {
       if (source == destination)
@@ -125,7 +128,7 @@ static void checkMemrefDependence(SmallVectorImpl<Operation *> &memoryOps,
       }
 
       if (commonParent == nullptr)
-        continue;
+        commonParent = funcOp;
 
       // Check the common parent's regions.
       for (auto &commonRegion : commonParent->getRegions()) {
@@ -147,8 +150,16 @@ static void checkMemrefDependence(SmallVectorImpl<Operation *> &memoryOps,
 
         // Check if the src or its ancestor is before the dst or its ancestor.
         if (srcOrAncestor->isBeforeInBlock(dstOrAncestor)) {
-          // Build dependence components for each loop depth.
           SmallVector<DependenceComponent> intraDeps;
+
+          // Func
+          DependenceComponent depComp;
+          depComp.op = funcOp;
+          depComp.lb = std::nullopt;
+          depComp.ub = std::nullopt;
+          intraDeps.push_back(depComp);
+
+          // Build dependence components for each loop depth.
           for (size_t i = 0; i < depth; ++i) {
             DependenceComponent depComp;
             depComp.op = enclosingLoops[i];
@@ -264,7 +275,7 @@ static void checkSchedInterfaceDependence(SmallVectorImpl<Operation *> &memoryOp
       }
 
       if (commonParent == nullptr)
-        commonParent = source->getParentOfType<func::FuncOp>();
+        commonParent = funcOp;
 
       // Check the common parent's regions.
       for (auto &commonRegion : commonParent->getRegions()) {

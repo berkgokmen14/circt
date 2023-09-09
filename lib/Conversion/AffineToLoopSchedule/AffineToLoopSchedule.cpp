@@ -30,6 +30,7 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Visitors.h"
 #include "mlir/Interfaces/LoopLikeInterface.h"
@@ -748,14 +749,13 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures() {
   ConversionTarget target(*context);
   target.addLegalDialect<AffineDialect, ArithDialect, MemRefDialect,
                          SCFDialect>();
-  target.addIllegalOp<AffineIfOp, AffineLoadOp, AffineStoreOp, AffineApplyOp>();
+  target.addIllegalOp<AffineIfOp, AffineLoadOp, AffineStoreOp>();
   target.markUnknownOpDynamicallyLegal(
       schedulableAffineInterfaceLegalityCallback);
   target.addDynamicallyLegalOp<IfOp>(ifOpLegalityCallback);
   target.addDynamicallyLegalOp<AffineYieldOp>(yieldOpLegalityCallback);
 
   RewritePatternSet patterns(context);
-  // populateAffineToStdConversionPatterns(patterns);
   patterns.add<AffineLoadLowering>(context, *dependenceAnalysis);
   patterns.add<AffineStoreLowering>(context, *dependenceAnalysis);
   patterns.add<IfOpHoisting>(context);
@@ -763,6 +763,13 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures() {
                                                        *dependenceAnalysis);
   patterns.add<SchedulableAffineWriteInterfaceLowering>(context,
                                                         *dependenceAnalysis);
+
+  if (failed(applyPartialConversion(op, target, std::move(patterns))))
+    return failure();
+
+  patterns.clear();
+  populateAffineToStdConversionPatterns(patterns);
+  target.addIllegalOp<AffineApplyOp>();
 
   if (failed(applyPartialConversion(op, target, std::move(patterns))))
     return failure();

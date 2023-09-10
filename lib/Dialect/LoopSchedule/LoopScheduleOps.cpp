@@ -505,11 +505,15 @@ LogicalResult LoopScheduleStepOp::verify() {
     for (auto res : step.getResults()) {
       auto num = res.getResultNumber();
       auto &termOperand = term->getOpOperand(num);
-      if (!isa<memref::LoadOp, arith::MulIOp>(
+      if (!isa<memref::LoadOp>(
               termOperand.get().getDefiningOp()))
         continue;
-      if (res.isUsedOutsideOfBlock(&nextStep.getBodyBlock()))
-        return emitOpError("multi-cycle ops can only be used in next step");
+
+      for (auto *user : res.getUsers()) {
+        auto *ancestor = nextStep.getBodyBlock().findAncestorOpInBlock(*user);
+        if (ancestor == nullptr)
+          return emitOpError("multi-cycle ops can only be used in next step");
+      }
     }
   }
 

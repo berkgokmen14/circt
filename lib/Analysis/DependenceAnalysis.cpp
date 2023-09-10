@@ -408,6 +408,7 @@ void circt::analysis::MemoryDependenceAnalysis::replaceOp(Operation *oldOp,
   for (auto &it : results)
     for (auto &dep : it.second)
       if (OperationEquivalence::isEquivalentTo(dep.source, oldOp, OperationEquivalence::IgnoreLocations)) {
+      // if (dep.source == oldOp) {
         // llvm::errs() << "replace dest\n";
         // it.first->dump();
         // llvm::errs() << "replace src\n";
@@ -431,9 +432,10 @@ bool circt::analysis::MemoryDependenceAnalysis::containsOp(Operation *op) {
 
   for (auto &it : results)
     for (auto &dep : it.second)
-      if (OperationEquivalence::isEquivalentTo(dep.source, op, OperationEquivalence::IgnoreLocations)) {
-        llvm::errs() << "dep.dest\n";
-        it.first->dump();
+      // if (OperationEquivalence::isEquivalentTo(dep.source, op, OperationEquivalence::IgnoreLocations)) {
+      if (dep.source == op) {
+        // llvm::errs() << "dep.dest\n";
+        // it.first->dump();
         llvm::errs() << "dep.source\n";
         op->dump();
         return true;

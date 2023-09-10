@@ -178,6 +178,20 @@ SharedOperatorsProblem AffineToLoopSchedule::getSharedOperatorsProblem(affine::A
     // Insert every operation into the problem.
     problem.insertOperation(op);
 
+    if (auto loop = dyn_cast<LoopInterface>(op)) {
+      loop.getBodyBlock()->walk([&](Operation *innerOp) {
+        for (auto &operand : innerOp->getOpOperands()) {
+          auto *definingOp = operand.get().getDefiningOp();
+          if (definingOp && definingOp->getParentOp() == forOp) {
+            Problem::Dependence dep(definingOp, op);
+            auto depInserted = problem.insertDependence(dep);
+            assert(succeeded(depInserted));
+            (void)depInserted;
+          }
+        }
+      });
+    }
+
     ArrayRef<MemoryDependence> dependences = dependenceAnalysis->getDependences(op);
     if (dependences.empty())
       return;
@@ -482,7 +496,6 @@ void AffineToLoopSchedule::runOnOperation() {
   if (failed(lowerAffineStructures()))
     return signalPassFailure();
 
-
   // Schedule all pipelined loops first
   for (auto loop : llvm::make_early_inc_range(loops)) {
 
@@ -693,6 +706,25 @@ private:
   MemoryDependenceAnalysis &dependenceAnalysis;
 };
 
+struct MulStrengthReduction : OpConversionPattern<MulIOp> {
+  using OpConversionPattern<MulIOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(MulIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto *lhsDef = op.getLhs().getDefiningOp();
+    auto *rhsDef = op.getRhs().getDefiningOp();
+
+    if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
+      if (cast<IntegerAttr>(constOp.getValue()).getInt() == 2) {
+        rewriter.replaceOpWithNewOp<arith::ShLIOp>(op, op.getLhs(), op.getRhs());
+      }
+    }
+
+    return success();
+  }
+};
+
 /// Helper to hoist computation out of scf::IfOp branches, turning it into a
 /// mux-like operation, and exposing potentially concurrent execution of its
 /// branches.
@@ -735,6 +767,19 @@ static bool schedulableAffineInterfaceLegalityCallback(Operation *op) {
       (isa<AffineReadOpInterface>(*op) || isa<AffineWriteOpInterface>(*op)));
 }
 
+static bool mulLegalityCallback(Operation *op) {
+  if (auto mulOp = dyn_cast<arith::MulIOp>(op)) {
+    auto *rhsDef = mulOp.getRhs().getDefiningOp();
+
+    if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
+      if (cast<IntegerAttr>(constOp.getValue()).getInt() == 2) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 /// After analyzing memory dependences, and before creating the schedule, we
 /// want to materialize affine operations with arithmetic, scf, and memref
 /// operations, which make the condition computation of addresses, etc.
@@ -769,7 +814,9 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures() {
 
   patterns.clear();
   populateAffineToStdConversionPatterns(patterns);
+  patterns.add<MulStrengthReduction>(context);
   target.addIllegalOp<AffineApplyOp>();
+  target.addDynamicallyLegalOp<MulIOp>(mulLegalityCallback);
 
   if (failed(applyPartialConversion(op, target, std::move(patterns))))
     return failure();
@@ -817,7 +864,7 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
           problem.setLinkedOperatorType(combOp, combOpr);
           return WalkResult::advance();
         })
-        .Case<AddIOp, CmpIOp>([&](Operation *seqOp) {
+        .Case<AddIOp, CmpIOp, ShLIOp>([&](Operation *seqOp) {
           // These ops need to be sequential for now because we do not
           // have enough information to chain them together yet.
           problem.setLinkedOperatorType(seqOp, seqOpr);
@@ -1600,7 +1647,8 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
     DenseSet<Operation *> opsWithReturns;
     for (auto *op : group) {
       for (auto *user : op->getUsers()) {
-        auto startTimeOpt = problem.getStartTime(user);
+        auto *userOrAncestor = loop.getLoopBody().findAncestorOpInRegion(*user);
+        auto startTimeOpt = problem.getStartTime(userOrAncestor);
         if ((startTimeOpt.has_value() && *startTimeOpt > startTime) ||
             isLoopTerminator(user)) {
           if (!opsWithReturns.contains(op)) {

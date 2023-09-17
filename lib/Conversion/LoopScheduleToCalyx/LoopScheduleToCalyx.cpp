@@ -379,6 +379,40 @@ private:
     return success();
   }
 
+  template <typename TOpType, typename TSrcOp>
+  LogicalResult buildLibraryBinarySeqOp(PatternRewriter &rewriter, TSrcOp op,
+                                         TOpType opPipe, Value out) const {
+    StringRef opName = TSrcOp::getOperationName().split(".").second;
+    Location loc = op.getLoc();
+    Type width = op.getResult().getType();
+    // Pass the result from the Operation to the Calyx primitive.
+    op.getResult().replaceAllUsesWith(out);
+    PhaseInterface parent = cast<PhaseInterface>(op->getParentOp());
+    auto latency = 4;
+    auto group = createStaticGroupForOp(rewriter, op, latency);
+    // getState<ComponentLoweringState>().addBlockSchedulable(op->getBlock(),
+    //                                                         group);
+
+    rewriter.setInsertionPointToEnd(group.getBodyBlock());
+    rewriter.create<calyx::AssignOp>(loc, opPipe.getLeft(), op.getLhs());
+    rewriter.create<calyx::AssignOp>(loc, opPipe.getRight(), op.getRhs());
+    rewriter.create<calyx::AssignOp>(
+        loc, opPipe.getGo(),
+        createConstant(loc, rewriter, getComponent(), 1, 1));
+    // getState<ComponentLoweringState>().registerStartGroup(out, startGroup);
+
+    // auto endGroup = createGroupForOp<calyx::CombGroupOp>(rewriter, op);
+
+    // Register the values for the pipeline.
+    getState<ComponentLoweringState>().registerEvaluatingGroup(out, group);
+    // getState<ComponentLoweringState>().registerEvaluatingGroup(opPipe.getLeft(),
+    //                                                            endGroup);
+    // getState<ComponentLoweringState>().registerEvaluatingGroup(
+    //     opPipe.getRight(), endGroup);
+
+    return success();
+  }
+
   /// Creates assignments within the provided group to the address ports of the
   /// memoryOp based on the provided addressValues.
   void assignAddressPorts(PatternRewriter &rewriter, Location loc,
@@ -493,6 +527,7 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
   auto memoryInterface =
       getState<ComponentLoweringState>().getMemoryInterface(memref);
 
+  assert(!memoryInterface.readDoneOpt().has_value());
   auto group = createStaticGroupForOp(rewriter, loadOp, 1);
   rewriter.setInsertionPointToEnd(group.getBodyBlock());
   auto &state = getState<ComponentLoweringState>();
@@ -512,6 +547,7 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
       storeOp.getMemoryValue());
   auto group = createStaticGroupForOp(rewriter, storeOp, 1);
 
+  assert(!memoryInterface.writeDoneOpt().has_value());
   rewriter.setInsertionPointToEnd(group.getBodyBlock());
   auto &state = getState<ComponentLoweringState>();
   std::optional<Block *> blockOpt;
@@ -531,12 +567,22 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      MulIOp op) const {
   Location loc = op.getLoc();
   Type width = op.getResult().getType(), one = rewriter.getI1Type();
-  auto mulPipe = getState<ComponentLoweringState>()
-                     .getNewLibraryOpInstance<calyx::PipelinedMultLibOp>(
-                         rewriter, loc, {one, one, width, width, width});
-  return buildLibraryBinaryPipeOp<calyx::PipelinedMultLibOp>(
-      rewriter, op, mulPipe,
-      /*out=*/mulPipe.getOut());
+  if (isa<LoopSchedulePipelineStageOp>(op->getParentOp())) {
+    auto mulPipe = getState<ComponentLoweringState>()
+                       .getNewLibraryOpInstance<calyx::PipelinedMultLibOp>(
+                           rewriter, loc, {one, one, width, width, width});
+    return buildLibraryBinaryPipeOp<calyx::PipelinedMultLibOp>(
+        rewriter, op, mulPipe,
+        /*out=*/mulPipe.getOut());
+  }
+
+  auto mulSeq = getState<ComponentLoweringState>()
+                    .getNewLibraryOpInstance<calyx::SeqMultLibOp>(
+                        rewriter, loc, {one, one, one, width, width, width, one}
+                        );
+
+  return buildLibraryBinaryPipeOp<calyx::SeqMultLibOp>(
+      rewriter, op, mulSeq, mulSeq.getOut());
 }
 
 LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,

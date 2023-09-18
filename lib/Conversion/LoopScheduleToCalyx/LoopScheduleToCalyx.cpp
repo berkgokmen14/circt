@@ -34,6 +34,7 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Casting.h"
 
+#include <cassert>
 #include <iterator>
 #include <variant>
 
@@ -381,7 +382,7 @@ private:
 
   template <typename TOpType, typename TSrcOp>
   LogicalResult buildLibraryBinarySeqOp(PatternRewriter &rewriter, TSrcOp op,
-                                         TOpType opPipe, Value out) const {
+                                        TOpType opPipe, Value out) const {
     StringRef opName = TSrcOp::getOperationName().split(".").second;
     Location loc = op.getLoc();
     Type width = op.getResult().getType();
@@ -527,7 +528,8 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
   auto memoryInterface =
       getState<ComponentLoweringState>().getMemoryInterface(memref);
 
-  assert(!memoryInterface.readDoneOpt().has_value());
+  assert(loadOp.getLatency().has_value());
+  assert(loadOp.getLatency().value() == 1);
   auto group = createStaticGroupForOp(rewriter, loadOp, 1);
   rewriter.setInsertionPointToEnd(group.getBodyBlock());
   auto &state = getState<ComponentLoweringState>();
@@ -547,7 +549,8 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
       storeOp.getMemoryValue());
   auto group = createStaticGroupForOp(rewriter, storeOp, 1);
 
-  assert(!memoryInterface.writeDoneOpt().has_value());
+  assert(storeOp.getLatency().has_value());
+  assert(storeOp.getLatency().value() == 1);
   rewriter.setInsertionPointToEnd(group.getBodyBlock());
   auto &state = getState<ComponentLoweringState>();
   std::optional<Block *> blockOpt;
@@ -576,13 +579,13 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
         /*out=*/mulPipe.getOut());
   }
 
-  auto mulSeq = getState<ComponentLoweringState>()
-                    .getNewLibraryOpInstance<calyx::SeqMultLibOp>(
-                        rewriter, loc, {one, one, one, width, width, width, one}
-                        );
+  auto mulSeq =
+      getState<ComponentLoweringState>()
+          .getNewLibraryOpInstance<calyx::SeqMultLibOp>(
+              rewriter, loc, {one, one, one, width, width, width, one});
 
-  return buildLibraryBinaryPipeOp<calyx::SeqMultLibOp>(
-      rewriter, op, mulSeq, mulSeq.getOut());
+  return buildLibraryBinaryPipeOp<calyx::SeqMultLibOp>(rewriter, op, mulSeq,
+                                                       mulSeq.getOut());
 }
 
 LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
@@ -747,7 +750,8 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
     // Set pipeline iter value stuff
     auto pipeline = cast<LoopSchedulePipelineOp>(loop.getOperation());
     if (pipeline.getII() != 1) {
-      return pipeline.emitOpError("LoopScheduleToCalyx currently does not support pipelines with II > 1");
+      return pipeline.emitOpError("LoopScheduleToCalyx currently does not "
+                                  "support pipelines with II > 1");
     }
     getState<ComponentLoweringState>().setIncrGroup(pipeline, incrGroup);
     getState<ComponentLoweringState>().setLoopIterValue(pipeline,

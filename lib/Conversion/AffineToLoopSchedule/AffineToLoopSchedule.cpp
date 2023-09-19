@@ -822,8 +822,8 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures() {
   populateAffineToStdConversionPatterns(patterns);
   target.addIllegalOp<AffineApplyOp>();
   // TODO: Uncomment to enable multiplier strength reduction
-  patterns.add<MulStrengthReduction>(context);
-  target.addDynamicallyLegalOp<MulIOp>(mulLegalityCallback);
+  // patterns.add<MulStrengthReduction>(context);
+  // target.addDynamicallyLegalOp<MulIOp>(mulLegalityCallback);
 
   if (failed(applyPartialConversion(op, target, std::move(patterns))))
     return failure();

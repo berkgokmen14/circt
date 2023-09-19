@@ -527,7 +527,7 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
   auto memoryInterface =
       getState<ComponentLoweringState>().getMemoryInterface(memref);
 
-  assert(!memoryInterface.readDoneOpt().has_value());
+  assert(!memoryInterface.isDynamic());
   auto group = createStaticGroupForOp(rewriter, loadOp, 1);
   rewriter.setInsertionPointToEnd(group.getBodyBlock());
   auto &state = getState<ComponentLoweringState>();
@@ -547,7 +547,7 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
       storeOp.getMemoryValue());
   auto group = createStaticGroupForOp(rewriter, storeOp, 1);
 
-  assert(!memoryInterface.writeDoneOpt().has_value());
+  assert(!memoryInterface.isDynamic());
   rewriter.setInsertionPointToEnd(group.getBodyBlock());
   auto &state = getState<ComponentLoweringState>();
   std::optional<Block *> blockOpt;
@@ -1195,6 +1195,8 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
             v = divu.getOut();
           } else if (auto seqMem = dyn_cast<calyx::SeqMemoryOp>(op); seqMem) {
             v = seqMem.readData();
+          } else if (auto seqMul = dyn_cast<calyx::SeqMultLibOp>(op); seqMul) {
+            v = seqMul.getOut();
           } else {
             funcOp->getParentOfType<ModuleOp>().dump();
             phase.dump();

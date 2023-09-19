@@ -40,8 +40,10 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/MathExtras.h"
 #include <cassert>
 #include <limits>
+#include <math.h>
 #include <optional>
 #include <queue>
 #include <string>
@@ -716,8 +718,12 @@ struct MulStrengthReduction : OpConversionPattern<MulIOp> {
     auto *rhsDef = op.getRhs().getDefiningOp();
 
     if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
-      if (cast<IntegerAttr>(constOp.getValue()).getInt() == 2) {
-        rewriter.replaceOpWithNewOp<arith::ShLIOp>(op, op.getLhs(), op.getRhs());
+      auto val = cast<IntegerAttr>(constOp.getValue());
+      if (llvm::isPowerOf2_32(val.getInt())) {
+        auto log = val.getValue().exactLogBase2();
+        auto attr = rewriter.getIntegerAttr(op.getRhs().getType(), log);
+        auto shift = rewriter.create<arith::ConstantOp>(op.getLoc(), attr);
+        rewriter.replaceOpWithNewOp<arith::ShLIOp>(op, op.getLhs(), shift.getResult());
       }
     }
 
@@ -772,7 +778,7 @@ static bool mulLegalityCallback(Operation *op) {
     auto *rhsDef = mulOp.getRhs().getDefiningOp();
 
     if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
-      if (cast<IntegerAttr>(constOp.getValue()).getInt() == 2) {
+      if (cast<IntegerAttr>(constOp.getValue()).getValue().exactLogBase2()) {
         return false;
       }
     }
@@ -814,8 +820,9 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures() {
 
   patterns.clear();
   populateAffineToStdConversionPatterns(patterns);
-  patterns.add<MulStrengthReduction>(context);
   target.addIllegalOp<AffineApplyOp>();
+  // TODO: Uncomment to enable multiplier strength reduction
+  patterns.add<MulStrengthReduction>(context);
   target.addDynamicallyLegalOp<MulIOp>(mulLegalityCallback);
 
   if (failed(applyPartialConversion(op, target, std::move(patterns))))

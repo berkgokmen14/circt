@@ -351,6 +351,14 @@ ValueRange MemoryInterface::addrPorts() {
   return std::get<MemoryPortsImpl>(impl).addrPorts;
 }
 
+bool MemoryInterface::isDynamic() {
+  if (auto *memImpl = std::get_if<MemoryPortsImpl>(&impl); memImpl) {
+    return memImpl->isDynamic;
+  }
+
+  return false;
+}
+
 //===----------------------------------------------------------------------===//
 // LoopInterface
 //===----------------------------------------------------------------------===//

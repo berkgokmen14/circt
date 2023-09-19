@@ -106,6 +106,7 @@ struct MemoryPortsImpl {
   std::optional<Value> writeEn;
   std::optional<Value> writeDone;
   SmallVector<Value> addrPorts;
+  bool isDynamic;
 };
 
 // Represents the interface of memory in Calyx. The various lowering passes
@@ -130,6 +131,7 @@ struct MemoryInterface {
   std::optional<Value> writeDataOpt();
   std::optional<Value> writeEnOpt();
   std::optional<Value> writeDoneOpt();
+  bool isDynamic();
   ValueRange addrPorts();
 
 private:

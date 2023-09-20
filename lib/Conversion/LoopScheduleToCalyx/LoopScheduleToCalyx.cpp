@@ -582,7 +582,7 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
           .getNewLibraryOpInstance<calyx::SeqMultLibOp>(
               rewriter, loc, {one, one, one, width, width, width, one});
 
-  return buildLibraryBinaryPipeOp<calyx::SeqMultLibOp>(rewriter, op, mulSeq,
+  return buildLibraryBinarySeqOp<calyx::SeqMultLibOp>(rewriter, op, mulSeq,
                                                        mulSeq.getOut());
 }
 

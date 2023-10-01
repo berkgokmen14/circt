@@ -184,6 +184,7 @@ unsigned getBitWidth(Type t) {
 Value buildCombAndTree(OpBuilder &builder,
                        ComponentLoweringStateInterface &state, Location loc,
                        SmallVector<Value> values) {
+
   if (values.size() == 1)
     return values.front();
 
@@ -203,6 +204,7 @@ Value buildCombAndTree(OpBuilder &builder,
     finalVal = andOp.getOut();
   }
 
+  assert(finalVal.has_value());
   return finalVal.value();
 }
 

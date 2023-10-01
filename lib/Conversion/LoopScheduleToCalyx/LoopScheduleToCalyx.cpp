@@ -36,6 +36,7 @@
 
 #include <cassert>
 #include <iterator>
+#include <string>
 #include <variant>
 
 using namespace llvm;
@@ -156,6 +157,16 @@ public:
     return guardValues[phase];
   }
 
+  void setGuardRegister(PhaseInterface phase, calyx::RegisterOp v) {
+    guardRegisters[phase] = v;
+  }
+
+  std::optional<calyx::RegisterOp> getGuardRegister(PhaseInterface phase) {
+    if (!guardRegisters.contains(phase))
+      return std::nullopt;
+    return guardRegisters[phase];
+  }
+
 private:
   /// A mapping from steps/stages to their registers.
   DenseMap<Operation *, DenseMap<unsigned, PhaseRegister>> phaseRegs;
@@ -170,6 +181,8 @@ private:
 
   // Values that guard the execution of the phase
   DenseMap<PhaseInterface, Value> guardValues;
+
+  DenseMap<PhaseInterface, calyx::RegisterOp> guardRegisters;
 };
 
 /// Handles the current state of lowering of a Calyx component. It is mainly
@@ -747,10 +760,10 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
 
     // Set pipeline iter value stuff
     auto pipeline = cast<LoopSchedulePipelineOp>(loop.getOperation());
-    if (pipeline.getII() != 1) {
-      return pipeline.emitOpError("LoopScheduleToCalyx currently does not "
-                                  "support pipelines with II > 1");
-    }
+    // if (pipeline.getII() != 1) {
+    //   return pipeline.emitOpError("LoopScheduleToCalyx currently does not "
+    //                               "support pipelines with II > 1");
+    // }
     getState<ComponentLoweringState>().setIncrGroup(pipeline, incrGroup);
     getState<ComponentLoweringState>().setLoopIterValue(pipeline,
                                                         addOp.getOut());
@@ -1037,7 +1050,6 @@ class BuildConditionChecks : public calyx::FuncOpPartialLoweringPattern {
 
       return;
     });
-    llvm::errs() << "done building cond\n";
     return success();
   }
 };
@@ -1421,12 +1433,13 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
                         PatternRewriter &rewriter) const {
     SmallVector<Value> guards;
     if (auto pipeline = dyn_cast<LoopSchedulePipelineOp>(op); pipeline) {
+      assert(pipeline.getTripCount().has_value() &&
+             "Unbounded pipelines not currently supported");
       auto stage = cast<LoopSchedulePipelineStageOp>(phase);
       PatternRewriter::InsertionGuard g(rewriter);
       rewriter.setInsertionPointToEnd(
           getComponent().getWiresOp().getBodyBlock());
       auto startIter = stage.getStartTime().value();
-      auto endIter = pipeline.getTripCount().value() + stage.getStart();
       auto idxValue =
           getState<ComponentLoweringState>().getLoopIterValue(pipeline);
       auto idxType = idxValue.getType();
@@ -1435,41 +1448,92 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
       auto incrGroup =
           getState<ComponentLoweringState>().getIncrGroup(pipeline);
 
-      // Upper bound guard
-      auto ltOp = getState<ComponentLoweringState>()
-                      .getNewLibraryOpInstance<calyx::LtLibOp>(
-                          rewriter, stage.getLoc(), {idxType, idxType, i1Type});
-      guards.push_back(ltOp.getOut());
-
-      // Update increment group for upper bound
-      rewriter.setInsertionPointToEnd(incrGroup.getBodyBlock());
-      rewriter.create<calyx::AssignOp>(stage.getLoc(), ltOp.getLeft(),
-                                       idxValue);
-      auto ubConst = calyx::createConstant(stage.getLoc(), rewriter,
-                                           getComponent(), bitwidth, endIter);
-      rewriter.create<calyx::AssignOp>(stage.getLoc(), ltOp.getRight(),
-                                       ubConst);
-      getState<ComponentLoweringState>().registerEvaluatingGroup(ltOp.getOut(),
-                                                                 incrGroup);
-
-      // Lower bound guard
-      if (startIter > 1) {
-        auto geOp =
+      if (startIter == 0) {
+        // First stage guard
+        auto ltOp =
             getState<ComponentLoweringState>()
-                .getNewLibraryOpInstance<calyx::GeLibOp>(
+                .getNewLibraryOpInstance<calyx::LtLibOp>(
                     rewriter, stage.getLoc(), {idxType, idxType, i1Type});
-        guards.push_back(geOp.getOut());
+        guards.push_back(ltOp.getOut());
 
-        // Update increment group for lower bound
+        // Update increment group for upper bound
         rewriter.setInsertionPointToEnd(incrGroup.getBodyBlock());
-        rewriter.create<calyx::AssignOp>(stage.getLoc(), geOp.getLeft(),
+        rewriter.create<calyx::AssignOp>(stage.getLoc(), ltOp.getLeft(),
                                          idxValue);
-        auto lbConst = calyx::createConstant(
-            stage.getLoc(), rewriter, getComponent(), bitwidth, startIter);
-        rewriter.create<calyx::AssignOp>(stage.getLoc(), geOp.getRight(),
-                                         lbConst);
+        auto endIter = pipeline.getTripCount().value() * pipeline.getII();
+        auto ubConst = calyx::createConstant(stage.getLoc(), rewriter,
+                                             getComponent(), bitwidth, endIter);
+        rewriter.create<calyx::AssignOp>(stage.getLoc(), ltOp.getRight(),
+                                         ubConst);
         getState<ComponentLoweringState>().registerEvaluatingGroup(
-            geOp.getOut(), incrGroup);
+            ltOp.getOut(), incrGroup);
+
+        // Handle II > 1
+        if (pipeline.getII() > 1) {
+          // We insert a counter that counts up to II - 1 then resets to zero
+          // When the counter reaches II - 1 we trigger the first stage
+
+          // II counter register
+          std::string regName =
+              getState<ComponentLoweringState>().getUniqueName(
+                  "ii_" + std::to_string(pipeline.getII()) + "_counter_reg");
+          auto bitwidth = llvm::bit_width(pipeline.getII());
+          auto counterReg = createRegister(phase.getLoc(), rewriter,
+                                           getComponent(), bitwidth, regName);
+
+          // II counter increment
+          auto widthType = rewriter.getIntegerType(bitwidth);
+          auto counterAdd = getState<ComponentLoweringState>()
+                                .getNewLibraryOpInstance<calyx::AddLibOp>(
+                                    rewriter, stage.getLoc(),
+                                    {widthType, widthType, widthType});
+          rewriter.create<calyx::AssignOp>(stage.getLoc(), counterAdd.getLeft(),
+                                           counterReg.getOut());
+          auto one = calyx::createConstant(stage.getLoc(), rewriter,
+                                           getComponent(), bitwidth, 1);
+          rewriter.create<calyx::AssignOp>(stage.getLoc(),
+                                           counterAdd.getRight(), one);
+
+          // Check if counter = II - 1
+          auto counterEq =
+              getState<ComponentLoweringState>()
+                  .getNewLibraryOpInstance<calyx::EqLibOp>(
+                      rewriter, stage.getLoc(),
+                      {widthType, widthType, rewriter.getI1Type()});
+          rewriter.create<calyx::AssignOp>(stage.getLoc(), counterEq.getLeft(),
+                                           counterReg.getOut());
+          auto iiMinusOne =
+              calyx::createConstant(stage.getLoc(), rewriter, getComponent(),
+                                    bitwidth, pipeline.getII() - 1);
+          rewriter.create<calyx::AssignOp>(stage.getLoc(), counterEq.getRight(),
+                                           iiMinusOne);
+
+          // If eq assign to zero, otherwise assign to add result
+          auto zero = calyx::createConstant(stage.getLoc(), rewriter,
+                                            getComponent(), bitwidth, 0);
+          rewriter.create<calyx::AssignOp>(stage.getLoc(), counterReg.getIn(),
+                                           zero, counterEq.getOut());
+          auto oneI1 = calyx::createConstant(stage.getLoc(), rewriter,
+                                             getComponent(), 1, 1);
+          auto notEq = rewriter.create<comb::XorOp>(stage.getLoc(),
+                                                    counterEq.getOut(), oneI1);
+          rewriter.create<calyx::AssignOp>(stage.getLoc(), counterReg.getIn(),
+                                           counterAdd.getOut(),
+                                           notEq.getResult());
+          rewriter.create<calyx::AssignOp>(stage.getLoc(),
+                                           counterReg.getWriteEn(), oneI1);
+
+          // Add eq result to guard values
+          guards.push_back(counterEq.getOut());
+        }
+      } else {
+        // Pass guards to later stages
+        auto prevPhase = cast<PhaseInterface>(phase->getPrevNode());
+        assert(prevPhase != nullptr);
+        auto prevReg =
+            getState<ComponentLoweringState>().getGuardRegister(prevPhase);
+        assert(prevReg.has_value());
+        guards.push_back(prevReg.value().getOut());
       }
 
       // Create init group for guard
@@ -1483,6 +1547,8 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
           getState<ComponentLoweringState>().getUniqueName("guard_reg");
       auto reg =
           createRegister(phase.getLoc(), rewriter, getComponent(), 1, regName);
+      // Store guard register for passing to future phases
+      getState<ComponentLoweringState>().setGuardRegister(phase, reg);
       rewriter.setInsertionPointToEnd(guardGroup.getBodyBlock());
       auto zeroI1 =
           calyx::createConstant(stage.getLoc(), rewriter, getComponent(), 1, 0);
@@ -1731,7 +1797,7 @@ private:
       // Can use repeat op instead of while op
       auto pipeline = cast<LoopSchedulePipelineOp>(loopOp.getOperation());
       auto bound = loopOp.getBound().value();
-      auto iterCount = bound + pipeline.getBodyLatency() - 1;
+      auto iterCount = bound + pipeline.getBodyLatency() - pipeline.getII();
       auto repeatCtrlOp =
           rewriter.create<calyx::StaticRepeatOp>(loc, iterCount);
       return repeatCtrlOp;

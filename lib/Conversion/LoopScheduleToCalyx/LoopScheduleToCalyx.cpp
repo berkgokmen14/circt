@@ -1530,9 +1530,25 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
         // Pass guards to later stages
         auto prevPhase = cast<PhaseInterface>(phase->getPrevNode());
         assert(prevPhase != nullptr);
+        auto startTimeDiff =
+            phase.getStartTime().value() - prevPhase.getStartTime().value();
         auto prevReg =
             getState<ComponentLoweringState>().getGuardRegister(prevPhase);
         assert(prevReg.has_value());
+        for (unsigned i = 0; i < startTimeDiff - 1; ++i) {
+          auto regName =
+              getState<ComponentLoweringState>().getUniqueName("guard_reg");
+          auto reg = createRegister(phase.getLoc(), rewriter, getComponent(), 1,
+                                    regName);
+          rewriter.setInsertionPointToEnd(incrGroup.getBodyBlock());
+          rewriter.create<calyx::AssignOp>(stage.getLoc(), reg.getIn(),
+                                           prevReg.value().getOut());
+          auto oneI1 = calyx::createConstant(stage.getLoc(), rewriter,
+                                             getComponent(), 1, 1);
+          rewriter.create<calyx::AssignOp>(stage.getLoc(), reg.getWriteEn(),
+                                           oneI1);
+          prevReg = reg;
+        }
         guards.push_back(prevReg.value().getOut());
       }
 

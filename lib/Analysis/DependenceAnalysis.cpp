@@ -323,6 +323,73 @@ static void checkSchedInterfaceDependence(SmallVectorImpl<Operation *> &memoryOp
   }
 }
 
+/// Helper to iterate through memory operation pairs and check for dependencies
+/// at a given loop nesting depth.
+static void checkNonAffineDependence(SmallVectorImpl<Operation *> &memoryOps,
+                                          MemoryDependenceResult &results) {
+
+  auto funcOp = memoryOps.front()->getParentOfType<func::FuncOp>();
+
+  for (auto *source : memoryOps) {
+    for (auto *destination : memoryOps) {
+      if (source == destination)
+        continue;
+
+      assert(isa<LoadInterface>(source) || isa<StoreInterface>(source));
+      assert(isa<LoadInterface>(destination) || isa<StoreInterface>(destination));
+
+      // Initialize the dependence list for this destination.
+      if (results.count(destination) == 0)
+        results[destination] = SmallVector<MemoryDependence>();
+
+      auto depth = getNumCommonSurroundingLoops(*source, *destination);
+
+      // Check if the src or its ancestor is before the dst or its ancestor.
+      if (depth > 0) {
+        if (auto *commonBlock =
+                getCommonBlockInAffineScope(source, destination)) {
+          
+          Operation *srcOrAncestor =
+              commonBlock->findAncestorOpInBlock(*source);
+          Operation *dstOrAncestor =
+              commonBlock->findAncestorOpInBlock(*destination);
+          if (srcOrAncestor == nullptr || dstOrAncestor == nullptr)
+            continue;
+
+          // Check if the dst or its ancestor is before the src or its ancestor.
+          // We want to dst to be before the src to insert iter-iteration deps.
+          // This is a short-term, conservative hack to avoid having to do real
+          // affine memory access analysis.
+          if (dstOrAncestor->isBeforeInBlock(srcOrAncestor)) {
+            SmallVector<AffineForOp> enclosingLoops;
+            getAffineForIVs(*destination, &enclosingLoops);
+
+            bool hasDep = false;
+            if (auto dst = dyn_cast<LoadInterface>(destination)) {
+              hasDep = dst.hasDependence(source);
+            } else if (auto dst = dyn_cast<StoreInterface>(destination)) {
+              hasDep = dst.hasDependence(source);
+            }
+
+            if (hasDep) {
+              SmallVector<DependenceComponent> depComps;
+              for (unsigned i = 0; i < depth; ++i) {
+                DependenceComponent comp;
+                comp.lb = 1;
+                comp.ub = 1;
+                comp.op = enclosingLoops[i];
+                depComps.push_back(comp);
+              }
+              results[dstOrAncestor].emplace_back(
+                  srcOrAncestor, DependenceResult::HasDependence, depComps);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 
 /// MemoryDependenceAnalysis traverses any AffineForOps in the FuncOp body and
 /// checks for memory access dependences. Results are captured in a
@@ -352,10 +419,17 @@ circt::analysis::MemoryDependenceAnalysis::MemoryDependenceAnalysis(
       schedInterfaceOps.push_back(op);
   });
 
-  if (schedInterfaceOps.empty())
-    return;
+  if (!schedInterfaceOps.empty())
+    checkSchedInterfaceDependence(schedInterfaceOps, results);
 
-  checkSchedInterfaceDependence(schedInterfaceOps, results);
+  SmallVector<Operation *> nonAffineOps;
+  funcOp.walk([&](Operation *op) {
+    if (isa<LoadInterface, StoreInterface>(op))
+      nonAffineOps.push_back(op);
+  });
+
+  if (!nonAffineOps.empty())
+    checkNonAffineDependence(nonAffineOps, results);
 }
 
 /// Returns the dependences, if any, that the given Operation depends on.

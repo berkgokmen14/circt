@@ -1812,7 +1812,7 @@ private:
         loopOp.getBound().has_value()) {
       // Can use repeat op instead of while op
       auto pipeline = cast<LoopSchedulePipelineOp>(loopOp.getOperation());
-      auto bound = loopOp.getBound().value();
+      auto bound = loopOp.getBound().value() * pipeline.getII();
       auto iterCount = bound + pipeline.getBodyLatency() - pipeline.getII();
       auto repeatCtrlOp =
           rewriter.create<calyx::StaticRepeatOp>(loc, iterCount);

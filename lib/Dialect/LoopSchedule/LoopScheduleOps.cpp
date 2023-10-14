@@ -284,7 +284,7 @@ uint64_t LoopSchedulePipelineOp::getBodyLatency() {
     if (stage.getEnd() > bodyLatency)
       bodyLatency = stage.getEnd();
   }
-  return bodyLatency * this->getII();
+  return bodyLatency;
 }
 
 //===----------------------------------------------------------------------===//

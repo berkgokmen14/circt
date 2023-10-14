@@ -267,7 +267,7 @@ def AndLibOp  : CombinationalArithBinaryLibraryOp<"and"> {}
 def OrLibOp   : CombinationalArithBinaryLibraryOp<"or"> {}
 def XorLibOp  : CombinationalArithBinaryLibraryOp<"xor"> {}
 
-class SequentialArithBinaryLibraryOp<string mnemonic> : ArithBinaryLibraryOp<mnemonic # "_seq", [
+class SequentialArithBinaryLibraryOp<string mnemonic> : ArithBinaryLibraryOp<mnemonic # "_pipe", [
     SameTypeConstraint<"left", "out">
   ]> {
   let results = (outs I1:$clk, I1:$reset, I1:$go, AnyType:$left, AnyType:$right, AnyType:$out, I1:$done);

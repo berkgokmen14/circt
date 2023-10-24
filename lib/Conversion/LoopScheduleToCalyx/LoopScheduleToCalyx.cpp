@@ -616,13 +616,17 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      RemUIOp op) const {
   Location loc = op.getLoc();
   Type width = op.getResult().getType(), one = rewriter.getI1Type();
-  auto remPipe =
+  if (isa<LoopSchedulePipelineStageOp>(op->getParentOp())) {
+    op.emitError() << "RemUI is not pipelineable";
+    return failure();
+  }
+
+  auto remSeq =
       getState<ComponentLoweringState>()
-          .getNewLibraryOpInstance<calyx::SeqDivULibOp>(
-              rewriter, loc, {one, one, one, width, width, width, width, one});
-  return buildLibraryBinaryPipeOp<calyx::SeqDivULibOp>(
-      rewriter, op, remPipe,
-      /*out=*/remPipe.getOut());
+          .getNewLibraryOpInstance<calyx::SeqRemULibOp>(
+              rewriter, loc, {one, one, one, width, width, width, one});
+  return buildLibraryBinarySeqOp<calyx::SeqRemULibOp>(rewriter, op, remSeq,
+                                                      remSeq.getOut());
 }
 
 template <typename TAllocOp>
@@ -1211,6 +1215,8 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
             v = seqMem.readData();
           } else if (auto seqMul = dyn_cast<calyx::SeqMultLibOp>(op); seqMul) {
             v = seqMul.getOut();
+          } else if (auto seqRem = dyn_cast<calyx::SeqRemULibOp>(op); seqRem) {
+            v = seqRem.getOut();
           } else {
             funcOp->getParentOfType<ModuleOp>().dump();
             phase.dump();

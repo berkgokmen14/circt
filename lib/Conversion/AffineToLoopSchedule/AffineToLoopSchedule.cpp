@@ -733,6 +733,30 @@ struct MulStrengthReduction : OpConversionPattern<MulIOp> {
   }
 };
 
+struct RemUIStrengthReduction : OpConversionPattern<RemUIOp> {
+  using OpConversionPattern<RemUIOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(RemUIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto *lhsDef = op.getLhs().getDefiningOp();
+    auto *rhsDef = op.getRhs().getDefiningOp();
+
+    if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
+      auto val = cast<IntegerAttr>(constOp.getValue());
+      if (llvm::isPowerOf2_32(val.getInt())) {
+        auto shifted = val.getValue() - 1;
+        auto attr = rewriter.getIntegerAttr(op.getRhs().getType(), shifted);
+        auto shift = rewriter.create<arith::ConstantOp>(op.getLoc(), attr);
+        rewriter.replaceOpWithNewOp<arith::AndIOp>(op, op.getLhs(),
+                                                   shift.getResult());
+      }
+    }
+
+    return success();
+  }
+};
+
 /// Helper to hoist computation out of scf::IfOp branches, turning it into a
 /// mux-like operation, and exposing potentially concurrent execution of its
 /// branches.
@@ -788,6 +812,19 @@ static bool mulLegalityCallback(Operation *op) {
   return true;
 }
 
+static bool remLegalityCallback(Operation *op) {
+  if (auto remOp = dyn_cast<arith::RemUIOp>(op)) {
+    auto *rhsDef = remOp.getRhs().getDefiningOp();
+
+    if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
+      if (cast<IntegerAttr>(constOp.getValue()).getValue().exactLogBase2()) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 /// After analyzing memory dependences, and before creating the schedule, we
 /// want to materialize affine operations with arithmetic, scf, and memref
 /// operations, which make the condition computation of addresses, etc.
@@ -824,8 +861,11 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures() {
   populateAffineToStdConversionPatterns(patterns);
   target.addIllegalOp<AffineApplyOp>();
   // TODO: Uncomment to enable multiplier strength reduction
-  // patterns.add<MulStrengthReduction>(context);
+  patterns.add<MulStrengthReduction>(context);
+  patterns.add<RemUIStrengthReduction>(context);
+  // TODO: mark mult and remainder as illegal
   // target.addDynamicallyLegalOp<MulIOp>(mulLegalityCallback);
+  target.addDynamicallyLegalOp<RemUIOp>(remLegalityCallback);
 
   if (failed(applyPartialConversion(op, target, std::move(patterns))))
     return failure();
@@ -972,7 +1012,7 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
 
           return WalkResult::advance();
         })
-        .Case<MulIOp>([&](Operation *mcOp) {
+        .Case<MulIOp, RemUIOp>([&](Operation *mcOp) {
           // Some known multi-cycle ops.
           problem.setLinkedOperatorType(mcOp, mcOpr);
           return WalkResult::advance();

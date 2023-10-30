@@ -757,6 +757,18 @@ struct RemUIStrengthReduction : OpConversionPattern<RemUIOp> {
   }
 };
 
+struct RemSIStrengthReduction : OpConversionPattern<RemSIOp> {
+  using OpConversionPattern<RemSIOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(RemSIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<arith::RemUIOp>(op, op.getLhs(), op.getRhs());
+
+    return success();
+  }
+};
+
 /// Helper to hoist computation out of scf::IfOp branches, turning it into a
 /// mux-like operation, and exposing potentially concurrent execution of its
 /// branches.
@@ -812,13 +824,28 @@ static bool mulLegalityCallback(Operation *op) {
   return true;
 }
 
-static bool remLegalityCallback(Operation *op) {
+static bool remUILegalityCallback(Operation *op) {
   if (auto remOp = dyn_cast<arith::RemUIOp>(op)) {
     auto *rhsDef = remOp.getRhs().getDefiningOp();
 
     if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
       if (cast<IntegerAttr>(constOp.getValue()).getValue().exactLogBase2()) {
         return false;
+      }
+    }
+  }
+  return true;
+}
+
+static bool remSILegalityCallback(Operation *op) {
+  if (auto remOp = dyn_cast<arith::RemSIOp>(op)) {
+    auto *rhsDef = remOp.getRhs().getDefiningOp();
+
+    if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
+      auto rhsValue = cast<IntegerAttr>(constOp.getValue());
+      if (rhsValue.getValue().exactLogBase2()) {
+        if (rhsValue.getInt() >= 0)
+          return false;
       }
     }
   }
@@ -863,9 +890,11 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures() {
   // TODO: Uncomment to enable multiplier strength reduction
   patterns.add<MulStrengthReduction>(context);
   patterns.add<RemUIStrengthReduction>(context);
+  patterns.add<RemSIStrengthReduction>(context);
   // TODO: mark mult and remainder as illegal
-  // target.addDynamicallyLegalOp<MulIOp>(mulLegalityCallback);
-  target.addDynamicallyLegalOp<RemUIOp>(remLegalityCallback);
+  target.addDynamicallyLegalOp<MulIOp>(mulLegalityCallback);
+  target.addDynamicallyLegalOp<RemUIOp>(remUILegalityCallback);
+  target.addDynamicallyLegalOp<RemSIOp>(remSILegalityCallback);
 
   if (failed(applyPartialConversion(op, target, std::move(patterns))))
     return failure();
@@ -1012,7 +1041,7 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
 
           return WalkResult::advance();
         })
-        .Case<MulIOp, RemUIOp>([&](Operation *mcOp) {
+        .Case<MulIOp, RemUIOp, RemSIOp>([&](Operation *mcOp) {
           // Some known multi-cycle ops.
           problem.setLinkedOperatorType(mcOp, mcOpr);
           return WalkResult::advance();

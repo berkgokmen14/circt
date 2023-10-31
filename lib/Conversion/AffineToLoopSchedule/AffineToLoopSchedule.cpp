@@ -72,19 +72,17 @@ private:
   ModuloProblem getModuloProblem(affine::AffineForOp forOp);
   SharedOperatorsProblem getSharedOperatorsProblem(affine::AffineForOp forOp);
   SharedOperatorsProblem getSharedOperatorsProblem(func::FuncOp funcOp);
-  LogicalResult
-  lowerAffineStructures();
+  LogicalResult lowerAffineStructures();
   LogicalResult unrollSubLoops(AffineForOp &forOp);
   LogicalResult populateOperatorTypes(Operation *op, Region &loopBody,
                                       SharedOperatorsProblem &problem);
   LogicalResult solveModuloProblem(AffineForOp &loop, ModuloProblem &problem);
   LogicalResult solveSharedOperatorsProblem(Region &region,
                                             SharedOperatorsProblem &problem);
-  LogicalResult
-  createLoopSchedulePipeline(AffineForOp &loop, ModuloProblem &problem);
-  LogicalResult
-  createLoopScheduleSequential(AffineForOp &loop,
-                               SharedOperatorsProblem &problem);
+  LogicalResult createLoopSchedulePipeline(AffineForOp &loop,
+                                           ModuloProblem &problem);
+  LogicalResult createLoopScheduleSequential(AffineForOp &loop,
+                                             SharedOperatorsProblem &problem);
   LogicalResult createFuncLoopSchedule(FuncOp &funcOp,
                                        SharedOperatorsProblem &problem);
 
@@ -93,8 +91,8 @@ private:
 
 } // namespace
 
-
-ModuloProblem AffineToLoopSchedule::getModuloProblem(affine::AffineForOp forOp) {
+ModuloProblem
+AffineToLoopSchedule::getModuloProblem(affine::AffineForOp forOp) {
   // Create a modulo scheduling problem.
   ModuloProblem problem = ModuloProblem::get(forOp);
 
@@ -103,7 +101,8 @@ ModuloProblem AffineToLoopSchedule::getModuloProblem(affine::AffineForOp forOp) 
     // Insert every operation into the problem.
     problem.insertOperation(op);
 
-    ArrayRef<MemoryDependence> dependences = dependenceAnalysis->getDependences(op);
+    ArrayRef<MemoryDependence> dependences =
+        dependenceAnalysis->getDependences(op);
     if (dependences.empty())
       return;
 
@@ -169,7 +168,8 @@ ModuloProblem AffineToLoopSchedule::getModuloProblem(affine::AffineForOp forOp) 
   return problem;
 }
 
-SharedOperatorsProblem AffineToLoopSchedule::getSharedOperatorsProblem(affine::AffineForOp forOp) {
+SharedOperatorsProblem
+AffineToLoopSchedule::getSharedOperatorsProblem(affine::AffineForOp forOp) {
   SharedOperatorsProblem problem = SharedOperatorsProblem::get(forOp);
 
   // Insert memory dependences into the problem.
@@ -194,7 +194,8 @@ SharedOperatorsProblem AffineToLoopSchedule::getSharedOperatorsProblem(affine::A
       });
     }
 
-    ArrayRef<MemoryDependence> dependences = dependenceAnalysis->getDependences(op);
+    ArrayRef<MemoryDependence> dependences =
+        dependenceAnalysis->getDependences(op);
     if (dependences.empty())
       return;
 
@@ -275,7 +276,8 @@ SharedOperatorsProblem AffineToLoopSchedule::getSharedOperatorsProblem(affine::A
   return problem;
 }
 
-SharedOperatorsProblem AffineToLoopSchedule::getSharedOperatorsProblem(func::FuncOp funcOp) {
+SharedOperatorsProblem
+AffineToLoopSchedule::getSharedOperatorsProblem(func::FuncOp funcOp) {
   SharedOperatorsProblem problem = SharedOperatorsProblem::get(funcOp);
 
   // for (auto op : getOperation().getOps<LoopInterface>()){
@@ -302,7 +304,8 @@ SharedOperatorsProblem AffineToLoopSchedule::getSharedOperatorsProblem(func::Fun
     // Insert every operation into the problem.
     problem.insertOperation(op);
 
-    ArrayRef<MemoryDependence> dependences = dependenceAnalysis->getDependences(op);
+    ArrayRef<MemoryDependence> dependences =
+        dependenceAnalysis->getDependences(op);
     if (dependences.empty())
       return;
 
@@ -493,7 +496,6 @@ void AffineToLoopSchedule::runOnOperation() {
   //   }
   // });
 
-
   // After dependence analysis, materialize affine structures.
   if (failed(lowerAffineStructures()))
     return signalPassFailure();
@@ -502,8 +504,7 @@ void AffineToLoopSchedule::runOnOperation() {
   for (auto loop : llvm::make_early_inc_range(loops)) {
 
     // Populate the target operator types.
-    ModuloProblem moduloProblem =
-        getModuloProblem(loop);
+    ModuloProblem moduloProblem = getModuloProblem(loop);
 
     if (failed(populateOperatorTypes(loop.getOperation(), loop.getRegion(),
                                      moduloProblem)))
@@ -723,7 +724,8 @@ struct MulStrengthReduction : OpConversionPattern<MulIOp> {
         auto log = val.getValue().exactLogBase2();
         auto attr = rewriter.getIntegerAttr(op.getRhs().getType(), log);
         auto shift = rewriter.create<arith::ConstantOp>(op.getLoc(), attr);
-        rewriter.replaceOpWithNewOp<arith::ShLIOp>(op, op.getLhs(), shift.getResult());
+        rewriter.replaceOpWithNewOp<arith::ShLIOp>(op, op.getLhs(),
+                                                   shift.getResult());
       }
     }
 
@@ -871,7 +873,7 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
           problem.setLinkedOperatorType(combOp, combOpr);
           return WalkResult::advance();
         })
-        .Case<AddIOp, CmpIOp, ShLIOp>([&](Operation *seqOp) {
+        .Case<AddIOp, CmpIOp, ShLIOp, AndIOp>([&](Operation *seqOp) {
           // These ops need to be sequential for now because we do not
           // have enough information to chain them together yet.
           problem.setLinkedOperatorType(seqOp, seqOpr);
@@ -885,7 +887,7 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
           auto loop = cast<LoopInterface>(loopOp);
           loop.getBodyBlock()->walk([&](Operation *op) {
             if (isa<AffineLoadOp, AffineStoreOp, memref::LoadOp,
-                      memref::StoreOp>(op)) {
+                    memref::StoreOp>(op)) {
               Value memRef = getMemref(op);
               Problem::OperatorType memOpr = problem.getOrInsertOperatorType(
                   "mem_" + std::to_string(hash_value(memRef)));
@@ -993,26 +995,24 @@ LogicalResult AffineToLoopSchedule::solveModuloProblem(AffineForOp &loop,
   // Scheduling analyis only considers the innermost loop nest for now.
   auto forOp = loop;
 
-  
   LLVM_DEBUG(forOp.dump());
 
   // Optionally debug problem inputs.
-  LLVM_DEBUG(
-    for (auto *op : problem.getOperations()) {
-      if (auto parent = op->getParentOfType<LoopInterface>(); parent)
-        continue;
-      llvm::dbgs() << "Modulo scheduling inputs for " << *op;
-      auto opr = problem.getLinkedOperatorType(op);
-      llvm::dbgs() << "\n  opr = " << opr;
-      llvm::dbgs() << "\n  latency = " << problem.getLatency(*opr);
-      llvm::dbgs() << "\n  limit = " << problem.getLimit(*opr);
-      for (auto dep : problem.getDependences(op))
-        if (dep.isAuxiliary())
-          llvm::dbgs() << "\n  dep = { distance = " << problem.getDistance(dep)
-                       << ", source = " << *dep.getSource() << " }";
-      llvm::dbgs() << "\n\n";
-    }
-  );
+  LLVM_DEBUG(for (auto *op
+                  : problem.getOperations()) {
+    if (auto parent = op->getParentOfType<LoopInterface>(); parent)
+      continue;
+    llvm::dbgs() << "Modulo scheduling inputs for " << *op;
+    auto opr = problem.getLinkedOperatorType(op);
+    llvm::dbgs() << "\n  opr = " << opr;
+    llvm::dbgs() << "\n  latency = " << problem.getLatency(*opr);
+    llvm::dbgs() << "\n  limit = " << problem.getLimit(*opr);
+    for (auto dep : problem.getDependences(op))
+      if (dep.isAuxiliary())
+        llvm::dbgs() << "\n  dep = { distance = " << problem.getDistance(dep)
+                     << ", source = " << *dep.getSource() << " }";
+    llvm::dbgs() << "\n\n";
+  });
 
   // Verify and solve the problem.
   if (failed(problem.check()))
@@ -1091,8 +1091,9 @@ LogicalResult AffineToLoopSchedule::solveSharedOperatorsProblem(
 }
 
 /// Create the pipeline op for a loop nest.
-LogicalResult AffineToLoopSchedule::createLoopSchedulePipeline(
-    AffineForOp &loop, ModuloProblem &problem) {
+LogicalResult
+AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
+                                                 ModuloProblem &problem) {
   ImplicitLocOpBuilder builder(loop.getLoc(), loop);
 
   // loop.dump();
@@ -1164,7 +1165,6 @@ LogicalResult AffineToLoopSchedule::createLoopSchedulePipeline(
   for (const auto &group : startGroups)
     startTimes.push_back(group.first);
   llvm::sort(startTimes);
-
 
   DominanceInfo dom(getOperation());
 
@@ -1344,7 +1344,6 @@ LogicalResult AffineToLoopSchedule::createLoopSchedulePipeline(
       stageTypes.push_back(lowerBound.getType());
     }
 
-
     // Create the stage itself.
     builder.setInsertionPoint(stagesBlock.getTerminator());
     auto startTimeAttr =
@@ -1433,9 +1432,8 @@ LogicalResult AffineToLoopSchedule::createLoopSchedulePipeline(
 
   dependenceAnalysis->replaceOp(loop, pipeline);
 
-  loop.walk([&](Operation *op) {
-    assert(!dependenceAnalysis->containsOp(op));
-  });
+  loop.walk(
+      [&](Operation *op) { assert(!dependenceAnalysis->containsOp(op)); });
 
   // Remove the loop nest from the IR.
   loop.walk([&](Operation *op) {
@@ -1688,10 +1686,8 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
       unsigned resultIndex = stepTerminator->getNumOperands();
       auto *newOp = builder.clone(*op, valueMap);
       dependenceAnalysis->replaceOp(op, newOp);
-      std::queue<Operation*> oldOps;
-      op->walk([&](Operation *op) {
-        oldOps.push(op);
-      });
+      std::queue<Operation *> oldOps;
+      op->walk([&](Operation *op) { oldOps.push(op); });
       newOp->walk([&](Operation *op) {
         Operation *oldOp = oldOps.front();
         dependenceAnalysis->replaceOp(oldOp, op);
@@ -1760,9 +1756,8 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
 
   dependenceAnalysis->replaceOp(loop, sequential);
 
-  loop.walk([&](Operation *op) {
-    assert(!dependenceAnalysis->containsOp(op));
-  });
+  loop.walk(
+      [&](Operation *op) { assert(!dependenceAnalysis->containsOp(op)); });
 
   // Remove the loop nest from the IR.
   loop.walk([&](Operation *op) {

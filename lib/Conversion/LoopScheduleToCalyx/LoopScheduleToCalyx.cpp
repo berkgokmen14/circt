@@ -38,6 +38,7 @@
 #include <iterator>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <variant>
 
 using namespace llvm;
@@ -2133,6 +2134,7 @@ class ZeroUnusedMemoryEnables : public calyx::FuncOpPartialLoweringPattern {
   partiallyLowerFuncToComp(FuncOp funcOp,
                            PatternRewriter &rewriter) const override {
 
+    DenseSet<Value> alreadyAssigned;
     auto compOp = getState<ComponentLoweringState>().getComponentOp();
     auto wiresOp = compOp.getWiresOp();
     rewriter.setInsertionPointToStart(wiresOp.getBodyBlock());
@@ -2142,14 +2144,20 @@ class ZeroUnusedMemoryEnables : public calyx::FuncOpPartialLoweringPattern {
         getState<ComponentLoweringState>().interfacesReadEnNotSet();
     for (auto interface : readEnNotSet) {
       auto readEn = interface.readEn();
-      rewriter.create<calyx::AssignOp>(funcOp.getLoc(), readEn, zero);
+      if (alreadyAssigned.count(readEn) == 0) {
+        rewriter.create<calyx::AssignOp>(funcOp.getLoc(), readEn, zero);
+        alreadyAssigned.insert(readEn);
+      }
     }
 
     auto writeEnNotSet =
         getState<ComponentLoweringState>().interfacesWriteEnNotSet();
     for (auto interface : writeEnNotSet) {
       auto writeEn = interface.writeEn();
-      rewriter.create<calyx::AssignOp>(funcOp.getLoc(), writeEn, zero);
+      if (alreadyAssigned.count(writeEn) == 0) {
+        rewriter.create<calyx::AssignOp>(funcOp.getLoc(), writeEn, zero);
+        alreadyAssigned.insert(writeEn);
+      }
     }
 
     return success();

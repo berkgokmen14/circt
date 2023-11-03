@@ -1185,6 +1185,9 @@ class BuildConditionChecks : public calyx::FuncOpPartialLoweringPattern {
       });
 
       rewriter.setInsertionPointToEnd(condGroup.getBodyBlock());
+      condReg.getIn().dump();
+      assert(newCondValue != nullptr);
+      newCondValue.dump();
       rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getIn(),
                                        newCondValue);
       rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getWriteEn(),

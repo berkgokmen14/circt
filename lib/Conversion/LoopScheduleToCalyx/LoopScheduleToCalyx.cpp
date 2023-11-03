@@ -780,7 +780,6 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      LoopInterface op) const {
   LoopWrapper loop(op);
 
-  getState<ComponentLoweringState>().setUniqueName(op, "loop");
   /// Create iteration argument registers.
   /// The iteration argument registers will be referenced:
   /// - In the "before" part of the while loop, calculating the conditional,
@@ -1081,7 +1080,9 @@ class BuildConditionChecks : public calyx::FuncOpPartialLoweringPattern {
   partiallyLowerFuncToComp(FuncOp funcOp,
                            PatternRewriter &rewriter) const override {
     funcOp.walk([&](LoopInterface loop) {
-      if (loop.isPipelined() && !loop.canStall()) {
+      getState<ComponentLoweringState>().setUniqueName(loop, "loop");
+
+      if (loop.isPipelined()) {
         return;
       }
 
@@ -1104,49 +1105,6 @@ class BuildConditionChecks : public calyx::FuncOpPartialLoweringPattern {
           loop->getLoc(), initGroupName, 1);
       getState<ComponentLoweringState>().addLoopInitGroup(LoopWrapper(loop),
                                                           initGroup);
-
-      if (loop.isPipelined()) {
-        auto pipeline = dyn_cast<LoopSchedulePipelineOp>(loop.getOperation());
-        assert(pipeline != nullptr);
-        auto bound = pipeline.getBound();
-        assert(bound.has_value());
-        auto incrGroup =
-            getState<ComponentLoweringState>().getIncrGroup(pipeline);
-        auto incrVal =
-            getState<ComponentLoweringState>().getLoopIterValue(pipeline);
-
-        rewriter.setInsertionPointToEnd(initGroup.getBodyBlock());
-        auto one = calyx::createConstant(loop.getLoc(), rewriter,
-                                         getComponent(), 1, 1);
-        auto zero = calyx::createConstant(loop.getLoc(), rewriter,
-                                          getComponent(), 1, 0);
-        rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getIn(),
-                                         bound.value() == 0 ? zero : one);
-        rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getWriteEn(),
-                                         one);
-
-        auto idxType = incrVal.getType();
-        auto bitwidth = idxType.getIntOrFloatBitWidth();
-        auto i1Type = rewriter.getI1Type();
-
-        auto ltOp =
-            getState<ComponentLoweringState>()
-                .getNewLibraryOpInstance<calyx::LtLibOp>(
-                    rewriter, loop.getLoc(), {idxType, idxType, i1Type});
-        rewriter.setInsertionPointToStart(incrGroup.getBodyBlock());
-        rewriter.create<calyx::AssignOp>(loop.getLoc(), ltOp.getLeft(),
-                                         incrVal);
-        auto constant = calyx::createConstant(
-            loop.getLoc(), rewriter, getComponent(), bitwidth,
-            *bound + pipeline.getBodyLatency() - 1);
-        rewriter.create<calyx::AssignOp>(loop.getLoc(), ltOp.getRight(),
-                                         constant);
-        rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getIn(),
-                                         ltOp.getOut());
-        rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getWriteEn(),
-                                         one);
-        return;
-      }
 
       // Create cond group
       auto groupName = getState<ComponentLoweringState>().getUniqueName("cond");
@@ -1185,9 +1143,7 @@ class BuildConditionChecks : public calyx::FuncOpPartialLoweringPattern {
       });
 
       rewriter.setInsertionPointToEnd(condGroup.getBodyBlock());
-      condReg.getIn().dump();
       assert(newCondValue != nullptr);
-      newCondValue.dump();
       rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getIn(),
                                        newCondValue);
       rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getWriteEn(),
@@ -1197,6 +1153,81 @@ class BuildConditionChecks : public calyx::FuncOpPartialLoweringPattern {
       getState<ComponentLoweringState>().addBlockSchedulable(
           &phase.getBodyBlock(), condGroup);
 
+      return;
+    });
+    return success();
+  }
+};
+
+class BuildStallableConditionChecks
+    : public calyx::FuncOpPartialLoweringPattern {
+  using FuncOpPartialLoweringPattern::FuncOpPartialLoweringPattern;
+
+  LogicalResult
+  partiallyLowerFuncToComp(FuncOp funcOp,
+                           PatternRewriter &rewriter) const override {
+    funcOp.walk([&](LoopInterface loop) {
+      if (!loop.isPipelined() || !loop.canStall()) {
+        return;
+      }
+
+      /// Create condition register.
+      auto condValue = loop.getConditionValue();
+      std::string name = getState<ComponentLoweringState>()
+                             .getUniqueName(loop.getOperation())
+                             .str() +
+                         "_cond";
+
+      auto condReg =
+          createRegister(condValue.getLoc(), rewriter, getComponent(), 1, name);
+      getState<ComponentLoweringState>().setCondReg(loop, condReg);
+
+      // Create condition init group.
+      auto initGroupName =
+          getState<ComponentLoweringState>().getUniqueName("cond_init");
+      auto initGroup = calyx::createStaticGroup(
+          rewriter, getState<ComponentLoweringState>().getComponentOp(),
+          loop->getLoc(), initGroupName, 1);
+      getState<ComponentLoweringState>().addLoopInitGroup(LoopWrapper(loop),
+                                                          initGroup);
+
+      auto pipeline = dyn_cast<LoopSchedulePipelineOp>(loop.getOperation());
+      assert(pipeline != nullptr);
+      auto bound = pipeline.getBound();
+      assert(bound.has_value());
+      auto incrGroup =
+          getState<ComponentLoweringState>().getIncrGroup(pipeline);
+      auto incrVal =
+          getState<ComponentLoweringState>().getLoopIterValue(pipeline);
+
+      rewriter.setInsertionPointToEnd(initGroup.getBodyBlock());
+      auto one =
+          calyx::createConstant(loop.getLoc(), rewriter, getComponent(), 1, 1);
+      auto zero =
+          calyx::createConstant(loop.getLoc(), rewriter, getComponent(), 1, 0);
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getIn(),
+                                       bound.value() == 0 ? zero : one);
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getWriteEn(),
+                                       one);
+
+      auto idxType = incrVal.getType();
+      auto bitwidth = idxType.getIntOrFloatBitWidth();
+      auto i1Type = rewriter.getI1Type();
+
+      auto ltOp = getState<ComponentLoweringState>()
+                      .getNewLibraryOpInstance<calyx::LtLibOp>(
+                          rewriter, loop.getLoc(), {idxType, idxType, i1Type});
+      rewriter.setInsertionPointToStart(incrGroup.getBodyBlock());
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), ltOp.getLeft(), incrVal);
+      auto constant = calyx::createConstant(
+          loop.getLoc(), rewriter, getComponent(), bitwidth,
+          *bound + pipeline.getBodyLatency() - 1);
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), ltOp.getRight(),
+                                       constant);
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getIn(),
+                                       ltOp.getOut());
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getWriteEn(),
+                                       one);
       return;
     });
     return success();
@@ -2365,6 +2396,10 @@ void LoopScheduleToCalyxPass::runOnOperation() {
   addOncePattern<calyx::BuildReturnRegs>(loweringPatterns, patternState,
                                          funcMap, *loweringState);
 
+  /// This pattern .
+  addOncePattern<BuildConditionChecks>(loweringPatterns, patternState, funcMap,
+                                       *loweringState);
+
   /// This pattern converts operations within basic blocks to Calyx library
   /// operators. Combinational operations are assigned inside a
   /// calyx::CombGroupOp, and sequential inside calyx::StaticGroupOps.
@@ -2375,9 +2410,8 @@ void LoopScheduleToCalyxPass::runOnOperation() {
   addOncePattern<BuildOpGroups>(loweringPatterns, patternState, funcMap,
                                 *loweringState);
 
-  /// This pattern .
-  addOncePattern<BuildConditionChecks>(loweringPatterns, patternState, funcMap,
-                                       *loweringState);
+  addOncePattern<BuildStallableConditionChecks>(loweringPatterns, patternState,
+                                                funcMap, *loweringState);
 
   /// This pattern creates registers for all pipeline stages.
   addOncePattern<BuildIntermediateRegs>(loweringPatterns, patternState, funcMap,

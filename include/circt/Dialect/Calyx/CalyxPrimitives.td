@@ -267,7 +267,7 @@ def AndLibOp  : CombinationalArithBinaryLibraryOp<"and"> {}
 def OrLibOp   : CombinationalArithBinaryLibraryOp<"or"> {}
 def XorLibOp  : CombinationalArithBinaryLibraryOp<"xor"> {}
 
-class SequentialArithBinaryLibraryOp<string mnemonic> : ArithBinaryLibraryOp<mnemonic # "_seq", [
+class SequentialArithBinaryLibraryOp<string mnemonic> : ArithBinaryLibraryOp<mnemonic # "_pipe", [
     SameTypeConstraint<"left", "out">
   ]> {
   let results = (outs I1:$clk, I1:$reset, I1:$go, AnyType:$left, AnyType:$right, AnyType:$out, I1:$done);
@@ -314,9 +314,16 @@ class ArithBinaryPipeLibraryOp<string mnemonic> : CalyxPrimitive<"pipelined_" # 
 
 def PipelinedMultLibOp : ArithBinaryPipeLibraryOp<"mult"> {}
 
-class ArithBinaryStallableLibraryOp<string mnemonic> : ArithBinaryLibraryOp<"stallable_" # mnemonic, [
+class ArithBinaryStallableLibraryOp<string mnemonic> : CalyxPrimitive<"stallable_" # mnemonic, [
     SameTypeConstraint<"left", "out">
   ]> {
+  let arguments = (ins SymbolNameAttr:$sym_name);
+  let builders = [
+    OpBuilder<(ins "StringRef":$sym_name, "::mlir::TypeRange":$resultTypes), [{
+      $_state.addAttribute(mlir::SymbolTable::getSymbolAttrName(), $_builder.getStringAttr(sym_name));
+      $_state.addTypes(resultTypes);
+    }]>
+  ];
   let results = (outs I1:$clk, I1:$reset, I1:$stall, AnyType:$left, AnyType:$right, AnyType:$out);
 }
 

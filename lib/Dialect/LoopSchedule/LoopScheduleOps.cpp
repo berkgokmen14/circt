@@ -284,7 +284,26 @@ uint64_t LoopSchedulePipelineOp::getBodyLatency() {
     if (stage.getEnd() > bodyLatency)
       bodyLatency = stage.getEnd();
   }
-  return bodyLatency * this->getII();
+  return bodyLatency;
+}
+
+bool LoopSchedulePipelineOp::canStall() {
+  auto mightStallRes = this->walk([&](Operation *op) {
+    if (auto load = dyn_cast<LoadInterface>(op)) {
+      if (!load.getLatency().has_value()) {
+        return WalkResult::interrupt();
+      }
+    }
+
+    if (auto store = dyn_cast<StoreInterface>(op)) {
+      if (!store.getLatency().has_value()) {
+        return WalkResult::interrupt();
+      }
+    }
+    return WalkResult::advance();
+  });
+
+  return mightStallRes.wasInterrupted();
 }
 
 //===----------------------------------------------------------------------===//
@@ -489,6 +508,25 @@ void LoopScheduleSequentialOp::build(OpBuilder &builder, OperationState &state,
   builder.setInsertionPointToEnd(&scheduleBlock);
   builder.create<LoopScheduleTerminatorOp>(builder.getUnknownLoc(),
                                            ValueRange(), ValueRange());
+}
+
+bool LoopScheduleSequentialOp::canStall() {
+  auto mightStallRes = this->walk([&](Operation *op) {
+    if (auto load = dyn_cast<LoadInterface>(op)) {
+      if (!load.getLatency().has_value()) {
+        return WalkResult::interrupt();
+      }
+    }
+
+    if (auto store = dyn_cast<StoreInterface>(op)) {
+      if (!store.getLatency().has_value()) {
+        return WalkResult::interrupt();
+      }
+    }
+    return WalkResult::advance();
+  });
+
+  return mightStallRes.wasInterrupted();
 }
 
 //===----------------------------------------------------------------------===//

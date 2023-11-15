@@ -36,7 +36,9 @@
 
 #include <cassert>
 #include <iterator>
+#include <set>
 #include <string>
+#include <unordered_set>
 #include <variant>
 
 using namespace llvm;
@@ -167,6 +169,74 @@ public:
     return guardRegisters[phase];
   }
 
+  void setStallValue(LoopInterface loop, Value v) { stallValues[loop] = v; }
+
+  std::optional<Value> getStallValue(LoopInterface loop) {
+    if (!stallValues.contains(loop))
+      return std::nullopt;
+    return stallValues[loop];
+  }
+
+  void addPhaseDoneValue(PhaseInterface phase, Value v) {
+    doneValues[phase].push_back(v);
+  }
+
+  SmallVector<Value> getPhaseDoneValues(PhaseInterface phase) {
+    return doneValues[phase];
+  }
+
+  void addStallPort(LoopInterface loop, Value v) {
+    stallPorts[loop].push_back(v);
+  }
+
+  SmallVector<Value> getStallPorts(LoopInterface loop) {
+    return stallPorts[loop];
+  }
+
+  void memoryInterfaceReadEnSet(const calyx::MemoryInterface &interface) {
+    readEnSet.push_back(interface);
+  }
+
+  void memoryInterfaceWriteEnSet(const calyx::MemoryInterface &interface) {
+    writeEnSet.push_back(interface);
+  }
+
+  SmallVector<calyx::MemoryInterface> interfacesReadEnNotSet() {
+    SmallVector<calyx::MemoryInterface> interfaces;
+
+    for (auto interface : writeEnSet) {
+      if (interface.readEnOpt().has_value()) {
+        int count = 0;
+        for (const auto &readInterface : readEnSet) {
+          if (readInterface == interface)
+            count++;
+        }
+        if (count == 0)
+          interfaces.push_back(interface);
+      }
+    }
+
+    return interfaces;
+  }
+
+  SmallVector<calyx::MemoryInterface> interfacesWriteEnNotSet() {
+    SmallVector<calyx::MemoryInterface> interfaces;
+
+    for (auto interface : readEnSet) {
+      if (interface.writeEnOpt().has_value()) {
+        int count = 0;
+        for (const auto &writeInterface : writeEnSet) {
+          if (writeInterface == interface)
+            count++;
+        }
+        if (count == 0)
+          interfaces.push_back(interface);
+      }
+    }
+
+    return interfaces;
+  }
+
 private:
   /// A mapping from steps/stages to their registers.
   DenseMap<Operation *, DenseMap<unsigned, PhaseRegister>> phaseRegs;
@@ -183,6 +253,16 @@ private:
   DenseMap<PhaseInterface, Value> guardValues;
 
   DenseMap<PhaseInterface, calyx::RegisterOp> guardRegisters;
+
+  DenseMap<LoopInterface, Value> stallValues;
+
+  DenseMap<PhaseInterface, SmallVector<Value>> doneValues;
+
+  DenseMap<LoopInterface, SmallVector<Value>> stallPorts;
+
+  SmallVector<calyx::MemoryInterface> readEnSet;
+
+  SmallVector<calyx::MemoryInterface> writeEnSet;
 };
 
 /// Handles the current state of lowering of a Calyx component. It is mainly
@@ -475,6 +555,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
 
   auto memoryInterface =
       getState<ComponentLoweringState>().getMemoryInterface(memref);
+
+  getState<ComponentLoweringState>().memoryInterfaceReadEnSet(memoryInterface);
+
   // TODO: Check only one access to this memory per cycle
   // Single load from memory; we do not need to write the
   // output to a register. This is essentially a "combinational read" under
@@ -511,6 +594,9 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      memref::StoreOp storeOp) const {
   auto memoryInterface = getState<ComponentLoweringState>().getMemoryInterface(
       storeOp.getMemref());
+
+  getState<ComponentLoweringState>().memoryInterfaceWriteEnSet(memoryInterface);
+
   auto group = createStaticGroupForOp(rewriter, storeOp, 1);
 
   // This is a sequential group, so register it as being schedulable for the
@@ -543,7 +629,8 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
   auto memoryInterface =
       getState<ComponentLoweringState>().getMemoryInterface(memref);
 
-  assert(!memoryInterface.isDynamic());
+  getState<ComponentLoweringState>().memoryInterfaceReadEnSet(memoryInterface);
+
   auto group = createStaticGroupForOp(rewriter, loadOp, 1);
   rewriter.setInsertionPointToEnd(group.getBodyBlock());
   auto &state = getState<ComponentLoweringState>();
@@ -561,9 +648,11 @@ BuildOpGroups::buildOp(PatternRewriter &rewriter,
                        calyx::StoreLoweringInterface storeOp) const {
   auto memoryInterface = getState<ComponentLoweringState>().getMemoryInterface(
       storeOp.getMemoryValue());
+
+  getState<ComponentLoweringState>().memoryInterfaceWriteEnSet(memoryInterface);
+
   auto group = createStaticGroupForOp(rewriter, storeOp, 1);
 
-  assert(!memoryInterface.isDynamic());
   rewriter.setInsertionPointToEnd(group.getBodyBlock());
   auto &state = getState<ComponentLoweringState>();
   std::optional<Block *> blockOpt;
@@ -584,6 +673,18 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   Location loc = op.getLoc();
   Type width = op.getResult().getType(), one = rewriter.getI1Type();
   if (isa<LoopSchedulePipelineStageOp>(op->getParentOp())) {
+    auto pipeline = op->getParentOfType<LoopSchedulePipelineOp>();
+    if (pipeline.canStall()) {
+      auto mulPipe =
+          getState<ComponentLoweringState>()
+              .getNewLibraryOpInstance<calyx::StallableMultLibOp>(
+                  rewriter, loc, {one, one, one, width, width, width});
+      getState<ComponentLoweringState>().addStallPort(pipeline,
+                                                      mulPipe.getStall());
+      return buildLibraryBinaryPipeOp<calyx::StallableMultLibOp>(
+          rewriter, op, mulPipe,
+          /*out=*/mulPipe.getOut());
+    }
     auto mulPipe = getState<ComponentLoweringState>()
                        .getNewLibraryOpInstance<calyx::PipelinedMultLibOp>(
                            rewriter, loc, {one, one, width, width, width});
@@ -1031,6 +1132,7 @@ class BuildConditionChecks : public calyx::FuncOpPartialLoweringPattern {
                              .getUniqueName(loop.getOperation())
                              .str() +
                          "_cond";
+
       auto condReg =
           createRegister(condValue.getLoc(), rewriter, getComponent(), 1, name);
       getState<ComponentLoweringState>().setCondReg(loop, condReg);
@@ -1041,6 +1143,16 @@ class BuildConditionChecks : public calyx::FuncOpPartialLoweringPattern {
       auto initGroup = calyx::createStaticGroup(
           rewriter, getState<ComponentLoweringState>().getComponentOp(),
           loop->getLoc(), initGroupName, 1);
+      getState<ComponentLoweringState>().addLoopInitGroup(LoopWrapper(loop),
+                                                          initGroup);
+
+      // Create cond group
+      auto groupName = getState<ComponentLoweringState>().getUniqueName("cond");
+      auto condGroup = calyx::createStaticGroup(
+          rewriter, getState<ComponentLoweringState>().getComponentOp(),
+          loop->getLoc(), groupName, 1);
+      getState<ComponentLoweringState>().setCondGroup(loop, condGroup);
+
       rewriter.setInsertionPointToEnd(initGroup.getBodyBlock());
       rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getIn(),
                                        condValue);
@@ -1048,8 +1160,6 @@ class BuildConditionChecks : public calyx::FuncOpPartialLoweringPattern {
           calyx::createConstant(loop.getLoc(), rewriter, getComponent(), 1, 1);
       rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getWriteEn(),
                                        one);
-      getState<ComponentLoweringState>().addLoopInitGroup(LoopWrapper(loop),
-                                                          initGroup);
 
       auto term =
           cast<LoopScheduleTerminatorOp>(loop.getBodyBlock()->getTerminator());
@@ -1072,22 +1182,92 @@ class BuildConditionChecks : public calyx::FuncOpPartialLoweringPattern {
         return operand.getOwner()->getParentOp() == phase;
       });
 
-      // Create cond group
-      auto groupName = getState<ComponentLoweringState>().getUniqueName("cond");
-      auto condGroup = calyx::createStaticGroup(
-          rewriter, getState<ComponentLoweringState>().getComponentOp(),
-          loop->getLoc(), groupName, 1);
       rewriter.setInsertionPointToEnd(condGroup.getBodyBlock());
+      assert(newCondValue != nullptr);
       rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getIn(),
                                        newCondValue);
       rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getWriteEn(),
                                        one);
-      getState<ComponentLoweringState>().setCondGroup(loop, condGroup);
 
       // Add condition eval to first phase
       getState<ComponentLoweringState>().addBlockSchedulable(
           &phase.getBodyBlock(), condGroup);
 
+      return;
+    });
+    return success();
+  }
+};
+
+class BuildStallableConditionChecks
+    : public calyx::FuncOpPartialLoweringPattern {
+  using FuncOpPartialLoweringPattern::FuncOpPartialLoweringPattern;
+
+  LogicalResult
+  partiallyLowerFuncToComp(FuncOp funcOp,
+                           PatternRewriter &rewriter) const override {
+    funcOp.walk([&](LoopInterface loop) {
+      if (!loop.isPipelined() || !loop.canStall()) {
+        return;
+      }
+
+      /// Create condition register.
+      auto condValue = loop.getConditionValue();
+      std::string name = getState<ComponentLoweringState>()
+                             .getUniqueName(loop.getOperation())
+                             .str() +
+                         "_cond";
+
+      auto condReg =
+          createRegister(condValue.getLoc(), rewriter, getComponent(), 1, name);
+      getState<ComponentLoweringState>().setCondReg(loop, condReg);
+
+      // Create condition init group.
+      auto initGroupName =
+          getState<ComponentLoweringState>().getUniqueName("cond_init");
+      auto initGroup = calyx::createStaticGroup(
+          rewriter, getState<ComponentLoweringState>().getComponentOp(),
+          loop->getLoc(), initGroupName, 1);
+      getState<ComponentLoweringState>().addLoopInitGroup(LoopWrapper(loop),
+                                                          initGroup);
+
+      auto pipeline = dyn_cast<LoopSchedulePipelineOp>(loop.getOperation());
+      assert(pipeline != nullptr);
+      auto bound = pipeline.getBound();
+      assert(bound.has_value());
+      auto incrGroup =
+          getState<ComponentLoweringState>().getIncrGroup(pipeline);
+      auto incrVal =
+          getState<ComponentLoweringState>().getLoopIterValue(pipeline);
+
+      rewriter.setInsertionPointToEnd(initGroup.getBodyBlock());
+      auto one =
+          calyx::createConstant(loop.getLoc(), rewriter, getComponent(), 1, 1);
+      auto zero =
+          calyx::createConstant(loop.getLoc(), rewriter, getComponent(), 1, 0);
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getIn(),
+                                       bound.value() == 0 ? zero : one);
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getWriteEn(),
+                                       one);
+
+      auto idxType = incrVal.getType();
+      auto bitwidth = idxType.getIntOrFloatBitWidth();
+      auto i1Type = rewriter.getI1Type();
+
+      auto ltOp = getState<ComponentLoweringState>()
+                      .getNewLibraryOpInstance<calyx::LtLibOp>(
+                          rewriter, loop.getLoc(), {idxType, idxType, i1Type});
+      rewriter.setInsertionPointToStart(incrGroup.getBodyBlock());
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), ltOp.getLeft(), incrVal);
+      auto constant = calyx::createConstant(
+          loop.getLoc(), rewriter, getComponent(), bitwidth,
+          *bound + pipeline.getBodyLatency() - 1);
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), ltOp.getRight(),
+                                       constant);
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getIn(),
+                                       ltOp.getOut());
+      rewriter.create<calyx::AssignOp>(loop.getLoc(), condReg.getWriteEn(),
+                                       one);
       return;
     });
     return success();
@@ -1260,6 +1440,9 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
           } else if (auto seqDivS = dyn_cast<calyx::SeqDivSLibOp>(op);
                      seqDivS) {
             v = seqDivS.getOut();
+          } else if (auto stallMul = dyn_cast<calyx::StallableMultLibOp>(op);
+                     stallMul) {
+            v = stallMul.getOut();
           } else {
             funcOp->getParentOfType<ModuleOp>().dump();
             phase.dump();
@@ -1364,6 +1547,7 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
     assert(numPhases > 0);
 
     buildPhaseGuards(op, phase, rewriter);
+    buildPhaseStallValues(op, phase, rewriter);
     // phase.dump();
 
     getState<ComponentLoweringState>().addBlockSchedulable(phase->getBlock(),
@@ -1639,6 +1823,95 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
       rewriter.create<calyx::AssignOp>(stage.getLoc(), reg.getWriteEn(), oneI1);
     }
   }
+
+  void buildPhaseStallValues(Operation *op, PhaseInterface phase,
+                             PatternRewriter &rewriter) const {
+    auto pipeline = dyn_cast<LoopSchedulePipelineOp>(op);
+    if (!pipeline) {
+      return;
+    }
+    auto stallValue =
+        getState<ComponentLoweringState>().getStallValue(pipeline);
+    auto guardVal = getState<ComponentLoweringState>().getGuardValue(phase);
+    assert(guardVal.has_value());
+    auto doneVals =
+        getState<ComponentLoweringState>().getPhaseDoneValues(phase);
+
+    if (!doneVals.empty()) {
+      std::optional<Value> notDoneValue;
+      auto i1Type = rewriter.getI1Type();
+      rewriter.setInsertionPointToStart(getState<ComponentLoweringState>()
+                                            .getComponentOp()
+                                            .getWiresOp()
+                                            .getBodyBlock());
+      for (auto doneVal : doneVals) {
+        auto notOp = getState<ComponentLoweringState>()
+                         .getNewLibraryOpInstance<calyx::NotLibOp>(
+                             rewriter, phase.getLoc(), {i1Type, i1Type});
+        rewriter.create<calyx::AssignOp>(phase.getLoc(), notOp.getIn(),
+                                         doneVal);
+        if (notDoneValue.has_value()) {
+          auto orOp =
+              getState<ComponentLoweringState>()
+                  .getNewLibraryOpInstance<calyx::OrLibOp>(
+                      rewriter, phase.getLoc(), {i1Type, i1Type, i1Type});
+          rewriter.create<calyx::AssignOp>(phase.getLoc(), orOp.getLeft(),
+                                           notOp.getOut());
+          rewriter.create<calyx::AssignOp>(phase.getLoc(), orOp.getRight(),
+                                           *notDoneValue);
+          notDoneValue = orOp.getOut();
+        } else {
+          notDoneValue = notOp.getOut();
+        }
+      }
+
+      auto andOp = getState<ComponentLoweringState>()
+                       .getNewLibraryOpInstance<calyx::AndLibOp>(
+                           rewriter, phase.getLoc(), {i1Type, i1Type, i1Type});
+      rewriter.create<calyx::AssignOp>(phase.getLoc(), andOp.getLeft(),
+                                       *guardVal);
+      rewriter.create<calyx::AssignOp>(phase.getLoc(), andOp.getRight(),
+                                       *notDoneValue);
+
+      if (stallValue.has_value()) {
+        auto orOp = getState<ComponentLoweringState>()
+                        .getNewLibraryOpInstance<calyx::OrLibOp>(
+                            rewriter, phase.getLoc(), {i1Type, i1Type, i1Type});
+        rewriter.create<calyx::AssignOp>(phase.getLoc(), orOp.getLeft(),
+                                         andOp.getOut());
+        rewriter.create<calyx::AssignOp>(phase.getLoc(), orOp.getRight(),
+                                         *stallValue);
+        getState<ComponentLoweringState>().setStallValue(pipeline,
+                                                         orOp.getOut());
+      } else {
+        getState<ComponentLoweringState>().setStallValue(pipeline,
+                                                         andOp.getOut());
+      }
+    }
+
+    if (phase->getNextNode() == nullptr)
+      return;
+
+    auto nextPhase = dyn_cast<PhaseInterface>(phase->getNextNode());
+
+    phase.walk([&](Operation *op) {
+      if (auto loadOp = dyn_cast<calyx::LoadLoweringInterface>(op)) {
+        auto done = getState<ComponentLoweringState>()
+                        .getMemoryInterface(loadOp.getMemoryValue())
+                        .readDoneOpt();
+        if (done.has_value())
+          getState<ComponentLoweringState>().addPhaseDoneValue(nextPhase,
+                                                               *done);
+      } else if (auto storeOp = dyn_cast<calyx::LoadLoweringInterface>(op)) {
+        auto done = getState<ComponentLoweringState>()
+                        .getMemoryInterface(storeOp.getMemoryValue())
+                        .writeDoneOpt();
+        if (done.has_value())
+          getState<ComponentLoweringState>().addPhaseDoneValue(nextPhase,
+                                                               *done);
+      }
+    });
+  }
 };
 
 /// Builds a control schedule by traversing the CFG of the function and
@@ -1858,11 +2131,11 @@ private:
 
     /// Check if loop is a pipeline with trip count
     if (isa<LoopSchedulePipelineOp>(loopOp.getOperation()) &&
-        loopOp.getBound().has_value()) {
+        loopOp.getBound().has_value() && !loopOp.getOperation().canStall()) {
       // Can use repeat op instead of while op
       auto pipeline = cast<LoopSchedulePipelineOp>(loopOp.getOperation());
-      auto bound = loopOp.getBound().value();
-      auto iterCount = bound + pipeline.getBodyLatency() - pipeline.getII();
+      auto bound = loopOp.getBound().value() * pipeline.getII();
+      auto iterCount = bound + pipeline.getBodyLatency() - 1;
       auto repeatCtrlOp =
           rewriter.create<calyx::StaticRepeatOp>(loc, iterCount);
       return repeatCtrlOp;
@@ -1875,6 +2148,31 @@ private:
 
     /// Build WhileOp with condition
     auto whileCtrlOp = rewriter.create<calyx::WhileOp>(loc, cond);
+
+    if (isa<LoopSchedulePipelineOp>(loopOp.getOperation()) &&
+        loopOp.getOperation().canStall()) {
+      auto cond = getState<ComponentLoweringState>().getStallValue(
+          loopOp.getOperation());
+      if (cond.has_value()) {
+        rewriter.setInsertionPointToStart(getState<ComponentLoweringState>()
+                                              .getComponentOp()
+                                              .getWiresOp()
+                                              .getBodyBlock());
+        auto i1Type = rewriter.getI1Type();
+        auto notOp = getState<ComponentLoweringState>()
+                         .getNewLibraryOpInstance<calyx::NotLibOp>(
+                             rewriter, loc, {i1Type, i1Type});
+        rewriter.create<calyx::AssignOp>(loc, notOp.getIn(), *cond);
+        auto stallPorts = getState<ComponentLoweringState>().getStallPorts(
+            loopOp.getOperation());
+        for (auto port : stallPorts) {
+          rewriter.create<calyx::AssignOp>(loc, port, *cond);
+        }
+        rewriter.setInsertionPointToEnd(whileCtrlOp.getBodyBlock());
+        auto ifCtrlOp = rewriter.create<calyx::StaticIfOp>(loc, notOp.getOut());
+        return ifCtrlOp;
+      }
+    }
     return whileCtrlOp;
   }
 };
@@ -1907,6 +2205,43 @@ class LateSSAReplacement : public calyx::FuncOpPartialLoweringPattern {
               .getMemoryInterface(loadOp.getMemoryValue())
               .readData());
     });
+
+    return success();
+  }
+};
+
+class ZeroUnusedMemoryEnables : public calyx::FuncOpPartialLoweringPattern {
+  using FuncOpPartialLoweringPattern::FuncOpPartialLoweringPattern;
+
+  LogicalResult
+  partiallyLowerFuncToComp(FuncOp funcOp,
+                           PatternRewriter &rewriter) const override {
+
+    DenseSet<Value> alreadyAssigned;
+    auto compOp = getState<ComponentLoweringState>().getComponentOp();
+    auto wiresOp = compOp.getWiresOp();
+    rewriter.setInsertionPointToStart(wiresOp.getBodyBlock());
+
+    auto zero = calyx::createConstant(funcOp.getLoc(), rewriter, compOp, 1, 0);
+    auto readEnNotSet =
+        getState<ComponentLoweringState>().interfacesReadEnNotSet();
+    for (auto interface : readEnNotSet) {
+      auto readEn = interface.readEn();
+      if (alreadyAssigned.count(readEn) == 0) {
+        rewriter.create<calyx::AssignOp>(funcOp.getLoc(), readEn, zero);
+        alreadyAssigned.insert(readEn);
+      }
+    }
+
+    auto writeEnNotSet =
+        getState<ComponentLoweringState>().interfacesWriteEnNotSet();
+    for (auto interface : writeEnNotSet) {
+      auto writeEn = interface.writeEn();
+      if (alreadyAssigned.count(writeEn) == 0) {
+        rewriter.create<calyx::AssignOp>(funcOp.getLoc(), writeEn, zero);
+        alreadyAssigned.insert(writeEn);
+      }
+    }
 
     return success();
   }
@@ -2125,6 +2460,9 @@ void LoopScheduleToCalyxPass::runOnOperation() {
   addOncePattern<BuildOpGroups>(loweringPatterns, patternState, funcMap,
                                 *loweringState);
 
+  addOncePattern<BuildStallableConditionChecks>(loweringPatterns, patternState,
+                                                funcMap, *loweringState);
+
   /// This pattern creates registers for all pipeline stages.
   addOncePattern<BuildIntermediateRegs>(loweringPatterns, patternState, funcMap,
                                         *loweringState);
@@ -2148,6 +2486,9 @@ void LoopScheduleToCalyxPass::runOnOperation() {
   /// after control generation.
   addOncePattern<LateSSAReplacement>(loweringPatterns, patternState, funcMap,
                                      *loweringState);
+
+  addOncePattern<ZeroUnusedMemoryEnables>(loweringPatterns, patternState,
+                                          funcMap, *loweringState);
 
   /// Eliminate any unused combinational groups. This is done before
   /// calyx::RewriteMemoryAccesses to avoid inferring slice components for

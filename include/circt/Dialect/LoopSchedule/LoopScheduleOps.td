@@ -113,6 +113,7 @@ def LoopSchedulePipelineOp : LoopScheduleOp<"pipeline", [LoopOpInterface]> {
     }
 
     uint64_t getBodyLatency();
+    bool canStall();
   }];
 
   let extraClassDefinition = [{
@@ -279,6 +280,7 @@ def LoopScheduleSequentialOp : LoopScheduleOp<"sequential", [LoopOpInterface]> {
     bool isPipelined() {
       return false;
     }
+    bool canStall();
   }];
 
   let extraClassDefinition = [{

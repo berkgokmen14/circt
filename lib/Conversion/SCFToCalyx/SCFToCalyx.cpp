@@ -89,6 +89,9 @@ public:
                              getOperation().getUpperBound(),
                              getOperation().getStep());
   }
+  Operation::operand_range getInits() override {
+    return getOperation().getInits();
+  }
 };
 
 //===----------------------------------------------------------------------===//
@@ -115,7 +118,7 @@ struct CallScheduleable {
 };
 
 /// A variant of types representing scheduleable operations.
-using Scheduleable = std::variant<calyx::GroupOp, WhileScheduleable,
+using Scheduleable = std::variant<calyx::GroupOp, WhileSchedulable,
                                   ForScheduleable, CallScheduleable>;
 
 class WhileLoopLoweringStateInterface

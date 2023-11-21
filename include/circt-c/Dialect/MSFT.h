@@ -11,7 +11,6 @@
 #ifndef CIRCT_C_DIALECT_MSFT_H
 #define CIRCT_C_DIALECT_MSFT_H
 
-#include "circt/Dialect/MSFT/MSFTDialect.h"
 #include "mlir-c/IR.h"
 #include "mlir-c/Pass.h"
 
@@ -21,7 +20,7 @@ extern "C" {
 
 MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(MSFT, msft);
 
-MLIR_CAPI_EXPORTED void mlirMSFTRegisterPasses();
+MLIR_CAPI_EXPORTED void mlirMSFTRegisterPasses(void);
 
 // Values represented in `MSFT.td`.
 typedef int32_t CirctMSFTPrimitiveType;
@@ -63,13 +62,6 @@ intptr_t circtMSFTLocationVectorAttrGetNumElements(MlirAttribute);
 MLIR_CAPI_EXPORTED MlirAttribute
 circtMSFTLocationVectorAttrGetElement(MlirAttribute attr, intptr_t pos);
 
-MLIR_CAPI_EXPORTED bool circtMSFTAttributeIsAnAppIDAttr(MlirAttribute);
-MLIR_CAPI_EXPORTED
-MlirAttribute circtMSFTAppIDAttrGet(MlirContext, MlirStringRef name,
-                                    uint64_t index);
-MLIR_CAPI_EXPORTED MlirStringRef circtMSFTAppIDAttrGetName(MlirAttribute attr);
-MLIR_CAPI_EXPORTED uint64_t circtMSFTAppIDAttrGetIndex(MlirAttribute attr);
-
 //===----------------------------------------------------------------------===//
 // PrimitiveDB.
 //===----------------------------------------------------------------------===//
@@ -96,14 +88,13 @@ typedef struct {
 
 enum CirctMSFTDirection { NONE = 0, ASC = 1, DESC = 2 };
 typedef struct {
-  CirctMSFTDirection columns;
-  CirctMSFTDirection rows;
+  enum CirctMSFTDirection columns;
+  enum CirctMSFTDirection rows;
 } CirctMSFTWalkOrder;
 
 MLIR_CAPI_EXPORTED CirctMSFTPlacementDB
 circtMSFTCreatePlacementDB(MlirModule top, CirctMSFTPrimitiveDB seed);
 MLIR_CAPI_EXPORTED void circtMSFTDeletePlacementDB(CirctMSFTPlacementDB self);
-MLIR_CAPI_EXPORTED
 MLIR_CAPI_EXPORTED MlirOperation circtMSFTPlacementDBPlace(
     CirctMSFTPlacementDB, MlirOperation inst, MlirAttribute loc,
     MlirStringRef subpath, MlirLocation srcLoc);

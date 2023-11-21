@@ -17,6 +17,7 @@ include "FIRRTLDialect.td"
 include "FIRRTLEnums.td"
 include "FIRRTLOpInterfaces.td"
 include "FIRRTLTypes.td"
+include "circt/Dialect/HW/HWTypes.td"
 include "mlir/IR/SymbolInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
@@ -180,8 +181,7 @@ def CoverOp : VerifOp<"cover"> {
   let summary = "Cover Verification Statement";
 }
 
-def WhenOp : FIRRTLOp<"when", [SingleBlock, NoTerminator, NoRegionArguments,
-                               RecursiveMemoryEffects, RecursivelySpeculatable]> {
+def WhenOp : FIRRTLOp<"when", [SingleBlock, NoTerminator, NoRegionArguments]> {
   let summary = "When Statement";
   let description = [{
     The "firrtl.when" operation represents a conditional.  Connections within
@@ -194,6 +194,7 @@ def WhenOp : FIRRTLOp<"when", [SingleBlock, NoTerminator, NoRegionArguments,
   let regions = (region SizedRegion<1>:$thenRegion, AnyRegion:$elseRegion);
 
   let skipDefaultBuilders = 1;
+  let hasCanonicalizeMethod = 1;
   let builders = [
     OpBuilder<(ins "Value":$condition, "bool":$withElseRegion,
                       CArg<"std::function<void()>", "{}">:$thenCtor,
@@ -277,8 +278,8 @@ def MatchOp : FIRRTLOp<"match", [SingleBlock, NoTerminator,
   }];
 }
 
-def PropAssignOp : FIRRTLOp<"propassign", [FConnectLike, SameTypeOperands,
-                                           HasParent<"FModuleOp">]> {
+def PropAssignOp : FIRRTLOp<"propassign",
+  [FConnectLike, SameTypeOperands, ParentOneOf<["FModuleOp", "ClassOp"]>]> {
   let summary = "Assign to a sink property value.";
   let description = [{
     Assign an output property value. The types must match exactly.
@@ -306,17 +307,6 @@ def ForceOp : FIRRTLOp<"force", [SameTypeOperands]> {
   let results = (outs);
   let assemblyFormat =
     "$dest `,` $src attr-dict `:` qualified(type($dest)) `,` qualified(type($src))";
-}
-
-def ProbeOp : FIRRTLOp<"probe"> {
-  let summary = "FIRRTL Value Probe";
-  let description = [{
-    Captures values without binding to any accidental name.
-  }];
-  let arguments = (ins SymbolNameAttr:$inner_sym, Variadic<FIRRTLBaseType>:$captured);
-  let results = (outs);
-
-  let assemblyFormat = "$inner_sym attr-dict ( `,` $captured^  `:` qualified(type($captured)))?";
 }
 
 //===- Reference force/release --------------------------------------------===//
@@ -356,6 +346,20 @@ def RefReleaseInitialOp : FIRRTLOp<"ref.release_initial"> {
   let arguments = (ins UInt1Type:$predicate, RWProbe:$dest);
   let assemblyFormat = "$predicate `,` $dest attr-dict `:` type($predicate) `,` qualified(type($dest))";
   let hasCanonicalizer = 1;
+}
+
+def XMRRefOp : FIRRTLOp<"xmr.ref"> {
+  let summary = "FIRRTL XMR operation, targetable by ref ops.";
+  let arguments = (ins FlatSymbolRefAttr:$ref, DefaultValuedAttr<StrAttr, "{}">:$verbatimSuffix);
+  let results = (outs RefType:$dest);
+  let assemblyFormat = "$ref (`,` $verbatimSuffix^)? attr-dict `:` qualified(type($dest))";
+}
+
+def XMRDerefOp : FIRRTLOp<"xmr.deref"> {
+  let summary = "FIRRTL XMR operation, reading an XMR target.";
+  let arguments = (ins FlatSymbolRefAttr:$ref, DefaultValuedAttr<StrAttr, "{}">:$verbatimSuffix);
+  let results = (outs PassiveType:$dest);
+  let assemblyFormat = "$ref (`,` $verbatimSuffix^)? attr-dict `:` qualified(type($dest))";
 }
 
 //===----------------------------------------------------------------------===//

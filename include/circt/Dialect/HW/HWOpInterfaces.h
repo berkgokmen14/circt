@@ -15,12 +15,18 @@
 
 #include "circt/Dialect/HW/HWTypes.h"
 #include "circt/Dialect/HW/InnerSymbolTable.h"
+#include "circt/Dialect/HW/InstanceImplementation.h"
+#include "circt/Support/InstanceGraphInterface.h"
 #include "circt/Support/LLVM.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 
 namespace circt {
 namespace hw {
+
+void populateHWModuleLikeTypeConversionPattern(StringRef moduleLikeOpName,
+                                               RewritePatternSet &patterns,
+                                               TypeConverter &converter);
 
 /// This holds the name, type, direction of a module's ports
 struct PortInfo : public ModulePort {
@@ -30,7 +36,7 @@ struct PortInfo : public ModulePort {
   size_t argNum = ~0U;
 
   /// The optional symbol for this port.
-  InnerSymAttr sym = {};
+  DictionaryAttr attrs = {};
   LocationAttr loc = {};
 
   StringRef getName() const { return name.getValue(); }
@@ -40,30 +46,150 @@ struct PortInfo : public ModulePort {
 
   /// Return a unique numeric identifier for this port.
   ssize_t getId() const { return isOutput() ? argNum : (-1 - argNum); };
+
+  // Inspect or mutate attributes
+  InnerSymAttr getSym() const;
+  void setSym(InnerSymAttr sym, MLIRContext *ctx);
+
+  // Return the port's Verilog name. This returns either the port's name, or the
+  // `hw.verilogName` attribute if one is present. After `ExportVerilog` has
+  // run, this will reflect the exact name of the port as emitted to the Verilog
+  // output.
+  StringRef getVerilogName() const;
 };
+
+raw_ostream &operator<<(raw_ostream &printer, PortInfo port);
 
 /// This holds a decoded list of input/inout and output ports for a module or
 /// instance.
 struct ModulePortInfo {
-  explicit ModulePortInfo(ArrayRef<PortInfo> inputs, ArrayRef<PortInfo> outputs)
-      : inputs(inputs.begin(), inputs.end()),
-        outputs(outputs.begin(), outputs.end()) {}
-
-  explicit ModulePortInfo(ArrayRef<PortInfo> mergedPorts) {
-    inputs.reserve(mergedPorts.size());
-    outputs.reserve(mergedPorts.size());
-    for (auto port : mergedPorts) {
-      if (port.isOutput())
-        outputs.push_back(port);
-      else
-        inputs.push_back(port);
-    }
+  explicit ModulePortInfo(ArrayRef<PortInfo> inputs,
+                          ArrayRef<PortInfo> outputs) {
+    ports.insert(ports.end(), inputs.begin(), inputs.end());
+    ports.insert(ports.end(), outputs.begin(), outputs.end());
+    sanitizeInOut();
   }
 
-  /// This contains a list of the input and inout ports.
-  SmallVector<PortInfo> inputs;
-  /// This is a list of the output ports.
-  SmallVector<PortInfo> outputs;
+  explicit ModulePortInfo(ArrayRef<PortInfo> mergedPorts)
+      : ports(mergedPorts.begin(), mergedPorts.end()) {
+    sanitizeInOut();
+  }
+
+  using iterator = SmallVector<PortInfo>::iterator;
+  using const_iterator = SmallVector<PortInfo>::const_iterator;
+
+  iterator begin() { return ports.begin(); }
+  iterator end() { return ports.end(); }
+  const_iterator begin() const { return ports.begin(); }
+  const_iterator end() const { return ports.end(); }
+
+  using PortDirectionRange = llvm::iterator_range<
+      llvm::filter_iterator<iterator, std::function<bool(const PortInfo &)>>>;
+
+  using ConstPortDirectionRange = llvm::iterator_range<llvm::filter_iterator<
+      const_iterator, std::function<bool(const PortInfo &)>>>;
+
+  PortDirectionRange getPortsOfDirection(bool input) {
+    std::function<bool(const PortInfo &)> predicateFn;
+    if (input) {
+      predicateFn = [](const PortInfo &port) -> bool {
+        return port.dir == ModulePort::Direction::Input ||
+               port.dir == ModulePort::Direction::InOut;
+      };
+    } else {
+      predicateFn = [](const PortInfo &port) -> bool {
+        return port.dir == ModulePort::Direction::Output;
+      };
+    }
+    return llvm::make_filter_range(ports, predicateFn);
+  }
+
+  ConstPortDirectionRange getPortsOfDirection(bool input) const {
+    std::function<bool(const PortInfo &)> predicateFn;
+    if (input) {
+      predicateFn = [](const PortInfo &port) -> bool {
+        return port.dir == ModulePort::Direction::Input ||
+               port.dir == ModulePort::Direction::InOut;
+      };
+    } else {
+      predicateFn = [](const PortInfo &port) -> bool {
+        return port.dir == ModulePort::Direction::Output;
+      };
+    }
+    return llvm::make_filter_range(ports, predicateFn);
+  }
+
+  PortDirectionRange getInputs() { return getPortsOfDirection(true); }
+
+  PortDirectionRange getOutputs() { return getPortsOfDirection(false); }
+
+  ConstPortDirectionRange getInputs() const {
+    return getPortsOfDirection(true);
+  }
+
+  ConstPortDirectionRange getOutputs() const {
+    return getPortsOfDirection(false);
+  }
+
+  size_t size() const { return ports.size(); }
+  size_t sizeInputs() const {
+    auto r = getInputs();
+    return std::distance(r.begin(), r.end());
+  }
+  size_t sizeOutputs() const {
+    auto r = getOutputs();
+    return std::distance(r.begin(), r.end());
+  }
+
+  size_t portNumForInput(size_t idx) const {
+    size_t port = 0;
+    while (idx || ports[port].isOutput()) {
+      if (!ports[port].isOutput())
+        --idx;
+      ++port;
+    }
+    return port;
+  }
+
+  size_t portNumForOutput(size_t idx) const {
+    size_t port = 0;
+    while (idx || !ports[port].isOutput()) {
+      if (ports[port].isOutput())
+        --idx;
+      ++port;
+    }
+    return port;
+  }
+
+  PortInfo &at(size_t idx) { return ports[idx]; }
+  PortInfo &atInput(size_t idx) { return ports[portNumForInput(idx)]; }
+  PortInfo &atOutput(size_t idx) { return ports[portNumForOutput(idx)]; }
+
+  const PortInfo &at(size_t idx) const { return ports[idx]; }
+  const PortInfo &atInput(size_t idx) const {
+    return ports[portNumForInput(idx)];
+  }
+  const PortInfo &atOutput(size_t idx) const {
+    return ports[portNumForOutput(idx)];
+  }
+
+  void eraseInput(size_t idx) {
+    assert(idx < sizeInputs());
+    ports.erase(ports.begin() + portNumForInput(idx));
+  }
+
+private:
+  // convert input inout<type> -> inout type
+  void sanitizeInOut() {
+    for (auto &p : ports)
+      if (auto inout = dyn_cast<hw::InOutType>(p.type)) {
+        p.type = inout.getElementType();
+        p.dir = ModulePort::Direction::InOut;
+      }
+  }
+
+  /// This contains a list of all ports.  Input first.
+  SmallVector<PortInfo> ports;
 };
 
 // This provides capability for looking up port indices based on port names.
@@ -81,12 +207,16 @@ public:
   explicit ModulePortLookupInfo(MLIRContext *ctx,
                                 const ModulePortInfo &portInfo)
       : ctx(ctx) {
-    for (auto &in : portInfo.inputs)
+    for (auto &in : portInfo.getInputs())
       inputPortMap[in.name] = in.argNum;
 
-    for (auto &out : portInfo.outputs)
+    for (auto &out : portInfo.getOutputs())
       outputPortMap[out.name] = out.argNum;
   }
+
+  explicit ModulePortLookupInfo(MLIRContext *ctx,
+                                const SmallVector<PortInfo> &portInfo)
+      : ModulePortLookupInfo(ctx, ModulePortInfo(portInfo)) {}
 
   // Return the index of the input port with the specified name.
   FailureOr<unsigned> getInputPortIndex(StringAttr name) const {
@@ -119,6 +249,17 @@ LogicalResult verifyInnerSymAttr(InnerSymbolOpInterface op);
 namespace detail {
 LogicalResult verifyInnerRefNamespace(Operation *op);
 } // namespace detail
+
+/// Classify operations that are InnerRefNamespace-like,
+/// until structure is in place to do this via Traits.
+/// Useful for getParentOfType<>, or scheduling passes.
+/// Prefer putting the trait on operations here or downstream.
+struct InnerRefNamespaceLike {
+  /// Return if this operation is explicitly an IRN or appears compatible.
+  static bool classof(mlir::Operation *op);
+  /// Return if this operation is explicitly an IRN or appears compatible.
+  static bool classof(const mlir::RegisteredOperationName *opInfo);
+};
 
 } // namespace hw
 } // namespace circt
@@ -159,7 +300,7 @@ public:
 
     // InnerSymbolTable's must be directly nested within an InnerRefNamespace.
     auto *parent = op->getParentOp();
-    if (!parent || !parent->hasTrait<InnerRefNamespace>())
+    if (!parent || !isa<circt::hw::InnerRefNamespaceLike>(parent))
       return op->emitError(
           "InnerSymbolTable must have InnerRefNamespace parent");
 

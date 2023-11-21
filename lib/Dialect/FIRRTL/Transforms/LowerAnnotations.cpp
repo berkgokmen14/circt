@@ -26,6 +26,7 @@
 #include "circt/Dialect/FIRRTL/Namespace.h"
 #include "circt/Dialect/FIRRTL/Passes.h"
 #include "circt/Dialect/HW/HWAttributes.h"
+#include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/SV/SVAttributes.h"
 #include "mlir/IR/Diagnostics.h"
 #include "llvm/ADT/APSInt.h"
@@ -117,21 +118,7 @@ static FlatSymbolRefAttr buildNLA(const AnnoPathValue &target,
       FlatSymbolRefAttr::get(target.ref.getModule().getModuleNameAttr()));
 
   auto instAttr = ArrayAttr::get(state.circuit.getContext(), insts);
-
-  // Re-use NLA for this path if already created.
-  auto it = state.instPathToNLAMap.find(instAttr);
-  if (it != state.instPathToNLAMap.end()) {
-    ++state.numReusedHierPaths;
-    return it->second;
-  }
-
-  // Create the NLA
-  auto nla = b.create<hw::HierPathOp>(state.circuit.getLoc(), "nla", instAttr);
-  state.symTbl.insert(nla);
-  nla.setVisibility(SymbolTable::Visibility::Private);
-  auto sym = FlatSymbolRefAttr::get(nla);
-  state.instPathToNLAMap.insert({instAttr, sym});
-  return sym;
+  return state.hierPathCache.getRefFor(instAttr);
 }
 
 /// Scatter breadcrumb annotations corresponding to non-local annotations
@@ -176,8 +163,8 @@ static std::optional<AnnoPathValue> stdResolveImpl(StringRef rawPath,
 /// (SFC) FIRRTL SingleTargetAnnotation resolver.  Uses the 'target' field of
 /// the annotation with standard parsing to resolve the path.  This requires
 /// 'target' to exist and be normalized (per docs/FIRRTLAnnotations.md).
-static std::optional<AnnoPathValue> stdResolve(DictionaryAttr anno,
-                                               ApplyState &state) {
+std::optional<AnnoPathValue> circt::firrtl::stdResolve(DictionaryAttr anno,
+                                                       ApplyState &state) {
   auto target = anno.getNamed("target");
   if (!target) {
     mlir::emitError(state.circuit.getLoc())
@@ -193,8 +180,8 @@ static std::optional<AnnoPathValue> stdResolve(DictionaryAttr anno,
 }
 
 /// Resolves with target, if it exists.  If not, resolves to the circuit.
-static std::optional<AnnoPathValue> tryResolve(DictionaryAttr anno,
-                                               ApplyState &state) {
+std::optional<AnnoPathValue> circt::firrtl::tryResolve(DictionaryAttr anno,
+                                                       ApplyState &state) {
   auto target = anno.getNamed("target");
   if (target)
     return stdResolveImpl(cast<StringAttr>(target->getValue()).getValue(),
@@ -208,10 +195,11 @@ static std::optional<AnnoPathValue> tryResolve(DictionaryAttr anno,
 
 /// An applier which puts the annotation on the target and drops the 'target'
 /// field from the annotation.  Optionally handles non-local annotations.
-static LogicalResult applyWithoutTargetImpl(const AnnoPathValue &target,
-                                            DictionaryAttr anno,
-                                            ApplyState &state,
-                                            bool allowNonLocal) {
+LogicalResult circt::firrtl::applyWithoutTargetImpl(const AnnoPathValue &target,
+
+                                                    DictionaryAttr anno,
+                                                    ApplyState &state,
+                                                    bool allowNonLocal) {
   if (!allowNonLocal && !target.isLocal()) {
     Annotation annotation(anno);
     auto diag = mlir::emitError(target.ref.getOp()->getLoc())
@@ -236,47 +224,12 @@ static LogicalResult applyWithoutTargetImpl(const AnnoPathValue &target,
   return success();
 }
 
-/// An applier which puts the annotation on the target and drops the 'target'
-/// field from the annotation.  Optionally handles non-local annotations.
-/// Ensures the target resolves to an expected type of operation.
-template <bool allowNonLocal, bool allowPortAnnoTarget, typename T,
-          typename... Tr>
-static LogicalResult applyWithoutTarget(const AnnoPathValue &target,
-                                        DictionaryAttr anno,
-                                        ApplyState &state) {
-  if (target.ref.isa<PortAnnoTarget>()) {
-    if (!allowPortAnnoTarget)
-      return failure();
-  } else if (!target.isOpOfType<T, Tr...>())
-    return failure();
-
-  return applyWithoutTargetImpl(target, anno, state, allowNonLocal);
-}
-
-template <bool allowNonLocal, typename T, typename... Tr>
-static LogicalResult applyWithoutTarget(const AnnoPathValue &target,
-                                        DictionaryAttr anno,
-                                        ApplyState &state) {
-  return applyWithoutTarget<allowNonLocal, false, T, Tr...>(target, anno,
-                                                            state);
-}
-
-/// An applier which puts the annotation on the target and drops the 'target'
-/// field from the annotaiton.  Optionally handles non-local annotations.
-template <bool allowNonLocal = false>
-static LogicalResult applyWithoutTarget(const AnnoPathValue &target,
-                                        DictionaryAttr anno,
-                                        ApplyState &state) {
-  return applyWithoutTargetImpl(target, anno, state, allowNonLocal);
-}
-
 /// Just drop the annotation.  This is intended for Annotations which are known,
 /// but can be safely ignored.
-static LogicalResult drop(const AnnoPathValue &target, DictionaryAttr anno,
-                          ApplyState &state) {
+LogicalResult drop(const AnnoPathValue &target, DictionaryAttr anno,
+                   ApplyState &state) {
   return success();
 }
-
 //===----------------------------------------------------------------------===//
 // Customized Appliers
 //===----------------------------------------------------------------------===//
@@ -436,15 +389,7 @@ static LogicalResult applyLoadMemoryAnno(const AnnoPathValue &target,
 // Driving table
 //===----------------------------------------------------------------------===//
 
-namespace {
-struct AnnoRecord {
-  llvm::function_ref<std::optional<AnnoPathValue>(DictionaryAttr, ApplyState &)>
-      resolver;
-  llvm::function_ref<LogicalResult(const AnnoPathValue &, DictionaryAttr,
-                                   ApplyState &)>
-      applier;
-};
-
+namespace circt::firrtl {
 /// Resolution and application of a "firrtl.annotations.NoTargetAnnotation".
 /// This should be used for any Annotation which does not apply to anything in
 /// the FIRRTL Circuit, i.e., an Annotation which has no target.  Historically,
@@ -460,9 +405,7 @@ struct AnnoRecord {
 static AnnoRecord NoTargetAnnotation = {noResolve,
                                         applyWithoutTarget<false, CircuitOp>};
 
-} // end anonymous namespace
-
-static const llvm::StringMap<AnnoRecord> annotationRecords{{
+static llvm::StringMap<AnnoRecord> annotationRecords{{
 
     // Testing Annotation
     {"circt.test", {stdResolve, applyWithoutTarget<true>}},
@@ -520,6 +463,8 @@ static const llvm::StringMap<AnnoRecord> annotationRecords{{
     {inlineAnnoClass, {stdResolve, applyWithoutTarget<false, FModuleOp>}},
     {noDedupAnnoClass,
      {stdResolve, applyWithoutTarget<false, FModuleOp, FExtModuleOp>}},
+    {dedupGroupAnnoClass,
+     {stdResolve, applyWithoutTarget<false, FModuleOp, FExtModuleOp>}},
     {blackBoxInlineAnnoClass,
      {stdResolve, applyWithoutTarget<false, FExtModuleOp>}},
     {blackBoxPathAnnoClass,
@@ -566,20 +511,29 @@ static const llvm::StringMap<AnnoRecord> annotationRecords{{
     {wiringSourceAnnoClass, {stdResolve, applyWiring}},
     {attributeAnnoClass, {stdResolve, applyAttributeAnnotation}}}};
 
+LogicalResult
+registerAnnotationRecord(StringRef annoClass, AnnoRecord annoRecord,
+                         const std::function<void(llvm::Twine)> &errorHandler) {
+
+  if (annotationRecords.insert({annoClass, annoRecord}).second)
+    return LogicalResult::success();
+  if (errorHandler)
+    errorHandler("annotation record '" + annoClass + "' is registered twice\n");
+  return LogicalResult::failure();
+}
+
+} // namespace circt::firrtl
+
 /// Lookup a record for a given annotation class.  Optionally, returns the
 /// record for "circuit.missing" if the record doesn't exist.
 static const AnnoRecord *getAnnotationHandler(StringRef annoStr,
-                                              bool ignoreUnhandledAnno) {
+                                              bool ignoreAnnotationUnknown) {
   auto ii = annotationRecords.find(annoStr);
   if (ii != annotationRecords.end())
     return &ii->second;
-  if (ignoreUnhandledAnno)
+  if (ignoreAnnotationUnknown)
     return &annotationRecords.find("circt.missing")->second;
   return nullptr;
-}
-
-bool firrtl::isAnnoClassLowered(StringRef className) {
-  return annotationRecords.count(className);
 }
 
 //===----------------------------------------------------------------------===//
@@ -594,9 +548,9 @@ struct LowerAnnotationsPass
   LogicalResult legacyToWiringProblems(ApplyState &state);
   LogicalResult solveWiringProblems(ApplyState &state);
 
-  bool ignoreUnhandledAnno = false;
-  bool ignoreClasslessAnno = false;
-  bool noRefTypePorts = false;
+  using LowerFIRRTLAnnotationsBase::ignoreAnnotationClassless;
+  using LowerFIRRTLAnnotationsBase::ignoreAnnotationUnknown;
+  using LowerFIRRTLAnnotationsBase::noRefTypePorts;
   SmallVector<DictionaryAttr> worklistAttrs;
 };
 } // end anonymous namespace
@@ -609,7 +563,7 @@ LogicalResult LowerAnnotationsPass::applyAnnotation(DictionaryAttr anno,
   StringRef annoClassVal;
   if (auto annoClass = anno.getNamed("class"))
     annoClassVal = cast<StringAttr>(annoClass->getValue()).getValue();
-  else if (ignoreClasslessAnno)
+  else if (ignoreAnnotationClassless)
     annoClassVal = "circt.missing";
   else
     return mlir::emitError(state.circuit.getLoc())
@@ -619,12 +573,12 @@ LogicalResult LowerAnnotationsPass::applyAnnotation(DictionaryAttr anno,
   auto *record = getAnnotationHandler(annoClassVal, false);
   if (!record) {
     ++numUnhandled;
-    if (!ignoreUnhandledAnno)
+    if (!ignoreAnnotationUnknown)
       return mlir::emitError(state.circuit.getLoc())
              << "Unhandled annotation: " << anno;
 
     // Try again, requesting the fallback handler.
-    record = getAnnotationHandler(annoClassVal, ignoreUnhandledAnno);
+    record = getAnnotationHandler(annoClassVal, ignoreAnnotationUnknown);
     assert(record);
   }
 
@@ -852,12 +806,12 @@ LogicalResult LowerAnnotationsPass::solveWiringProblems(ApplyState &state) {
     auto sources = sourcePaths[0];
     auto sinks = sinkPaths[0];
     while (!sources.empty() && !sinks.empty()) {
-      if (sources[0] != sinks[0])
+      if (sources.top() != sinks.top())
         break;
-      auto newLCA = sources[0];
-      lca = cast<FModuleOp>(instanceGraph.getReferencedModule(newLCA));
-      sources = sources.drop_front();
-      sinks = sinks.drop_front();
+      auto newLCA = cast<InstanceOp>(*sources.top());
+      lca = cast<FModuleOp>(newLCA.getReferencedModule(instanceGraph));
+      sources = sources.dropFront();
+      sinks = sinks.dropFront();
     }
 
     LLVM_DEBUG({
@@ -928,15 +882,18 @@ LogicalResult LowerAnnotationsPass::solveWiringProblems(ApplyState &state) {
              << "\" must be passive (no flips) when using references";
 
     // Record module modifications related to adding ports to modules.
-    auto addPorts = [&](ArrayRef<hw::HWInstanceLike> insts, Value val, Type tpe,
+    auto addPorts = [&](igraph::InstancePath insts, Value val, Type tpe,
                         Direction dir) {
       StringRef name, instName;
-      for (auto inst : llvm::reverse(insts)) {
-        auto mod = cast<FModuleOp>(instanceGraph.getReferencedModule(inst));
+      for (auto instNode : llvm::reverse(insts)) {
+        auto inst = cast<InstanceOp>(*instNode);
+        auto mod = inst.getReferencedModule<FModuleOp>(instanceGraph);
         if (name.empty()) {
           if (problem.newNameHint.empty())
             name = state.getNamespace(mod).newName(
-                getFieldName(getFieldRefFromValue(val), /*nameSafe=*/true)
+                getFieldName(
+                    getFieldRefFromValue(val, /*lookThroughCasts=*/true),
+                    /*nameSafe=*/true)
                     .first +
                 "__bore");
           else
@@ -1080,7 +1037,8 @@ void LowerAnnotationsPass::runOnOperation() {
     worklistAttrs.push_back(anno);
   };
   InstancePathCache instancePathCache(getAnalysis<InstanceGraph>());
-  ApplyState state{circuit, modules, addToWorklist, instancePathCache};
+  ApplyState state{circuit, modules, addToWorklist, instancePathCache,
+                   noRefTypePorts};
   LLVM_DEBUG(llvm::dbgs() << "Processing annotations:\n");
   while (!worklistAttrs.empty()) {
     auto attr = worklistAttrs.pop_back_val();
@@ -1106,12 +1064,12 @@ void LowerAnnotationsPass::runOnOperation() {
 
 /// This is the pass constructor.
 std::unique_ptr<mlir::Pass>
-circt::firrtl::createLowerFIRRTLAnnotationsPass(bool ignoreUnhandledAnnotations,
-                                                bool ignoreClasslessAnnotations,
+circt::firrtl::createLowerFIRRTLAnnotationsPass(bool ignoreAnnotationUnknown,
+                                                bool ignoreAnnotationClassless,
                                                 bool noRefTypePorts) {
   auto pass = std::make_unique<LowerAnnotationsPass>();
-  pass->ignoreUnhandledAnno = ignoreUnhandledAnnotations;
-  pass->ignoreClasslessAnno = ignoreClasslessAnnotations;
+  pass->ignoreAnnotationUnknown = ignoreAnnotationUnknown;
+  pass->ignoreAnnotationClassless = ignoreAnnotationClassless;
   pass->noRefTypePorts = noRefTypePorts;
   return pass;
 }

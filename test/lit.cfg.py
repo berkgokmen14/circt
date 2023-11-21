@@ -56,9 +56,9 @@ tool_dirs = [
     config.circt_tools_dir, config.mlir_tools_dir, config.llvm_tools_dir
 ]
 tools = [
-    'firtool', 'circt-as', 'circt-dis', 'circt-opt', 'circt-reduce',
-    'circt-translate', 'circt-capi-ir-test', 'circt-capi-om-test', 'esi-tester',
-    'hlstool', 'arcilator'
+    'arcilator', 'circt-as', 'circt-capi-ir-test', 'circt-capi-om-test',
+    'circt-capi-firrtl-test', 'circt-dis', 'circt-opt', 'circt-reduce',
+    'circt-translate', 'firtool', 'hlstool', 'om-linker', 'ibistool'
 ]
 
 # Enable Verilator if it has been detected.
@@ -70,6 +70,9 @@ if config.verilator_path != "":
 # Enable ESI's Capnp tests if they're supported.
 if config.esi_capnp != "":
   config.available_features.add('capnp')
+
+if config.zlib == "1":
+  config.available_features.add('zlib')
 
 # Enable tests for schedulers relying on an external solver from OR-Tools.
 if config.scheduling_or_tools != "":

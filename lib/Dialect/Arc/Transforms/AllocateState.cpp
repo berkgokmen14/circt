@@ -6,10 +6,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "PassDetails.h"
+#include "circt/Dialect/Arc/ArcOps.h"
+#include "circt/Dialect/Arc/ArcPasses.h"
+#include "mlir/IR/ImplicitLocOpBuilder.h"
+#include "mlir/Pass/Pass.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "arc-allocate-state"
+
+namespace circt {
+namespace arc {
+#define GEN_PASS_DEF_ALLOCATESTATE
+#include "circt/Dialect/Arc/ArcPasses.h.inc"
+} // namespace arc
+} // namespace circt
 
 using namespace mlir;
 using namespace circt;
@@ -22,7 +32,8 @@ using llvm::SmallMapVector;
 //===----------------------------------------------------------------------===//
 
 namespace {
-struct AllocateStatePass : public AllocateStateBase<AllocateStatePass> {
+struct AllocateStatePass
+    : public arc::impl::AllocateStateBase<AllocateStatePass> {
   void runOnOperation() override;
   void allocateBlock(Block *block);
   void allocateOps(Value storage, Block *block, ArrayRef<Operation *> ops);
@@ -65,8 +76,8 @@ void AllocateStatePass::allocateOps(Value storage, Block *block,
   // most.
   unsigned currentByte = 0;
   auto allocBytes = [&](unsigned numBytes) {
-    currentByte = llvm::alignToPowerOf2(currentByte,
-                                        llvm::bit_ceil(std::min(numBytes, 8U)));
+    currentByte = llvm::alignToPowerOf2(
+        currentByte, llvm::bit_ceil(std::min(numBytes, 16U)));
     unsigned offset = currentByte;
     currentByte += numBytes;
     return offset;
@@ -78,8 +89,7 @@ void AllocateStatePass::allocateOps(Value storage, Block *block,
     if (isa<AllocStateOp, RootInputOp, RootOutputOp>(op)) {
       auto result = op->getResult(0);
       auto storage = op->getOperand(0);
-      auto intType = result.getType().cast<StateType>().getType();
-      unsigned numBytes = (intType.getWidth() + 7) / 8;
+      unsigned numBytes = result.getType().cast<StateType>().getByteWidth();
       auto offset = builder.getI32IntegerAttr(allocBytes(numBytes));
       op->setAttr("offset", offset);
       gettersToCreate.emplace_back(result, storage, offset);

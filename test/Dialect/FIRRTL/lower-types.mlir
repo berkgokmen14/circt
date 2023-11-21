@@ -1,5 +1,5 @@
-// RUN: circt-opt -pass-pipeline='builtin.module(firrtl.circuit(firrtl-lower-types))' %s | FileCheck --check-prefixes=CHECK,COMMON %s
-// RUN: circt-opt -pass-pipeline='builtin.module(firrtl.circuit(firrtl-lower-types{preserve-aggregate=all}))' %s | FileCheck --check-prefixes=AGGREGATE,COMMON %s
+// RUN: circt-opt -pass-pipeline='builtin.module(firrtl.circuit(firrtl-lower-types))' --allow-unregistered-dialect %s | FileCheck --check-prefixes=CHECK,COMMON %s
+// RUN: circt-opt -pass-pipeline='builtin.module(firrtl.circuit(firrtl-lower-types{preserve-aggregate=all}))' --allow-unregistered-dialect %s | FileCheck --check-prefixes=AGGREGATE,COMMON %s
 
 
 firrtl.circuit "TopLevel" {
@@ -612,7 +612,7 @@ firrtl.circuit "TopLevel" {
 
 // Test wire connection semantics.  Based on the flippedness of the destination
 // type, the connection may be reversed.
-// CHECK-LABEL firrtl.module private @WireSemantics
+// CHECK-LABEL: firrtl.module private @WireSemantics
   firrtl.module private @WireSemantics() {
     %a = firrtl.wire  : !firrtl.bundle<a: bundle<a: uint<1>>>
     %ax = firrtl.wire  : !firrtl.bundle<a: bundle<a: uint<1>>>
@@ -635,8 +635,8 @@ firrtl.circuit "TopLevel" {
     // CHECK: firrtl.connect %a_a_a, %ax_a_a
     %b = firrtl.wire  : !firrtl.bundle<a: bundle<a flip: uint<1>>>
     %bx = firrtl.wire  : !firrtl.bundle<a: bundle<a flip: uint<1>>>
-    // CHECK %b_a_a = firrtl.wire
-    // CHECK %bx_a_a = firrtl.wire
+    // CHECK: %b_a_a = firrtl.wire
+    // CHECK: %bx_a_a = firrtl.wire
     firrtl.connect %b, %bx : !firrtl.bundle<a: bundle<a flip: uint<1>>>, !firrtl.bundle<a: bundle<a flip: uint<1>>>
     // b <= bx
     // CHECK: firrtl.strictconnect %bx_a_a, %b_a_a
@@ -908,10 +908,10 @@ firrtl.circuit "TopLevel" {
   }
 
 // Test InstanceOp with port annotations.
-// CHECK-LABEL firrtl.module private @Bar3
+// CHECK-LABEL: firrtl.module private @Bar3
   firrtl.module private @Bar3(in %a: !firrtl.uint<1>, out %b: !firrtl.bundle<baz: uint<1>, qux: uint<1>>) {
   }
-  // CHECK-LABEL firrtl.module private @Foo3
+  // CHECK-LABEL: firrtl.module private @Foo3
   firrtl.module private @Foo3() {
     // CHECK: in a: !firrtl.uint<1> [{one}], out b_baz: !firrtl.uint<1> [{two}], out b_qux: !firrtl.uint<1>
     %bar_a, %bar_b = firrtl.instance bar @Bar3(
@@ -1283,6 +1283,13 @@ firrtl.module private @is1436_FOO() {
       %a = firrtl.wire : !firrtl.bundle<b: uint<1>>
     }
   }
+
+  // CHECK-LABEL:  firrtl.module @Alias
+  // CHECK-NOT: alias
+  // AGGREGATE-LABEL: firrtl.module @Alias
+  // AGGREGATE-SAME: alias<FooBundle, bundle<x: uint<32>, y: uint<32>>>
+  firrtl.module @Alias(in %clock: !firrtl.clock, in %reset: !firrtl.uint<1>, out %io: !firrtl.bundle<in flip: alias<FooBundle, bundle<x: uint<32>, y: uint<32>>>, out: alias<FooBundle, bundle<x: uint<32>, y: uint<32>>>>) {
+  }
 } // CIRCUIT
 
 // Check that we don't lose the DontTouchAnnotation when it is not the last
@@ -1325,4 +1332,43 @@ firrtl.circuit "InnerSym" {
   // CHECK-SAME: in %x_a_x_1: !firrtl.uint<3> sym @x_1
   // CHECK-SAME: in %x_a_y: !firrtl.uint<2> sym @y
   firrtl.module @InnerSymMore(in %x: !firrtl.bundle<a: bundle<x: vector<uint<3>, 2>, y: uint<2>>, b: uint<3>> sym [<@y,5, public>,<@x_1,4,public>]) { }
+}
+
+// Check handling of wire of probe-aggregate.
+// COMMON-LABEL: "WireProbe"
+firrtl.circuit "WireProbe" {
+  // (Read-only probes are unconditionally split as workaround for 4479)
+  // COMMON-LABEL: module private @SPassthrough
+  // COMMON-SAME: in %in_a: !firrtl.probe<uint<5>>
+  // COMMON-SAME: in %in_b: !firrtl.probe<uint<5>>
+  firrtl.module private @SPassthrough(in %in: !firrtl.probe<bundle<a: uint<5>, b: uint<5>>>,
+                                      out %y: !firrtl.probe<uint<5>>,
+                                      out %z: !firrtl.probe<uint<5>>) {
+    // COMMON-NEXT: %w_a = firrtl.wire
+    // COMMON-NEXT: %w_b = firrtl.wire
+    // COMMON-NOT: firrtl.ref.sub
+    // COMMON: }
+    %w = firrtl.wire : !firrtl.probe<bundle<a: uint<5>, b: uint<5>>>
+    %0 = firrtl.ref.sub %w[1] : !firrtl.probe<bundle<a: uint<5>, b: uint<5>>>
+    %1 = firrtl.ref.sub %w[0] : !firrtl.probe<bundle<a: uint<5>, b: uint<5>>>
+    firrtl.ref.define %y, %1 : !firrtl.probe<uint<5>>
+    firrtl.ref.define %z, %0 : !firrtl.probe<uint<5>>
+  }
+  firrtl.module @WireProbe(in %x: !firrtl.bundle<a: uint<5>, b: uint<5>>,
+                           out %y: !firrtl.probe<uint<5>>,
+                           out %z: !firrtl.probe<uint<5>>) {
+    %sp_in, %sp_y, %sp_z = firrtl.instance sp @SPassthrough(in in: !firrtl.probe<bundle<a: uint<5>, b: uint<5>>>, out y: !firrtl.probe<uint<5>>, out z: !firrtl.probe<uint<5>>)
+    %0 = firrtl.ref.send %x : !firrtl.bundle<a: uint<5>, b: uint<5>>
+    firrtl.ref.define %sp_in, %0 : !firrtl.probe<bundle<a: uint<5>, b: uint<5>>>
+    firrtl.ref.define %y, %sp_y : !firrtl.probe<uint<5>>
+    firrtl.ref.define %z, %sp_z : !firrtl.probe<uint<5>>
+  }
+  firrtl.module @UnrealizedConversion( ){
+    // CHECK: %[[a:.+]] = "d.w"() : () -> !hw.struct<data: i64, tag: i1>
+    // CHECK: = builtin.unrealized_conversion_cast %[[a]] : !hw.struct<data: i64, tag: i1> to !firrtl.bundle<data: uint<64>, tag: uint<1>>
+    %a = "d.w"() : () -> (!hw.struct<data: i64, tag: i1>)
+    %b = builtin.unrealized_conversion_cast %a : !hw.struct<data: i64, tag: i1> to !firrtl.bundle<data: uint<64>, tag: uint<1>>
+    %w = firrtl.wire : !firrtl.bundle<data: uint<64>, tag: uint<1>>
+    firrtl.strictconnect %w, %b : !firrtl.bundle<data: uint<64>, tag: uint<1>>
+  }
 }

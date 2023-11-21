@@ -3,9 +3,13 @@
 firrtl.circuit "Intrinsics" {
   // CHECK-LABEL: hw.module @Intrinsics
   firrtl.module @Intrinsics(in %clk: !firrtl.clock, in %a: !firrtl.uint<1>) {
+    // CHECK-NEXT: %c0_i32 = hw.constant 0 : i32
+    // CHECK-NEXT: %z_i5 = sv.constantZ : i5
+    // CHECK-NEXT: %false = hw.constant false
+    // CHECK-NEXT: [[CLK:%.+]] = seq.from_clock %clk
     // CHECK-NEXT: %x_i1 = sv.constantX : i1
     // CHECK-NEXT: [[T0:%.+]] = comb.icmp bin ceq %a, %x_i1
-    // CHECK-NEXT: [[T1:%.+]] = comb.icmp bin ceq %clk, %x_i1
+    // CHECK-NEXT: [[T1:%.+]] = comb.icmp bin ceq [[CLK]], %x_i1
     // CHECK-NEXT: %x0 = hw.wire [[T0]]
     // CHECK-NEXT: %x1 = hw.wire [[T1]]
     %0 = firrtl.int.isX %a : !firrtl.uint<1>
@@ -15,15 +19,25 @@ firrtl.circuit "Intrinsics" {
 
     // CHECK-NEXT: [[FOO_STR:%.*]] = sv.constantStr "foo"
     // CHECK-NEXT: [[FOO_DECL:%.*]] = sv.reg : !hw.inout<i1>
-    // CHECK-NEXT: [[FOO:%.*]] = sv.read_inout [[FOO_DECL]]
-    // CHECK-NEXT: [[BAR_STR:%.*]] = sv.constantStr "bar"
-    // CHECK-NEXT: [[BAR_VALUE_DECL:%.*]] = sv.reg : !hw.inout<i5>
-    // CHECK-NEXT: [[BAR_FOUND_DECL:%.*]] = sv.reg : !hw.inout<i1>
     // CHECK-NEXT: sv.initial {
     // CHECK-NEXT:   [[TMP:%.*]] = sv.system "test$plusargs"([[FOO_STR]])
-    // CHECK-NEXT:   sv.passign [[FOO_DECL]], [[TMP]]
-    // CHECK-NEXT:   [[TMP:%.*]] = sv.system "value$plusargs"([[BAR_STR]], [[BAR_VALUE_DECL]])
-    // CHECK-NEXT:   sv.passign [[BAR_FOUND_DECL]], [[TMP]]
+    // CHECK-NEXT:   sv.bpassign [[FOO_DECL]], [[TMP]]
+    // CHECK-NEXT: }
+    // CHECK-NEXT: [[FOO:%.*]] = sv.read_inout [[FOO_DECL]]
+    // CHECK-NEXT: [[BAR_VALUE_DECL:%.*]] = sv.reg : !hw.inout<i5>
+    // CHECK-NEXT: [[BAR_FOUND_DECL:%.*]] = sv.reg : !hw.inout<i1>
+    // CHECK-NEXT: sv.ifdef "SYNTHESIS" {
+    // CHECK-NEXT:   sv.assign [[BAR_VALUE_DECL]], %z_i5
+    // CHECK-SAME:     #sv.attribute<"This dummy assignment exists to avoid undriven lint warnings
+    // CHECK-SAME:     emitAsComment
+    // CHECK-NEXT:   sv.assign [[BAR_FOUND_DECL]], %false
+    // CHECK-NEXT: } else {
+    // CHECK-NEXT:   sv.initial {
+    // CHECK-NEXT:     [[BAR_STR:%.*]] = sv.constantStr "bar"
+    // CHECK-NEXT:     [[TMP:%.*]] = sv.system "value$plusargs"([[BAR_STR]], [[BAR_VALUE_DECL]])
+    // CHECK-NEXT:     [[TMP2:%.*]] = comb.icmp bin ne [[TMP]], %c0_i32
+    // CHECK-NEXT:     sv.bpassign [[BAR_FOUND_DECL]], [[TMP2]]
+    // CHECK-NEXT:   }
     // CHECK-NEXT: }
     // CHECK-NEXT: [[BAR_FOUND:%.*]] = sv.read_inout [[BAR_FOUND_DECL]]
     // CHECK-NEXT: [[BAR_VALUE:%.*]] = sv.read_inout [[BAR_VALUE_DECL]]
@@ -56,6 +70,7 @@ firrtl.circuit "Intrinsics" {
 
   // CHECK-LABEL: hw.module @LTLAndVerif
   firrtl.module @LTLAndVerif(in %clk: !firrtl.clock, in %a: !firrtl.uint<1>, in %b: !firrtl.uint<1>) {
+    // CHECK-NEXT: [[CLK:%.+]] = seq.from_clock %clk
     // CHECK-NEXT: [[D0:%.+]] = ltl.delay %a, 42 : i1
     // CHECK-NEXT: [[D1:%.+]] = ltl.delay %b, 42, 1337 : i1
     %d0 = firrtl.int.ltl.delay %a, 42 : (!firrtl.uint<1>) -> !firrtl.uint<1>
@@ -78,7 +93,7 @@ firrtl.circuit "Intrinsics" {
     // CHECK-NEXT: [[E0:%.+]] = ltl.eventually [[I0]] : !ltl.property
     %e0 = firrtl.int.ltl.eventually %i0 : (!firrtl.uint<1>) -> !firrtl.uint<1>
 
-    // CHECK-NEXT: [[K0:%.+]] = ltl.clock [[I0]], posedge %clk : !ltl.property
+    // CHECK-NEXT: [[K0:%.+]] = ltl.clock [[I0]], posedge [[CLK]] : !ltl.property
     %k0 = firrtl.int.ltl.clock %i0, %clk : (!firrtl.uint<1>, !firrtl.clock) -> !firrtl.uint<1>
 
     // CHECK-NEXT: [[D2:%.+]] = ltl.disable [[K0]] if %b : !ltl.property
@@ -142,5 +157,23 @@ firrtl.circuit "Intrinsics" {
     // CHECK-NEXT: [[C]] = ltl.delay %a, 42 : i1
     %0 = firrtl.int.ltl.delay %a, 42 : (!firrtl.uint<1>) -> !firrtl.uint<1>
     firrtl.strictconnect %c, %0 : !firrtl.uint<1>
+  }
+
+  // CHECK-LABEL: hw.module @HasBeenReset
+  firrtl.module @HasBeenReset(
+    in %clock: !firrtl.clock,
+    in %reset1: !firrtl.uint<1>,
+    in %reset2: !firrtl.asyncreset,
+    out %hbr1: !firrtl.uint<1>,
+    out %hbr2: !firrtl.uint<1>
+  ) {
+    // CHECK-NEXT: [[CLK:%.+]] = seq.from_clock %clock
+    // CHECK-NEXT: [[TMP1:%.+]] = verif.has_been_reset [[CLK]], sync %reset1
+    // CHECK-NEXT: [[TMP2:%.+]] = verif.has_been_reset [[CLK]], async %reset2
+    // CHECK-NEXT: hw.output [[TMP1]], [[TMP2]]
+    %0 = firrtl.int.has_been_reset %clock, %reset1 : !firrtl.uint<1>
+    %1 = firrtl.int.has_been_reset %clock, %reset2 : !firrtl.asyncreset
+    firrtl.strictconnect %hbr1, %0 : !firrtl.uint<1>
+    firrtl.strictconnect %hbr2, %1 : !firrtl.uint<1>
   }
 }

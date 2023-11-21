@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+include "circt/Dialect/ESI/ESIServices.td"
 include "circt/Dialect/HW/HWTypes.td"
 
 def RandomAccessMemoryDeclOp: ESI_Op<"mem.ram",
@@ -30,5 +31,12 @@ def RandomAccessMemoryDeclOp: ESI_Op<"mem.ram",
 
   let assemblyFormat = [{
     $sym_name $innerType `x` $depth attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    ServicePortInfo readPortInfo();
+    ServicePortInfo writePortInfo();
+    static constexpr auto ReqDirChannelIdx = 0;
+    static constexpr auto RespDirChannelIdx = 0;
   }];
 }

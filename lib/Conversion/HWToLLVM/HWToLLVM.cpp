@@ -35,7 +35,7 @@ circt::HWToLLVMEndianessConverter::convertToLLVMEndianess(Type type,
   // This is hardcoded for little endian machines for now.
   return TypeSwitch<Type, uint32_t>(type)
       .Case<hw::ArrayType>(
-          [&](hw::ArrayType ty) { return ty.getSize() - index - 1; })
+          [&](hw::ArrayType ty) { return ty.getNumElements() - index - 1; })
       .Case<hw::StructType>([&](hw::StructType ty) {
         return ty.getElements().size() - index - 1;
       });
@@ -123,8 +123,8 @@ struct StructExtractOpConversion
   matchAndRewrite(hw::StructExtractOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    uint32_t fieldIndex = HWToLLVMEndianessConverter::llvmIndexOfStructField(
-        op.getInput().getType().cast<hw::StructType>(), op.getField());
+    uint32_t fieldIndex = HWToLLVMEndianessConverter::convertToLLVMEndianess(
+        op.getInput().getType(), op.getFieldIndex());
     rewriter.replaceOpWithNewOp<LLVM::ExtractValueOp>(op, adaptor.getInput(),
                                                       fieldIndex);
     return success();
@@ -153,21 +153,22 @@ struct ArrayGetOpConversion : public ConvertOpToLLVMPattern<hw::ArrayGetOp> {
           op->getLoc(), IntegerType::get(rewriter.getContext(), 32),
           rewriter.getI32IntegerAttr(1));
       arrPtr = rewriter.create<LLVM::AllocaOp>(
-          op->getLoc(),
-          LLVM::LLVMPointerType::get(adaptor.getInput().getType()), oneC,
+          op->getLoc(), LLVM::LLVMPointerType::get(rewriter.getContext()),
+          adaptor.getInput().getType(), oneC,
           /*alignment=*/4);
       rewriter.create<LLVM::StoreOp>(op->getLoc(), adaptor.getInput(), arrPtr);
     }
 
+    auto arrTy = typeConverter->convertType(op.getInput().getType());
     auto elemTy = typeConverter->convertType(op.getResult().getType());
-
-    auto zeroC = rewriter.create<LLVM::ConstantOp>(
-        op->getLoc(), IntegerType::get(rewriter.getContext(), 32),
-        rewriter.getI32IntegerAttr(0));
     auto zextIndex = zextByOne(op->getLoc(), rewriter, op.getIndex());
+
+    // During the ongoing migration to opaque types, use the constructor that
+    // accepts an element type when the array pointer type is opaque, and
+    // otherwise use the typed pointer constructor.
     auto gep = rewriter.create<LLVM::GEPOp>(
-        op->getLoc(), LLVM::LLVMPointerType::get(elemTy), arrPtr,
-        ArrayRef<Value>({zeroC, zextIndex}));
+        op->getLoc(), LLVM::LLVMPointerType::get(rewriter.getContext()), arrTy,
+        arrPtr, ArrayRef<LLVM::GEPArg>{0, zextIndex});
     rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, elemTy, gep);
 
     return success();
@@ -188,31 +189,27 @@ struct ArraySliceOpConversion
                   ConversionPatternRewriter &rewriter) const override {
 
     auto dstTy = typeConverter->convertType(op.getDst().getType());
-    auto elemTy = typeConverter->convertType(
-        op.getDst().getType().cast<hw::ArrayType>().getElementType());
 
-    auto zeroC = rewriter.create<LLVM::ConstantOp>(
-        op->getLoc(), rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
     auto oneC = rewriter.create<LLVM::ConstantOp>(
         op->getLoc(), rewriter.getI32Type(), rewriter.getI32IntegerAttr(1));
 
     auto arrPtr = rewriter.create<LLVM::AllocaOp>(
-        op->getLoc(), LLVM::LLVMPointerType::get(adaptor.getInput().getType()),
-        oneC,
+        op->getLoc(), LLVM::LLVMPointerType::get(rewriter.getContext()),
+        adaptor.getInput().getType(), oneC,
         /*alignment=*/4);
 
     rewriter.create<LLVM::StoreOp>(op->getLoc(), adaptor.getInput(), arrPtr);
 
     auto zextIndex = zextByOne(op->getLoc(), rewriter, op.getLowIndex());
 
+    // During the ongoing migration to opaque types, use the constructor that
+    // accepts an element type when the array pointer type is opaque, and
+    // otherwise use the typed pointer constructor.
     auto gep = rewriter.create<LLVM::GEPOp>(
-        op->getLoc(), LLVM::LLVMPointerType::get(elemTy), arrPtr,
-        ArrayRef<Value>({zeroC, zextIndex}));
+        op->getLoc(), LLVM::LLVMPointerType::get(rewriter.getContext()), dstTy,
+        arrPtr, ArrayRef<LLVM::GEPArg>{0, zextIndex});
 
-    auto cast = rewriter.create<LLVM::BitcastOp>(
-        op->getLoc(), LLVM::LLVMPointerType::get(dstTy), gep);
-
-    rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, dstTy, cast);
+    rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, dstTy, gep);
 
     return success();
   }
@@ -235,9 +232,8 @@ struct StructInjectOpConversion
   matchAndRewrite(hw::StructInjectOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
 
-    uint32_t fieldIndex = HWToLLVMEndianessConverter::llvmIndexOfStructField(
-        op.getInput().getType().cast<hw::StructType>(),
-        op.getFieldAttr().getValue());
+    uint32_t fieldIndex = HWToLLVMEndianessConverter::convertToLLVMEndianess(
+        op.getInput().getType(), op.getFieldIndex());
 
     rewriter.replaceOpWithNewOp<LLVM::InsertValueOp>(
         op, adaptor.getInput(), op.getNewValue(), fieldIndex);
@@ -269,13 +265,14 @@ struct ArrayConcatOpConversion
     // Attention: j is hardcoded for little endian machines.
     size_t j = op.getInputs().size() - 1, k = 0;
 
-    for (size_t i = 0, e = arrTy.getSize(); i < e; ++i) {
+    for (size_t i = 0, e = arrTy.getNumElements(); i < e; ++i) {
       Value element = rewriter.create<LLVM::ExtractValueOp>(
           op->getLoc(), adaptor.getInputs()[j], k);
       arr = rewriter.create<LLVM::InsertValueOp>(op->getLoc(), arr, element, i);
 
       ++k;
-      if (k >= op.getInputs()[j].getType().cast<hw::ArrayType>().getSize()) {
+      if (k >=
+          op.getInputs()[j].getType().cast<hw::ArrayType>().getNumElements()) {
         k = 0;
         --j;
       }
@@ -309,16 +306,13 @@ struct BitcastOpConversion : public ConvertOpToLLVMPattern<hw::BitcastOp> {
         op->getLoc(), rewriter.getI32Type(), rewriter.getI32IntegerAttr(1));
 
     auto ptr = rewriter.create<LLVM::AllocaOp>(
-        op->getLoc(), LLVM::LLVMPointerType::get(adaptor.getInput().getType()),
-        oneC,
+        op->getLoc(), LLVM::LLVMPointerType::get(rewriter.getContext()),
+        adaptor.getInput().getType(), oneC,
         /*alignment=*/4);
 
     rewriter.create<LLVM::StoreOp>(op->getLoc(), adaptor.getInput(), ptr);
 
-    auto cast = rewriter.create<LLVM::BitcastOp>(
-        op.getLoc(), LLVM::LLVMPointerType::get(resultTy), ptr);
-
-    rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, resultTy, cast);
+    rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, resultTy, ptr);
 
     return success();
   }
@@ -396,8 +390,9 @@ class AggregateConstantOpConversion
   void flatten(Type type, Attribute attr,
                SmallVectorImpl<Attribute> &output) const;
 
-  Value constructAggregate(OpBuilder &builder, TypeConverter &typeConverter,
-                           Location loc, Type type, Attribute data) const;
+  Value constructAggregate(OpBuilder &builder,
+                           const TypeConverter &typeConverter, Location loc,
+                           Type type, Attribute data) const;
 
 public:
   explicit AggregateConstantOpConversion(
@@ -476,7 +471,7 @@ bool AggregateConstantOpConversion::isMultiDimArrayOfIntegers(
     return true;
 
   if (auto arrTy = type.dyn_cast<hw::ArrayType>()) {
-    dims.push_back(arrTy.getSize());
+    dims.push_back(arrTy.getNumElements());
     return isMultiDimArrayOfIntegers(arrTy.getElementType(), dims);
   }
 
@@ -501,8 +496,8 @@ void AggregateConstantOpConversion::flatten(
 }
 
 Value AggregateConstantOpConversion::constructAggregate(
-    OpBuilder &builder, TypeConverter &typeConverter, Location loc, Type type,
-    Attribute data) const {
+    OpBuilder &builder, const TypeConverter &typeConverter, Location loc,
+    Type type, Attribute data) const {
   Type llvmType = typeConverter.convertType(type);
 
   auto getElementType = [](Type type, size_t index) {
@@ -608,7 +603,7 @@ LogicalResult AggregateConstantOpConversion::matchAndRewrite(
 
 static Type convertArrayType(hw::ArrayType type, LLVMTypeConverter &converter) {
   auto elementTy = converter.convertType(type.getElementType());
-  return LLVM::LLVMArrayType::get(elementTy, type.getSize());
+  return LLVM::LLVMArrayType::get(elementTy, type.getNumElements());
 }
 
 static Type convertStructType(hw::StructType type,

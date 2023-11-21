@@ -3,6 +3,8 @@
 
 from pycde import (Clock, Input, InputChannel, OutputChannel, Module, generator,
                    types)
+from pycde.common import SendBundle, RecvBundle
+from pycde.types import Bundle, BundledChannel, ChannelDirection
 from pycde import esi
 from pycde.testing import unittestmodule
 
@@ -14,7 +16,7 @@ class HostComms:
 
 
 class Producer(Module):
-  clk = Input(types.i1)
+  clk = Clock()
   int_out = OutputChannel(types.i32)
 
   @generator
@@ -24,7 +26,7 @@ class Producer(Module):
 
 
 class Consumer(Module):
-  clk = Input(types.i1)
+  clk = Clock()
   int_in = InputChannel(types.i32)
 
   @generator
@@ -34,7 +36,7 @@ class Consumer(Module):
 
 @unittestmodule(print=True)
 class LoopbackTop(Module):
-  clk = Clock(types.i1)
+  clk = Clock()
   rst = Input(types.i1)
 
   @generator
@@ -75,7 +77,7 @@ class MultiplexerService(esi.ServiceImplementation):
 
 @unittestmodule(run_passes=True, print_after_passes=True)
 class MultiplexerTop(Module):
-  clk = Clock(types.i1)
+  clk = Clock()
   rst = Input(types.i1)
 
   @generator
@@ -105,9 +107,102 @@ class BrokenService(esi.ServiceImplementation):
 
 @unittestmodule(run_passes=True, print_after_passes=True)
 class BrokenTop(Module):
-  clk = Clock(types.i1)
+  clk = Clock()
   rst = Input(types.i1)
 
   @generator
   def construct(ports):
     BrokenService(clk=ports.clk, rst=ports.rst)
+
+
+# -----
+
+Bundle1 = Bundle([
+    BundledChannel("req", ChannelDirection.TO, types.channel(types.i32)),
+    BundledChannel("resp", ChannelDirection.FROM, types.channel(types.i1)),
+])
+
+
+@unittestmodule(print=True, run_passes=True, print_after_passes=True)
+class SendBundleTest(Module):
+  b_send = SendBundle(Bundle1)
+  s1_in = InputChannel(types.i32)
+  i1_out = OutputChannel(types.i1)
+
+  @generator
+  def build(self):
+    (self.b_send, from_chans) = Bundle1.pack()
+    # CHECK: ValueError: Missing channels: req
+
+
+# -----
+
+
+@unittestmodule(print=True, run_passes=True, print_after_passes=True)
+class SendBundleTest(Module):
+  b_send = SendBundle(Bundle1)
+  s1_in = InputChannel(types.i32)
+  i1_out = OutputChannel(types.i1)
+
+  @generator
+  def build(self):
+    (self.b_send, from_chans) = Bundle1.pack(asdf=self.s1_in)
+    # CHECK: ValueError: Unknown channel name 'asdf'
+
+
+# -----
+
+
+@unittestmodule()
+class SendBundleTest(Module):
+  b_send = SendBundle(Bundle1)
+  s1_in = InputChannel(types.i2)
+
+  @generator
+  def build(self):
+    (self.b_send, from_chans) = Bundle1.pack(req=self.s1_in)
+    # CHECK: TypeError: Expected channel type Channel<Bits<32>, ValidReady>, got Channel<Bits<2>, ValidReady> on channel 'req'
+
+
+# -----
+
+
+@unittestmodule(print=True, run_passes=True, print_after_passes=True)
+class RecvBundleTest(Module):
+  b_recv = RecvBundle(Bundle1)
+  s1_out = OutputChannel(types.i32)
+  i1_in = InputChannel(types.i1)
+
+  @generator
+  def build(self):
+    to_channels = self.b_recv.unpack()
+    # CHECK: ValueError: Missing channel values for resp
+
+
+# -----
+
+
+@unittestmodule(print=True, run_passes=True, print_after_passes=True)
+class RecvBundleTest(Module):
+  b_recv = RecvBundle(Bundle1)
+  s1_out = OutputChannel(types.i32)
+  i1_in = InputChannel(types.i1)
+
+  @generator
+  def build(self):
+    to_channels = self.b_recv.unpack(asdf=self.i1_in)
+    # CHECK: ValueError: Unknown channel name 'asdf'
+
+
+# -----
+
+
+@unittestmodule()
+class RecvBundleTest(Module):
+  b_recv = RecvBundle(Bundle1)
+  i1_in = InputChannel(types.i4)
+
+  @generator
+  def build(self):
+    to_channels = self.b_recv.unpack(resp=self.i1_in)
+    # CHECK: TypeError: Expected channel type Channel<Bits<1>, ValidReady>, got Channel<Bits<4>, ValidReady> on channel 'resp'

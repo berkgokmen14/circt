@@ -1,7 +1,7 @@
 // RUN: circt-opt --pass-pipeline="builtin.module(firrtl.circuit(firrtl-lower-open-aggs))" %s --split-input-file --verify-diagnostics
 
 firrtl.circuit "Symbol" {
-  // expected-error @below {{symbol found on aggregate with no HW}}
+  // expected-error @below {{inner symbol "bad" mapped to non-HW type}}
   firrtl.module @Symbol(out %r : !firrtl.openbundle<p: probe<uint<1>>> sym @bad) {
     %zero = firrtl.constant 0 : !firrtl.uint<1>
     %ref = firrtl.ref.send %zero : !firrtl.uint<1>
@@ -13,8 +13,8 @@ firrtl.circuit "Symbol" {
 // -----
 
 firrtl.circuit "SymbolOnField" {
-  // expected-error @below {{symbols on fields of open aggregates not handled yet}}
-  firrtl.extmodule @SymbolOnField(out r : !firrtl.openbundle<p: probe<uint<1>>, x: uint<1>> sym [<@bad,2,public>])
+  // expected-error @below {{inner symbol "bad" mapped to non-HW type}}
+  firrtl.extmodule @SymbolOnField(out r : !firrtl.openbundle<p: probe<uint<1>>, x: uint<1>> sym [<@bad,1,public>])
 }
 
 // -----
@@ -46,16 +46,12 @@ firrtl.circuit "MixedAnnotation" {
 }
 
 // -----
-// Reject unhandled ops w/open types in them.
+// As above, check that no annotations are seen.  This should never occur in
+// firtool.
 
-firrtl.circuit "UnhandledOp" {
-  firrtl.module @UnhandledOp(out %r : !firrtl.openbundle<p: probe<uint<1>>>) {
-    %zero = firrtl.constant 0 : !firrtl.uint<1>
-    %ref = firrtl.ref.send %zero : !firrtl.uint<1>
-    %r_p = firrtl.opensubfield %r[p] : !firrtl.openbundle<p: probe<uint<1>>>
-    firrtl.ref.define %r_p, %ref : !firrtl.probe<uint<1>>
-
-    // expected-error @below {{unhandled use or producer of types containing references}}
-    %x = firrtl.wire : !firrtl.openbundle<p : probe<uint<1>>>
+firrtl.circuit "WireAnnotations" {
+  firrtl.module @WireAnnotations() {
+    // expected-error @below {{annotations on open aggregates not handled yet}}
+    %a = firrtl.wire {annotations = [{class = "circt.test"}]} : !firrtl.openbundle<b: string, c: uint<1>>
   }
 }

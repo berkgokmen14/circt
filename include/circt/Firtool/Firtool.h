@@ -21,8 +21,31 @@
 
 namespace circt {
 namespace firtool {
+// Remember to sync changes to C-API
 struct FirtoolOptions {
   llvm::cl::OptionCategory &category;
+
+  llvm::cl::opt<std::string> outputFilename{
+      "o", llvm::cl::desc("Output filename, or directory for split output"),
+      llvm::cl::value_desc("filename"), llvm::cl::init("-"),
+      llvm::cl::cat(category)};
+
+  llvm::cl::opt<bool> disableAnnotationsUnknown{
+      "disable-annotation-unknown",
+      llvm::cl::desc("Ignore unknown annotations when parsing"),
+      llvm::cl::init(false), llvm::cl::cat(category)};
+
+  llvm::cl::opt<bool> disableAnnotationsClassless{
+      "disable-annotation-classless",
+      llvm::cl::desc("Ignore annotations without a class when parsing"),
+      llvm::cl::init(false), llvm::cl::cat(category)};
+
+  llvm::cl::opt<bool> lowerAnnotationsNoRefTypePorts{
+      "lower-annotations-no-ref-type-ports",
+      llvm::cl::desc(
+          "Create real ports instead of ref type ports when resolving "
+          "wiring problems inside the LowerAnnotations pass"),
+      llvm::cl::init(false), llvm::cl::Hidden, llvm::cl::cat(category)};
 
   llvm::cl::opt<circt::firrtl::PreserveAggregate::PreserveMode>
       preserveAggregate{
@@ -42,13 +65,20 @@ struct FirtoolOptions {
   llvm::cl::opt<firrtl::PreserveValues::PreserveMode> preserveMode{
       "preserve-values",
       llvm::cl::desc("Specify the values which can be optimized away"),
-      llvm::cl::values(clEnumValN(firrtl::PreserveValues::None, "none",
-                                  "Preserve no values"),
-                       clEnumValN(firrtl::PreserveValues::Named, "named",
-                                  "Preserve values with meaningful names"),
-                       clEnumValN(firrtl::PreserveValues::All, "all",
-                                  "Preserve all values")),
+      llvm::cl::values(
+          clEnumValN(firrtl::PreserveValues::Strip, "strip",
+                     "Strip all names. No name is preserved"),
+          clEnumValN(firrtl::PreserveValues::None, "none",
+                     "Names could be preserved by best-effort unlike `strip`"),
+          clEnumValN(firrtl::PreserveValues::Named, "named",
+                     "Preserve values with meaningful names"),
+          clEnumValN(firrtl::PreserveValues::All, "all",
+                     "Preserve all values")),
       llvm::cl::init(firrtl::PreserveValues::None), llvm::cl::cat(category)};
+
+  llvm::cl::opt<bool> enableDebugInfo{
+      "g", llvm::cl::desc("Enable the generation of debug information"),
+      llvm::cl::init(false), llvm::cl::cat(category)};
 
   // Build mode options.
   enum BuildMode { BuildModeDebug, BuildModeRelease };
@@ -81,18 +111,24 @@ struct FirtoolOptions {
       llvm::cl::desc("Transform vectors of bundles to bundles of vectors"),
       llvm::cl::init(false), llvm::cl::cat(category)};
 
-  llvm::cl::opt<bool> dedup{
-      "dedup", llvm::cl::desc("Deduplicate structurally identical modules"),
+  llvm::cl::opt<bool> noDedup{
+      "no-dedup",
+      llvm::cl::desc("Disable deduplication of structurally identical modules"),
       llvm::cl::init(false), llvm::cl::cat(category)};
 
-  llvm::cl::opt<bool> grandCentralInstantiateCompanionOnly{
-      "grand-central-instantiate-companion",
-      llvm::cl::desc("Run Grand Central in a mode where the companion module "
-                     "is instantiated and not bound in and the interface is "
-                     "dropped.  This is intended for situations where there is "
-                     "useful assertion logic inside the companion, but you "
-                     "don't care about the actual interface."),
-      llvm::cl::init(false), llvm::cl::Hidden, llvm::cl::cat(category)};
+  llvm::cl::opt<firrtl::CompanionMode> companionMode{
+      "grand-central-companion-mode",
+      llvm::cl::desc("Specifies the handling of Grand Central companions"),
+      ::llvm::cl::values(
+          clEnumValN(firrtl::CompanionMode::Bind, "bind",
+                     "Lower companion instances to SystemVerilog binds"),
+          clEnumValN(firrtl::CompanionMode::Instantiate, "instantiate",
+                     "Instantiate companions in the design"),
+          clEnumValN(firrtl::CompanionMode::Drop, "drop",
+                     "Remove companions from the design")),
+      llvm::cl::init(firrtl::CompanionMode::Bind),
+      llvm::cl::Hidden,
+      llvm::cl::cat(category)};
 
   llvm::cl::opt<bool> disableAggressiveMergeConnections{
       "disable-aggressive-merge-connections",
@@ -100,6 +136,11 @@ struct FirtoolOptions {
           "Disable aggressive merge connections (i.e. merge all field-level "
           "connections into bulk connections)"),
       llvm::cl::init(false), llvm::cl::cat(category)};
+
+  llvm::cl::opt<bool> disableHoistingHWPassthrough{
+      "disable-hoisting-hw-passthrough",
+      llvm::cl::desc("Disable hoisting HW passthrough signals"),
+      llvm::cl::init(true), llvm::cl::Hidden, llvm::cl::cat(category)};
 
   llvm::cl::opt<bool> emitOMIR{
       "emit-omir", llvm::cl::desc("Emit OMIR annotations to a JSON file"),
@@ -241,6 +282,22 @@ struct FirtoolOptions {
       llvm::cl::location(clockGateOpts.testEnableName),
       llvm::cl::init("test_en"), llvm::cl::cat(category)};
 
+  llvm::cl::opt<bool> exportModuleHierarchy{
+      "export-module-hierarchy",
+      llvm::cl::desc("Export module and instance hierarchy as JSON"),
+      llvm::cl::init(false), llvm::cl::cat(category)};
+
+  llvm::cl::opt<bool> stripFirDebugInfo{
+      "strip-fir-debug-info",
+      llvm::cl::desc(
+          "Disable source fir locator information in output Verilog"),
+      llvm::cl::init(true), llvm::cl::cat(category)};
+
+  llvm::cl::opt<bool> stripDebugInfo{
+      "strip-debug-info",
+      llvm::cl::desc("Disable source locator information in output Verilog"),
+      llvm::cl::init(false), llvm::cl::cat(category)};
+
   bool isRandomEnabled(RandomKind kind) const {
     return disableRandom != RandomKind::All && disableRandom != kind;
   }
@@ -260,15 +317,32 @@ struct FirtoolOptions {
   FirtoolOptions(llvm::cl::OptionCategory &category) : category(category) {}
 };
 
+LogicalResult populatePreprocessTransforms(mlir::PassManager &pm,
+                                           const FirtoolOptions &opt);
+
 LogicalResult populateCHIRRTLToLowFIRRTL(mlir::PassManager &pm,
                                          const FirtoolOptions &opt,
-                                         ModuleOp module,
                                          StringRef inputFilename);
 
 LogicalResult populateLowFIRRTLToHW(mlir::PassManager &pm,
                                     const FirtoolOptions &opt);
 
 LogicalResult populateHWToSV(mlir::PassManager &pm, const FirtoolOptions &opt);
+
+LogicalResult populateExportVerilog(mlir::PassManager &pm,
+                                    const FirtoolOptions &opt,
+                                    std::unique_ptr<llvm::raw_ostream> os);
+
+LogicalResult populateExportVerilog(mlir::PassManager &pm,
+                                    const FirtoolOptions &opt,
+                                    llvm::raw_ostream &os);
+
+LogicalResult populateExportSplitVerilog(mlir::PassManager &pm,
+                                         const FirtoolOptions &opt,
+                                         llvm::StringRef directory);
+
+LogicalResult populateFinalizeIR(mlir::PassManager &pm,
+                                 const FirtoolOptions &opt);
 
 } // namespace firtool
 } // namespace circt

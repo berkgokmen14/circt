@@ -23,6 +23,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/AnalysisManager.h"
 #include "mlir/Support/LogicalResult.h"
+#include <cassert>
 #include <limits>
 
 using namespace mlir;
@@ -181,7 +182,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeForOp(
   SharedOperatorsProblem problem = SharedOperatorsProblem::get(forOp);
 
   // Insert memory dependences into the problem.
-  forOp.getLoopBody().walk([&](Operation *op) {
+  assert(forOp.getLoopRegions().size() == 1);
+  forOp.getLoopRegions().front()->walk([&](Operation *op) {
     if (op->getParentOfType<LoopInterface>() != nullptr)
       return;
 
@@ -213,7 +215,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeForOp(
   //   for (auto &region : op->getRegions()) {
   //     for (auto loop : region.getOps<LoopInterface>()) {
   //       loop.getBodyBlock()->walk([&](Operation *op) {
-  //         if (isa<AffineLoadOp, AffineStoreOp, memref::LoadOp, memref::StoreOp,
+  //         if (isa<AffineLoadOp, AffineStoreOp, memref::LoadOp,
+  //         memref::StoreOp,
   //                 LoadInterface, StoreInterface>(op)) {
   //           memOps[op].push_back(loop);
   //         }
@@ -264,8 +267,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeForOp(
   //   if (op->getNumResults() == 0)
   //     return WalkResult::skip();
 
-  //   // Model the implicit value flow from the `yield` to the `if`'s result(s).
-  //   Problem::Dependence depThen(thenBlock->getTerminator(), op);
+  //   // Model the implicit value flow from the `yield` to the `if`'s
+  //   result(s). Problem::Dependence depThen(thenBlock->getTerminator(), op);
   //   auto depInserted = problem.insertDependence(depThen);
   //   assert(succeeded(depInserted));
   //   (void)depInserted;
@@ -282,8 +285,9 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeForOp(
 
   // Set the anchor for scheduling. Insert dependences from all stores to the
   // terminator to ensure the problem schedules them before the terminator.
-  auto *anchor = forOp.getLoopBody().back().getTerminator();
-  forOp.getLoopBody().walk([&](Operation *op) {
+  assert(forOp.getLoopRegions().size() == 1);
+  auto *anchor = forOp.getLoopRegions().front()->back().getTerminator();
+  forOp.getLoopRegions().front()->walk([&](Operation *op) {
     if (op->getParentOfType<LoopScheduleSequentialOp>() != nullptr ||
         op->getParentOfType<LoopSchedulePipelineOp>() != nullptr)
       return;
@@ -316,14 +320,14 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
     // Insert every operation into the problem.
     problem.insertOperation(op);
 
-    // ArrayRef<MemoryDependence> dependences = memoryAnalysis.getDependences(op);
-    // if (dependences.empty())
+    // ArrayRef<MemoryDependence> dependences =
+    // memoryAnalysis.getDependences(op); if (dependences.empty())
     //   return;
 
     // for (const MemoryDependence &memoryDep : dependences) {
     //   // memoryDep.source->dump();
-    //   // Don't insert a dependence into the problem if there is no dependence.
-    //   if (!hasDependence(memoryDep.dependenceType))
+    //   // Don't insert a dependence into the problem if there is no
+    //   dependence. if (!hasDependence(memoryDep.dependenceType))
     //     continue;
     //   // Insert a dependence into the problem.
     //   Problem::Dependence dep(memoryDep.source, op);
@@ -384,8 +388,8 @@ void circt::analysis::SharedOperatorsSchedulingAnalysis::analyzeFuncOp(
   //   if (op->getNumResults() == 0)
   //     return WalkResult::skip();
 
-  //   // Model the implicit value flow from the `yield` to the `if`'s result(s).
-  //   Problem::Dependence depThen(thenBlock->getTerminator(), op);
+  //   // Model the implicit value flow from the `yield` to the `if`'s
+  //   result(s). Problem::Dependence depThen(thenBlock->getTerminator(), op);
   //   auto depInserted = problem.insertDependence(depThen);
   //   assert(succeeded(depInserted));
   //   (void)depInserted;

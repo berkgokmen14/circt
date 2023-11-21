@@ -25,6 +25,8 @@ class Pass;
 namespace circt {
 namespace firrtl {
 
+std::unique_ptr<mlir::Pass> createResolvePathsPass();
+
 std::unique_ptr<mlir::Pass>
 createLowerFIRRTLAnnotationsPass(bool ignoreUnhandledAnnotations = false,
                                  bool ignoreClasslessAnnotations = false,
@@ -97,6 +99,11 @@ std::unique_ptr<mlir::Pass> createInferResetsPass();
 std::unique_ptr<mlir::Pass> createLowerMemoryPass();
 
 std::unique_ptr<mlir::Pass>
+createHoistPassthroughPass(bool hoistHWDrivers = true);
+
+std::unique_ptr<mlir::Pass> createProbeDCEPass();
+
+std::unique_ptr<mlir::Pass>
 createMemToRegOfVecPass(bool replSeqMem = false, bool ignoreReadEnable = false);
 
 std::unique_ptr<mlir::Pass> createPrefixModulesPass();
@@ -110,8 +117,18 @@ std::unique_ptr<mlir::Pass> createPrintNLATablePass();
 std::unique_ptr<mlir::Pass>
 createBlackBoxReaderPass(std::optional<mlir::StringRef> inputPrefix = {});
 
+enum class CompanionMode {
+  // Lower companions to SystemVerilog binds.
+  Bind,
+  // Lower companions to explicit instances. Used when assertions or other
+  // debugging constructs from the companion are to be included in the design.
+  Instantiate,
+  // Drop companion modules, eliminating them from the design.
+  Drop,
+};
+
 std::unique_ptr<mlir::Pass>
-createGrandCentralPass(bool instantiateCompanionOnly = false);
+createGrandCentralPass(CompanionMode companionMode = CompanionMode::Bind);
 
 std::unique_ptr<mlir::Pass> createCheckCombLoopsPass();
 
@@ -129,8 +146,11 @@ std::unique_ptr<mlir::Pass> createDropConstPass();
 /// Configure which values will be explicitly preserved by the DropNames pass.
 namespace PreserveValues {
 enum PreserveMode {
+  /// Strip all names. No name on declaration is preserved.
+  Strip,
   /// Don't explicitly preserve any named values. Every named operation could
-  /// be optimized away by the compiler.
+  /// be optimized away by the compiler. Unlike `Strip` names could be preserved
+  /// until the end.
   None,
   // Explicitly preserved values with meaningful names.  If a name begins with
   // an "_" it is not considered meaningful.
@@ -161,7 +181,17 @@ std::unique_ptr<mlir::Pass> createInnerSymbolDCEPass();
 
 std::unique_ptr<mlir::Pass> createFinalizeIRPass();
 
-std::unique_ptr<mlir::Pass> createExtractClassesPass();
+std::unique_ptr<mlir::Pass> createLowerClassesPass();
+
+std::unique_ptr<mlir::Pass> createLowerGroupsPass();
+
+std::unique_ptr<mlir::Pass> createGroupMergePass();
+
+std::unique_ptr<mlir::Pass> createGroupSinkPass();
+
+std::unique_ptr<mlir::Pass> createMaterializeDebugInfoPass();
+
+std::unique_ptr<mlir::Pass> createLintingPass();
 
 /// Generate the code for registering passes.
 #define GEN_PASS_REGISTRATION

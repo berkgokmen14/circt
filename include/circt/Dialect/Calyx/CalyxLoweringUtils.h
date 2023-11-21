@@ -170,10 +170,10 @@ private:
   std::variant<calyx::MemoryOp, calyx::SeqMemoryOp, MemoryPortsImpl> impl;
 };
 
-// A common interface for loop operations that need to be lowered to Calyx.
-class LoopInterface {
+// A common interface for any loop operation that needs to be lowered to Calyx.
+class BasicLoopInterface {
 public:
-  virtual ~LoopInterface();
+  virtual ~BasicLoopInterface();
 
   // Returns the arguments to this loop operation.
   virtual Block::BlockArgListType getBodyArgs() = 0;
@@ -184,17 +184,22 @@ public:
   // Returns body of this loop operation.
   virtual Block *getBodyBlock() = 0;
 
-  // Returns the condition block.
+  // Returns the location of the loop interface.
+  virtual Location getLoc() = 0;
+
+  // Returns the number of iterations the loop will conduct if known.
+  virtual std::optional<int64_t> getBound() = 0;
+};
+
+// A common interface for loop operations that have conditionals (e.g., while
+// loops) that need to be lowered to Calyx.
+class LoopInterface : BasicLoopInterface {
+public:
+  // Returns the Block in which the condition exists.
   virtual Block *getConditionBlock() = 0;
 
   // Returns the condition as a Value.
   virtual Value getConditionValue() = 0;
-
-  // Returns the number of iterations the loop will conduct if known.
-  virtual std::optional<uint64_t> getBound() = 0;
-
-  // Returns the location of the loop interface.
-  virtual Location getLoc() = 0;
 };
 
 // Provides an interface for the control flow `while` operation across different
@@ -206,6 +211,26 @@ class WhileOpInterface : LoopInterface {
 public:
   explicit WhileOpInterface(T op) : impl(op) {}
   explicit WhileOpInterface(Operation *op) : impl(dyn_cast_or_null<T>(op)) {}
+
+  // Returns the operation.
+  T getOperation() { return impl; }
+
+  // Returns the source location of the operation.
+  Location getLoc() override { return impl->getLoc(); }
+
+private:
+  T impl;
+};
+
+// Provides an interface for the control flow `forOp` operation across different
+// dialects.
+template <typename T>
+class RepeatOpInterface : BasicLoopInterface {
+  static_assert(std::is_convertible_v<T, Operation *>);
+
+public:
+  explicit RepeatOpInterface(T op) : impl(op) {}
+  explicit RepeatOpInterface(Operation *op) : impl(dyn_cast_or_null<T>(op)) {}
 
   // Returns the operation.
   T getOperation() { return impl; }
@@ -238,8 +263,7 @@ public:
   /// a result of lowering the block in the source program. The list order
   /// follows def-use chains between the schedulables in the block.
   SmallVector<T> getBlockSchedulables(mlir::Block *block) {
-    if (auto it = blockSchedulables.find(block);
-        it != blockSchedulables.end())
+    if (auto it = blockSchedulables.find(block); it != blockSchedulables.end())
       return it->second;
     /// In cases of a block resulting in purely combinational logic, no
     /// schedulables registered themselves with the block.
@@ -434,8 +458,11 @@ public:
   /// the original function maps to.
   unsigned getFuncOpResultMapping(unsigned funcReturnIdx);
 
-  /// Return the start group for value v.
-  // calyx::StaticGroupOp getStartGroup(Value v);
+  /// The instance is obtained from the name of the callee.
+  InstanceOp getInstance(StringRef calleeName);
+
+  /// Put the name of the callee and the instance of the call into map.
+  void addInstance(StringRef calleeName, InstanceOp instanceOp);
 
   /// Return the group which evaluates the value v. Optionally, caller may
   /// specify the expected type of the group.
@@ -515,6 +542,9 @@ private:
   /// A mapping between the source funcOp result indices and the corresponding
   /// output port indices of this componentOp.
   DenseMap<unsigned, unsigned> funcOpResultMapping;
+
+  /// A mapping between the callee and the instance.
+  llvm::StringMap<calyx::InstanceOp> instanceMap;
 };
 
 Value buildCombAndTree(OpBuilder &builder,
@@ -802,6 +832,17 @@ class BuildReturnRegs : public calyx::FuncOpPartialLoweringPattern {
   LogicalResult
   partiallyLowerFuncToComp(mlir::func::FuncOp funcOp,
                            PatternRewriter &rewriter) const override;
+};
+
+/// Builds instance for the calyx.invoke and calyx.group in order to initialize
+/// the instance.
+class BuildCallInstance : public calyx::FuncOpPartialLoweringPattern {
+  using FuncOpPartialLoweringPattern::FuncOpPartialLoweringPattern;
+
+  LogicalResult
+  partiallyLowerFuncToComp(mlir::func::FuncOp funcOp,
+                           PatternRewriter &rewriter) const override;
+  ComponentOp getCallComponent(mlir::func::CallOp callOp) const;
 };
 
 } // namespace calyx

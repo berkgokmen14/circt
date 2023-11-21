@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "circt/Conversion/CombToArith.h"
+#include "circt/Conversion/SeqToSV.h"
 #include "circt/Dialect/Arc/ArcDialect.h"
 #include "circt/Dialect/Arc/ArcInterfaces.h"
 #include "circt/Dialect/Arc/ArcOps.h"
@@ -19,6 +20,7 @@
 #include "circt/Dialect/Seq/SeqPasses.h"
 #include "circt/InitAllDialects.h"
 #include "circt/InitAllPasses.h"
+#include "circt/Support/Passes.h"
 #include "circt/Support/Version.h"
 #include "mlir/Bytecode/BytecodeReader.h"
 #include "mlir/Bytecode/BytecodeWriter.h"
@@ -118,6 +120,11 @@ static cl::opt<bool>
                       cl::init(false), cl::Hidden, cl::cat(mainCategory));
 
 static cl::opt<bool>
+    verbosePassExecutions("verbose-pass-executions",
+                          cl::desc("Log executions of toplevel module passes"),
+                          cl::init(false), cl::cat(mainCategory));
+
+static cl::opt<bool>
     splitInputFile("split-input-file",
                    cl::desc("Split the input file into pieces and process each "
                             "chunk independently"),
@@ -171,12 +178,17 @@ static void populatePipeline(PassManager &pm) {
     return until >= runUntilBefore || until > runUntilAfter;
   };
 
+  if (verbosePassExecutions)
+    pm.addInstrumentation(
+        std::make_unique<VerbosePassInstrumentation<mlir::ModuleOp>>(
+            "fiarcilatorrtool"));
+
   // Pre-process the input such that it no longer contains any SV dialect ops
   // and external modules that are relevant to the arc transformation are
   // represented as intrinsic ops.
   if (untilReached(UntilPreprocessing))
     return;
-  pm.addPass(seq::createLowerFirMemPass());
+  pm.addPass(createLowerFirMemPass());
   pm.addPass(
       arc::createAddTapsPass(observePorts, observeWires, observeNamedValues));
   pm.addPass(arc::createStripSVPass());
@@ -247,23 +259,25 @@ static void populatePipeline(PassManager &pm) {
   }
 
   pm.addPass(arc::createGroupResetsAndEnablesPass());
+  pm.addPass(arc::createLegalizeStateUpdatePass());
   pm.addPass(createCSEPass());
   pm.addPass(arc::createArcCanonicalizerPass());
 
   // Allocate states.
   if (untilReached(UntilStateAlloc))
     return;
-  pm.addPass(arc::createLegalizeStateUpdatePass());
+  pm.addPass(arc::createLowerArcsToFuncsPass());
   pm.nest<arc::ModelOp>().addPass(arc::createAllocateStatePass());
   if (!stateFile.empty())
     pm.addPass(arc::createPrintStateInfoPass(stateFile));
+  pm.addPass(arc::createLowerClocksToFuncsPass()); // no CSE between state alloc
+                                                   // and clock func lowering
   pm.addPass(createCSEPass());
   pm.addPass(arc::createArcCanonicalizerPass());
 
   // Lower the arcs and update functions to LLVM.
   if (untilReached(UntilLLVMLowering))
     return;
-  pm.addPass(arc::createLowerClocksToFuncsPass());
   pm.addPass(createConvertCombToArithPass());
   pm.addPass(createLowerArcToLLVMPass());
   pm.addPass(createCSEPass());
@@ -383,10 +397,21 @@ static LogicalResult executeArcilator(MLIRContext &context) {
 
   // Register our dialects.
   DialectRegistry registry;
-  registry.insert<hw::HWDialect, comb::CombDialect, seq::SeqDialect,
-                  sv::SVDialect, arc::ArcDialect, mlir::arith::ArithDialect,
-                  mlir::scf::SCFDialect, mlir::func::FuncDialect,
-                  mlir::cf::ControlFlowDialect, mlir::LLVM::LLVMDialect>();
+  // clang-format off
+  registry.insert<
+    arc::ArcDialect,
+    comb::CombDialect,
+    hw::HWDialect,
+    mlir::LLVM::LLVMDialect,
+    mlir::arith::ArithDialect,
+    mlir::cf::ControlFlowDialect,
+    mlir::func::FuncDialect,
+    mlir::scf::SCFDialect,
+    om::OMDialect,
+    seq::SeqDialect,
+    sv::SVDialect
+  >();
+  // clang-format on
 
   arc::initAllExternalInterfaces(registry);
 

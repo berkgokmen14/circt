@@ -745,9 +745,9 @@ void InlineCombGroups::recurseInlineCombGroups(
     // Needed to add memory interfaces as well
     if (src.isa<BlockArgument>() ||
         isa<calyx::RegisterOp, calyx::MemoryOp, calyx::SeqMemoryOp,
-            hw::ConstantOp, mlir::arith::ConstantOp, calyx::MultPipeLibOp,
-            calyx::DivUPipeLibOp, calyx::DivSPipeLibOp, calyx::RemSPipeLibOp,
-            calyx::RemUPipeLibOp, mlir::scf::WhileOp, calyx::InstanceOp>(
+            hw::ConstantOp, mlir::arith::ConstantOp, calyx::SeqMultLibOp,
+            calyx::SeqDivULibOp, calyx::SeqDivSLibOp, calyx::SeqRemSLibOp,
+            calyx::SeqRemULibOp, mlir::scf::WhileOp, calyx::InstanceOp>(
             src.getDefiningOp()))
       continue;
 

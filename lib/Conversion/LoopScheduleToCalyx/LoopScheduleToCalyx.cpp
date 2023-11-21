@@ -79,7 +79,7 @@ public:
     return getOperation().getConditionValue();
   }
 
-  std::optional<uint64_t> getBound() override {
+  std::optional<int64_t> getBound() override {
     return getOperation().getBound();
   }
 

@@ -307,7 +307,7 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
                              /// standard arithmetic
                              AddIOp, SubIOp, CmpIOp, ShLIOp, ShRUIOp, ShRSIOp,
                              AndIOp, XOrIOp, OrIOp, ExtUIOp, TruncIOp, MulIOp,
-                             DivUIOp, RemUIOp, IndexCastOp,
+                             DivUIOp, RemUIOp, RemSIOp, IndexCastOp,
                              /// loop schedule
                              LoopInterface, LoopScheduleTerminatorOp>(
                   [&](auto op) { return buildOp(rewriter, op).succeeded(); })
@@ -339,6 +339,8 @@ private:
   LogicalResult buildOp(PatternRewriter &rewriter, MulIOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, DivUIOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, RemUIOp op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter, RemSIOp op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter, DivSIOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, ShRUIOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, ShRSIOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, ShLIOp op) const;
@@ -438,7 +440,7 @@ private:
   }
 
   /// buildLibraryBinaryPipeOp will build a TCalyxLibBinaryPipeOp, to
-  /// deal with MulIOp, DivUIOp and RemUIOp.
+  /// deal with MulIOp, DivUIOp, RemUIOp, RemSIOp, DivSIOp.
   template <typename TOpType, typename TSrcOp>
   LogicalResult buildLibraryBinaryPipeOp(PatternRewriter &rewriter, TSrcOp op,
                                          TOpType opPipe, Value out) const {
@@ -717,13 +719,51 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      RemUIOp op) const {
   Location loc = op.getLoc();
   Type width = op.getResult().getType(), one = rewriter.getI1Type();
-  auto remPipe =
+  if (isa<LoopSchedulePipelineStageOp>(op->getParentOp())) {
+    op.emitError() << "RemUI is not pipelineable";
+    return failure();
+  }
+
+  auto remUSeq =
       getState<ComponentLoweringState>()
-          .getNewLibraryOpInstance<calyx::SeqDivULibOp>(
-              rewriter, loc, {one, one, one, width, width, width, width, one});
-  return buildLibraryBinaryPipeOp<calyx::SeqDivULibOp>(
-      rewriter, op, remPipe,
-      /*out=*/remPipe.getOut());
+          .getNewLibraryOpInstance<calyx::SeqRemULibOp>(
+              rewriter, loc, {one, one, one, width, width, width, one});
+  return buildLibraryBinarySeqOp<calyx::SeqRemULibOp>(rewriter, op, remUSeq,
+                                                      remUSeq.getOut());
+}
+
+LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                                     RemSIOp op) const {
+  Location loc = op.getLoc();
+  Type width = op.getResult().getType(), one = rewriter.getI1Type();
+  if (isa<LoopSchedulePipelineStageOp>(op->getParentOp())) {
+    op.emitError() << "RemSI is not pipelineable";
+    return failure();
+  }
+
+  auto remSSeq =
+      getState<ComponentLoweringState>()
+          .getNewLibraryOpInstance<calyx::SeqRemSLibOp>(
+              rewriter, loc, {one, one, one, width, width, width, one});
+  return buildLibraryBinarySeqOp<calyx::SeqRemSLibOp>(rewriter, op, remSSeq,
+                                                      remSSeq.getOut());
+}
+
+LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                                     DivSIOp op) const {
+  Location loc = op.getLoc();
+  Type width = op.getResult().getType(), one = rewriter.getI1Type();
+  if (isa<LoopSchedulePipelineStageOp>(op->getParentOp())) {
+    op.emitError() << "DivSI is not pipelineable";
+    return failure();
+  }
+
+  auto divSSeq =
+      getState<ComponentLoweringState>()
+          .getNewLibraryOpInstance<calyx::SeqDivSLibOp>(
+              rewriter, loc, {one, one, one, width, width, width, one});
+  return buildLibraryBinarySeqOp<calyx::SeqDivSLibOp>(rewriter, op, divSSeq,
+                                                      divSSeq.getOut());
 }
 
 template <typename TAllocOp>
@@ -1391,6 +1431,15 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
             v = seqMem.readData();
           } else if (auto seqMul = dyn_cast<calyx::SeqMultLibOp>(op); seqMul) {
             v = seqMul.getOut();
+          } else if (auto seqRemU = dyn_cast<calyx::SeqRemULibOp>(op);
+                     seqRemU) {
+            v = seqRemU.getOut();
+          } else if (auto seqRemS = dyn_cast<calyx::SeqRemSLibOp>(op);
+                     seqRemS) {
+            v = seqRemS.getOut();
+          } else if (auto seqDivS = dyn_cast<calyx::SeqDivSLibOp>(op);
+                     seqDivS) {
+            v = seqDivS.getOut();
           } else if (auto stallMul = dyn_cast<calyx::StallableMultLibOp>(op);
                      stallMul) {
             v = stallMul.getOut();
@@ -2287,8 +2336,9 @@ public:
     target.addIllegalDialect<ArithDialect>();
     target.addLegalOp<AddIOp, SubIOp, CmpIOp, ShLIOp, ShRUIOp, ShRSIOp, AndIOp,
                       XOrIOp, OrIOp, ExtUIOp, TruncIOp, CondBranchOp, BranchOp,
-                      MulIOp, DivUIOp, DivSIOp, RemUIOp, RemSIOp, ReturnOp,
-                      arith::ConstantOp, IndexCastOp, FuncOp, ExtSIOp>();
+                      MulIOp, DivUIOp, DivSIOp, RemUIOp, RemSIOp, DivSIOp,
+                      ReturnOp, arith::ConstantOp, IndexCastOp, FuncOp,
+                      ExtSIOp>();
 
     RewritePatternSet legalizePatterns(&getContext());
     legalizePatterns.add<DummyPattern>(&getContext());

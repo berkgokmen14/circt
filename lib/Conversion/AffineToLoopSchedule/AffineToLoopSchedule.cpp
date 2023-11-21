@@ -22,6 +22,7 @@
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -34,6 +35,7 @@
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Visitors.h"
 #include "mlir/Interfaces/LoopLikeInterface.h"
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
 #include "llvm/ADT/STLExtras.h"
@@ -733,6 +735,66 @@ struct MulStrengthReduction : OpConversionPattern<MulIOp> {
   }
 };
 
+struct RemUIStrengthReduction : OpConversionPattern<RemUIOp> {
+  using OpConversionPattern<RemUIOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(RemUIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto *lhsDef = op.getLhs().getDefiningOp();
+    auto *rhsDef = op.getRhs().getDefiningOp();
+
+    if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
+      auto val = cast<IntegerAttr>(constOp.getValue());
+      if (llvm::isPowerOf2_32(val.getInt())) {
+        auto shifted = val.getValue() - 1;
+        auto attr = rewriter.getIntegerAttr(op.getRhs().getType(), shifted);
+        auto shift = rewriter.create<arith::ConstantOp>(op.getLoc(), attr);
+        rewriter.replaceOpWithNewOp<arith::AndIOp>(op, op.getLhs(),
+                                                   shift.getResult());
+      }
+    }
+
+    return success();
+  }
+};
+
+struct RemSIStrengthReduction : OpConversionPattern<RemSIOp> {
+  using OpConversionPattern<RemSIOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(RemSIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<arith::RemUIOp>(op, op.getLhs(), op.getRhs());
+
+    return success();
+  }
+};
+
+struct DivSIStrengthReduction : OpConversionPattern<DivSIOp> {
+  using OpConversionPattern<DivSIOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(DivSIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto *lhsDef = op.getLhs().getDefiningOp();
+    auto *rhsDef = op.getRhs().getDefiningOp();
+
+    if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
+      auto val = cast<IntegerAttr>(constOp.getValue());
+      if (llvm::isPowerOf2_32(val.getInt())) {
+        auto log = val.getValue().exactLogBase2();
+        auto attr = rewriter.getIntegerAttr(op.getRhs().getType(), log);
+        auto shift = rewriter.create<arith::ConstantOp>(op.getLoc(), attr);
+        rewriter.replaceOpWithNewOp<arith::ShRUIOp>(op, op.getLhs(),
+                                                    shift.getResult());
+      }
+    }
+
+    return success();
+  }
+};
+
 /// Helper to hoist computation out of scf::IfOp branches, turning it into a
 /// mux-like operation, and exposing potentially concurrent execution of its
 /// branches.
@@ -788,6 +850,47 @@ static bool mulLegalityCallback(Operation *op) {
   return true;
 }
 
+static bool DivSIOpLegalityCallback(Operation *op) {
+  if (auto mulOp = dyn_cast<arith::DivSIOp>(op)) {
+    auto *rhsDef = mulOp.getRhs().getDefiningOp();
+
+    if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
+      if (cast<IntegerAttr>(constOp.getValue()).getValue().exactLogBase2()) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+static bool remUILegalityCallback(Operation *op) {
+  if (auto remOp = dyn_cast<arith::RemUIOp>(op)) {
+    auto *rhsDef = remOp.getRhs().getDefiningOp();
+
+    if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
+      if (cast<IntegerAttr>(constOp.getValue()).getValue().exactLogBase2()) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+static bool remSILegalityCallback(Operation *op) {
+  if (auto remOp = dyn_cast<arith::RemSIOp>(op)) {
+    auto *rhsDef = remOp.getRhs().getDefiningOp();
+
+    if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
+      auto rhsValue = cast<IntegerAttr>(constOp.getValue());
+      if (rhsValue.getValue().exactLogBase2()) {
+        if (rhsValue.getInt() >= 0)
+          return false;
+      }
+    }
+  }
+  return true;
+}
+
 /// After analyzing memory dependences, and before creating the schedule, we
 /// want to materialize affine operations with arithmetic, scf, and memref
 /// operations, which make the condition computation of addresses, etc.
@@ -823,9 +926,15 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures() {
   patterns.clear();
   populateAffineToStdConversionPatterns(patterns);
   target.addIllegalOp<AffineApplyOp>();
-  // TODO: Uncomment to enable multiplier strength reduction
-  // patterns.add<MulStrengthReduction>(context);
-  // target.addDynamicallyLegalOp<MulIOp>(mulLegalityCallback);
+  patterns.add<MulStrengthReduction>(context);
+  patterns.add<DivSIStrengthReduction>(context);
+  patterns.add<RemUIStrengthReduction>(context);
+  patterns.add<RemSIStrengthReduction>(context);
+
+  target.addDynamicallyLegalOp<MulIOp>(mulLegalityCallback);
+  target.addDynamicallyLegalOp<DivSIOp>(DivSIOpLegalityCallback);
+  target.addDynamicallyLegalOp<RemUIOp>(remUILegalityCallback);
+  target.addDynamicallyLegalOp<RemSIOp>(remSILegalityCallback);
 
   if (failed(applyPartialConversion(op, target, std::move(patterns))))
     return failure();
@@ -833,6 +942,11 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures() {
   // Loop invariant code motion to hoist produced constants out of loop
   op->walk(
       [&](LoopLikeOpInterface loopLike) { moveLoopInvariantCode(loopLike); });
+
+  mlir::PassManager pm(context);
+  pm.addPass(arith::createIntRangeOptimizationsPass());
+  if (failed(pm.run(op)))
+    signalPassFailure();
 
   return success();
 }
@@ -873,12 +987,13 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
           problem.setLinkedOperatorType(combOp, combOpr);
           return WalkResult::advance();
         })
-        .Case<AddIOp, CmpIOp, ShLIOp, AndIOp>([&](Operation *seqOp) {
-          // These ops need to be sequential for now because we do not
-          // have enough information to chain them together yet.
-          problem.setLinkedOperatorType(seqOp, seqOpr);
-          return WalkResult::advance();
-        })
+        .Case<AddIOp, CmpIOp, ShLIOp, AndIOp, ShRSIOp, ShRUIOp>(
+            [&](Operation *seqOp) {
+              // These ops need to be sequential for now because we do not
+              // have enough information to chain them together yet.
+              problem.setLinkedOperatorType(seqOp, seqOpr);
+              return WalkResult::advance();
+            })
         .Case<LoopInterface>([&](Operation *loopOp) {
           // llvm::errs() << "loopOp\n";
           // loopOp->dump();
@@ -972,7 +1087,7 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
 
           return WalkResult::advance();
         })
-        .Case<MulIOp>([&](Operation *mcOp) {
+        .Case<MulIOp, RemUIOp, RemSIOp, DivSIOp>([&](Operation *mcOp) {
           // Some known multi-cycle ops.
           problem.setLinkedOperatorType(mcOp, mcOpr);
           return WalkResult::advance();

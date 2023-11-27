@@ -321,6 +321,12 @@ def MuxLibOp : CalyxLibraryOp<"mux", [
   }];
 }
 
+class SequentialArithBinaryLibraryOp<string mnemonic> : ArithBinaryLibraryOp<mnemonic # "_pipe", [
+    SameTypeConstraint<"left", "out">
+  ]> {
+  let results = (outs I1:$clk, I1:$reset, I1:$go, AnyType:$left, AnyType:$right, AnyType:$out, I1:$done);
+}
+
 class ArithBinaryPipeLibraryOp<string mnemonic> : CalyxPrimitive<"pipelined_" # mnemonic, [
     SameTypeConstraint<"left", "out">
   ]> {
@@ -354,11 +360,11 @@ class ArithBinaryPipeLibraryOp<string mnemonic> : CalyxPrimitive<"pipelined_" # 
   let results = (outs I1:$clk, I1:$reset, I1:$go, AnyType:$left, AnyType:$right, AnyType:$out, I1:$done);
 }
 
-def SeqMultLibOp : ArithBinaryPipeLibraryOp<"mult"> {}
-def SeqDivSLibOp : ArithBinaryPipeLibraryOp<"divs"> {}
-def SeqDivULibOp : ArithBinaryPipeLibraryOp<"divu"> {}
-def SeqRemULibOp : ArithBinaryPipeLibraryOp<"remu"> {}
-def SeqRemSLibOp : ArithBinaryPipeLibraryOp<"rems"> {}
+def SeqMultLibOp : SequentialArithBinaryLibraryOp<"mult"> {}
+def SeqDivSLibOp : SequentialArithBinaryLibraryOp<"divs"> {}
+def SeqDivULibOp : SequentialArithBinaryLibraryOp<"divu"> {}
+def SeqRemULibOp : SequentialArithBinaryLibraryOp<"remu"> {}
+def SeqRemSLibOp : SequentialArithBinaryLibraryOp<"rems"> {}
 
 def PipelinedMultLibOp : ArithBinaryPipeLibraryOp<"mult"> {}
 

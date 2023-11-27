@@ -284,7 +284,7 @@ private:
 // several lowering patterns.
 template <typename Loop, typename Group>
 class LoopLoweringStateInterface {
-  static_assert(std::is_base_of_v<LoopInterface, Loop>);
+  static_assert(std::is_base_of_v<BasicLoopInterface, Loop>);
   static_assert(std::is_same<GroupOp, Group>() ||
                 std::is_same<StaticGroupOp, Group>());
 

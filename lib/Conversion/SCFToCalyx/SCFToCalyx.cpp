@@ -122,9 +122,9 @@ using Scheduleable = std::variant<calyx::GroupOp, WhileSchedulable,
                                   ForScheduleable, CallScheduleable>;
 
 class WhileLoopLoweringStateInterface
-    : calyx::LoopLoweringStateInterface<ScfWhileOp> {
+    : calyx::LoopLoweringStateInterface<ScfWhileOp, calyx::GroupOp> {
 public:
-  SmallVector<calyx::GroupOp> getWhileLoopInitGroups(ScfWhileOp op) {
+  SmallVector<calyx::GroupInterface> getWhileLoopInitGroups(ScfWhileOp op) {
     return getLoopInitGroups(std::move(op));
   }
   calyx::GroupOp buildWhileLoopIterArgAssignments(
@@ -148,14 +148,15 @@ public:
   }
   void setWhileLoopInitGroups(ScfWhileOp op,
                               SmallVector<calyx::GroupOp> groups) {
-    return setLoopInitGroups(std::move(op), std::move(groups));
+    for (auto g : groups)
+      addLoopInitGroup(std::move(op), g);
   }
 };
 
 class ForLoopLoweringStateInterface
-    : calyx::LoopLoweringStateInterface<ScfForOp> {
+    : calyx::LoopLoweringStateInterface<ScfForOp, calyx::GroupOp> {
 public:
-  SmallVector<calyx::GroupOp> getForLoopInitGroups(ScfForOp op) {
+  SmallVector<calyx::GroupInterface> getForLoopInitGroups(ScfForOp op) {
     return getLoopInitGroups(std::move(op));
   }
   calyx::GroupOp buildForLoopIterArgAssignments(
@@ -180,7 +181,8 @@ public:
     return getLoopLatchGroup(std::move(op));
   }
   void setForLoopInitGroups(ScfForOp op, SmallVector<calyx::GroupOp> groups) {
-    return setLoopInitGroups(std::move(op), std::move(groups));
+    for (auto g : groups)
+      addLoopInitGroup(std::move(op), g);
   }
 };
 
@@ -961,8 +963,8 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
   // Only need to add the whileOp to the BlockSchedulables scheduler interface.
   // Everything else was handled in the `BuildWhileGroups` pattern.
   ScfWhileOp scfWhileOp(whileOp);
-  getState<ComponentLoweringState>().addBlockScheduleable(
-      whileOp.getOperation()->getBlock(), WhileScheduleable{scfWhileOp});
+  getState<ComponentLoweringState>().addBlockSchedulable(
+      whileOp.getOperation()->getBlock(), WhileSchedulable{scfWhileOp});
   return success();
 }
 
@@ -980,7 +982,7 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
               "transform into while loop using `--scf-for-to-while` before "
               "running --lower-scf-to-calyx.";
   }
-  getState<ComponentLoweringState>().addBlockScheduleable(
+  getState<ComponentLoweringState>().addBlockSchedulable(
       forOp.getOperation()->getBlock(), ForScheduleable{
                                             scfForOp,
                                             bound.value(),
@@ -1006,7 +1008,7 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
 
   // CallScheduleanle requires an instance, while CallOp can be used to get the
   // input ports.
-  getState<ComponentLoweringState>().addBlockScheduleable(
+  getState<ComponentLoweringState>().addBlockSchedulable(
       callOp.getOperation()->getBlock(), CallScheduleable{instanceOp, callOp});
   return success();
 }
@@ -1252,6 +1254,7 @@ class BuildWhileGroups : public calyx::FuncOpPartialLoweringPattern {
 
       /// Create iter args initial value assignment group(s), one per register.
       auto numOperands = whileOp.getOperation()->getNumOperands();
+      SmallVector<calyx::GroupOp> initGroups;
       for (size_t i = 0; i < numOperands; ++i) {
         auto initGroupOp =
             getState<ComponentLoweringState>().buildWhileLoopIterArgAssignments(
@@ -1261,8 +1264,7 @@ class BuildWhileGroups : public calyx::FuncOpPartialLoweringPattern {
                     whileOp.getOperation()) +
                     "_init_" + std::to_string(i),
                 whileOp.getOperation()->getOpOperand(i));
-        getState<ComponentLoweringState>().addLoopInitGroup(whileOp,
-                                                            initGroupOp);
+        initGroups.push_back(initGroupOp);
       }
 
       getState<ComponentLoweringState>().setWhileLoopInitGroups(whileOp,
@@ -1536,14 +1538,14 @@ private:
 
   // Insert a Par of initGroups at Location loc. Used as helper for
   // `buildWhileCtrlOp` and `buildForCtrlOp`.
-  void
-  insertParInitGroups(PatternRewriter &rewriter, Location loc,
-                      const SmallVector<calyx::GroupOp> &initGroups) const {
+  void insertParInitGroups(
+      PatternRewriter &rewriter, Location loc,
+      const SmallVector<calyx::GroupInterface> &initGroups) const {
     PatternRewriter::InsertionGuard g(rewriter);
     auto parOp = rewriter.create<calyx::ParOp>(loc);
     rewriter.setInsertionPointToStart(parOp.getBodyBlock());
-    for (calyx::GroupOp group : initGroups)
-      rewriter.create<calyx::EnableOp>(group.getLoc(), group.getName());
+    for (calyx::GroupInterface group : initGroups)
+      rewriter.create<calyx::EnableOp>(group.getLoc(), group.symName());
   }
 
   calyx::WhileOp buildWhileCtrlOp(ScfWhileOp whileOp,
@@ -1563,10 +1565,10 @@ private:
     return rewriter.create<calyx::WhileOp>(loc, cond, symbolAttr);
   }
 
-  calyx::RepeatOp buildForCtrlOp(ScfForOp forOp,
-                                 SmallVector<calyx::GroupOp> const &initGroups,
-                                 uint64_t bound,
-                                 PatternRewriter &rewriter) const {
+  calyx::RepeatOp
+  buildForCtrlOp(ScfForOp forOp,
+                 SmallVector<calyx::GroupInterface> const &initGroups,
+                 uint64_t bound, PatternRewriter &rewriter) const {
     Location loc = forOp.getLoc();
     // Insert for iter arg initialization group(s). Emit a
     // parallel group to assign one or more registers all at once.

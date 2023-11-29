@@ -297,19 +297,6 @@ circuit circuit:
 
 ;// -----
 
-circuit Issue2971: ; expected-error {{no main module}}
-  module NotIssue2971:
-    input in: UInt<1>
-    output out: UInt<1>
-    out <= in
-
-;// -----
-
-circuit NoModules: ; expected-error {{no modules found}}
-   ; nothing
-
-;// -----
-
 circuit NonAscii:
   module NonAscii:
     input clk: Clock
@@ -627,7 +614,7 @@ circuit PartialConnect_v2p0p0:
     input a: UInt<1>
     output b: UInt<1>
 
-    b <- a ; expected-error {{unexpected token '<-' in statement}}
+    b <- a ; expected-error {{partial connects were removed in FIRRTL 2.0.0, but the specified FIRRTL version was 2.0.0}}
 
 ;// -----
 
@@ -772,6 +759,20 @@ circuit UnsupportedVersionDeclGroups:
 
 ;// -----
 
+FIRRTL version 4.0.0
+circuit RemovedDeclGroups:
+  ; expected-error @below {{optional groups were removed in FIRRTL 4.0.0, but the specified FIRRTL version was 4.0.0}}
+  declgroup A, bind:
+
+;// -----
+
+FIRRTL version 3.9.0
+circuit UnsupportedVersionLayer:
+  ; expected-error @below {{layers are a FIRRTL 4.0.0+ feature, but the specified FIRRTL version was 3.9.0}}
+  layer A, bind:
+
+;// -----
+
 FIRRTL version 3.1.0
 circuit UnsupportedVersionGroups:
   module UnsupportedVersionGroups:
@@ -780,20 +781,36 @@ circuit UnsupportedVersionGroups:
 
 ;// -----
 
-FIRRTL version 3.2.0
-circuit UnsupportedGroupConvention:
-  ; expected-error @below {{unknown convention 'foo'}}
-  declgroup A, foo :
+FIRRTL version 4.1.0
+circuit RemovedGroups:
+  module RemovedGroups:
+    ; expected-error @below {{optional groups were removed in FIRRTL 4.0.0, but the specified FIRRTL version was 4.1.0}}
+    group A:
 
 ;// -----
 
-FIRRTL version 3.2.0
-circuit GroupAndCircuitShareName:
-  ; expected-error @below {{cannot have the same name as the circuit}}
-  declgroup GroupAndCircuitShareName, bind :
+FIRRTL version 3.9.0
+circuit UnsupportedLayerBlock:
+  module UnsupportedLayerBlock:
+    ; expected-error @below {{layers are a FIRRTL 4.0.0+ feature, but the specified FIRRTL version was 3.9.0}}
+    layerblock A:
 
-  module GroupAndCircuitShareName:
+;// -----
 
+FIRRTL version 4.0.0
+circuit UnsupportedLayerConvention:
+  ; expected-error @below {{unknown convention 'foo'}}
+  layer A, foo :
+
+;// -----
+
+FIRRTL version 4.0.0
+circuit LayerAndCircuitShareName:
+  ; expected-note @below {{see existing symbol definition here}}
+  layer LayerAndCircuitShareName, bind :
+
+  ; expected-error @below {{redefinition of symbol named 'LayerAndCircuitShareName'}}
+  module LayerAndCircuitShareName:
 
 ;// -----
 
@@ -1111,3 +1128,16 @@ circuit DoubleRadix:
     output d : Double
     ; expected-error @below {{expected floating point in Double expression}}
     propassign d, Double(0hABC)
+
+;// -----
+FIRRTL version 3.9.0
+circuit PublicModuleUnsupported:
+  ; expected-error @below {{public modules are a FIRRTL 4.0.0+ feature}}
+  public module PublicModuleUnsupported:
+
+;// -----
+FIRRTL version 4.0.0
+circuit PublicNonModule:
+  ; expected-error @below {{only modules may be public}}
+  public extmodule Foo:
+  module PublicNonModule:

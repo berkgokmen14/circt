@@ -357,7 +357,7 @@ class ArithBinaryPipeLibraryOp<string mnemonic> : CalyxPrimitive<"pipelined_" # 
       $_state.addTypes(resultTypes);
     }]>
   ];
-  let results = (outs I1:$clk, I1:$reset, I1:$go, AnyType:$left, AnyType:$right, AnyType:$out, I1:$done);
+  let results = (outs I1:$clk, I1:$reset, AnyType:$left, AnyType:$right, AnyType:$out);
 }
 
 def SeqMultLibOp : SequentialArithBinaryLibraryOp<"mult"> {}

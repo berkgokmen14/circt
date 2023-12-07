@@ -1,19 +1,21 @@
 # TODO: Make the check source feature optional as an argument on *_add_library.
 set(LLVM_OPTIONAL_SOURCES
+  CHIRRTL.cpp
   Comb.cpp
   ESI.cpp
   FIRRTL.cpp
-  CHIRRTL.cpp
-  MSFT.cpp
+  FSM.cpp
   HW.cpp
   HWArith.cpp
+  Handshake.cpp
   LLHD.cpp
+  LTL.cpp
+  MSFT.cpp
   Moore.cpp
   OM.cpp
-  Seq.cpp
   SV.cpp
-  FSM.cpp
-  Handshake.cpp
+  Seq.cpp
+  Verif.cpp
 )
 
 add_mlir_public_c_api_library(CIRCTCAPIComb
@@ -130,7 +132,7 @@ add_mlir_public_c_api_library(CIRCTCAPIHandshake
   CIRCTHandshake
   CIRCTHandshakeTransforms
   CIRCTHandshakeToHW
-  CIRCTStandardToHandshake
+  CIRCTCFToHandshake
 )
 
 add_mlir_public_c_api_library(CIRCTCAPIHWArith
@@ -140,4 +142,21 @@ add_mlir_public_c_api_library(CIRCTCAPIHWArith
   MLIRCAPIIR
   CIRCTHWArith
   CIRCTHWArithToHW
+)
+
+add_mlir_public_c_api_library(CIRCTCAPIVerif
+  Verif.cpp
+
+  LINK_LIBS PUBLIC
+  MLIRCAPIIR
+  CIRCTVerif
+  CIRCTVerifToSV
+)
+
+add_mlir_public_c_api_library(CIRCTCAPILTL
+  LTL.cpp
+
+  LINK_LIBS PUBLIC
+  MLIRCAPIIR
+  CIRCTLTL
 )

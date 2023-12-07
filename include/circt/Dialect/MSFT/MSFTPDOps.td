@@ -21,25 +21,15 @@ def DeclPhysicalRegionOp : MSFTOp<"physical_region",
   }];
 }
 
-def EntityExternOp : MSFTOp<"entity.extern",
-    [Symbol, HasParent<"mlir::ModuleOp">]> {
-  let arguments = (ins
-    SymbolNameAttr:$sym_name,
-    AnyAttr:$metadata);
-  let assemblyFormat = [{
-    $sym_name $metadata attr-dict
-  }];
-}
-
 def PDPhysLocationOp : MSFTOp<"pd.location",
-      [DeclareOpInterfaceMethods<DynInstDataOpInterface>]> {
+      [DeclareOpInterfaceMethods<UnaryDynInstDataOpInterface>]> {
   let summary = "Specify a location for an instance";
   let description = [{
     Used to specify a specific location on an FPGA to place a dynamic instance.
     Supports specifying the location of a subpath for extern modules and device
     primitives. Intended to live as a child of `instance.dynamic` initially
     without the `ref` field. The dynamic instance lowering will fill in `ref`
-    with the symol of the `hw.globalref` op corresponding to the lowered dynamic
+    with the symol of the `hw.hierpath` op corresponding to the lowered dynamic
     instance.
   }];
   let arguments = (ins PhysLocation:$loc,
@@ -48,10 +38,16 @@ def PDPhysLocationOp : MSFTOp<"pd.location",
   let assemblyFormat = [{
     ($ref^)? custom<PhysLoc>($loc) (`path` `:` $subPath^)? attr-dict
   }];
+
+  let extraClassDeclaration = [{
+    Operation* getTopModule(circt::hw::HWSymbolCache &symCache) {
+      return getHierPathTopModule(getOperation()->getLoc(), symCache, getPathSym());
+    }
+  }];
 }
 
 def PDRegPhysLocationOp : MSFTOp<"pd.reg_location",
-      [DeclareOpInterfaceMethods<DynInstDataOpInterface>]> {
+      [DeclareOpInterfaceMethods<UnaryDynInstDataOpInterface>]> {
   let summary = "Specify register locations";
   let description = [{
     A version of "PDPhysLocationOp" specialized for registers, which have one
@@ -62,10 +58,34 @@ def PDRegPhysLocationOp : MSFTOp<"pd.reg_location",
   let assemblyFormat = [{
     (`ref` $ref^)? custom<ListOptionalRegLocList>($locs) attr-dict
   }];
+
+  let extraClassDeclaration = [{
+    Operation* getTopModule(circt::hw::HWSymbolCache &symCache) {
+      return getHierPathTopModule(getOperation()->getLoc(), symCache, getPathSym());
+    }
+  }];
+}
+
+def PDMulticycleOp : MSFTOp<"pd.multicycle",
+    [DeclareOpInterfaceMethods<DynInstDataOpInterface>]> {
+  let summary = "Specify a multicycle constraint";
+  let description = [{
+    Specifies a multicycle constraint in between two registers.
+    `source` and `dest` symbols reference `HierPathOp` symbols denoting the
+    exact registers in the instance hierarchy to which the constraint applies.
+  }];
+  let arguments = (ins
+    FlatSymbolRefAttr:$source,
+    FlatSymbolRefAttr:$dest,
+    ConfinedAttr<I32Attr, [IntMinValue<1>]>:$cycles
+  );
+  let assemblyFormat = [{
+    $cycles $source `->` $dest attr-dict
+  }];
 }
 
 def PDPhysRegionOp : MSFTOp<"pd.physregion",
-      [DeclareOpInterfaceMethods<DynInstDataOpInterface>]> {
+      [DeclareOpInterfaceMethods<UnaryDynInstDataOpInterface>]> {
   let summary = "Specify a physical region for an instance";
   let description = [{
     Annotate a particular entity within an op with the region of the devices
@@ -77,6 +97,12 @@ def PDPhysRegionOp : MSFTOp<"pd.physregion",
                        OptionalAttr<FlatSymbolRefAttr>:$ref);
   let assemblyFormat = [{
     ($ref^)? $physRegionRef (`path` `:` $subPath^)? attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    Operation* getTopModule(circt::hw::HWSymbolCache &symCache) {
+      return getHierPathTopModule(getOperation()->getLoc(), symCache, getPathSym());
+    }
   }];
 }
 
@@ -110,14 +136,14 @@ def DynamicInstanceOp : MSFTOp<"instance.dynamic",
     Represents an instance (as in instance in the instance hierarchy) referred
     to henceforth as a dynamic instance. Specified with a path through the
     instance hierarchy (which in the future will be replaced with an AppID).
-    Lowers to a `hw.globalref` but unlike a global ref, does not require all of
-    the ops participating in the globalref to contain a back pointer attribute.
+    Lowers to a `hw.hierpath` but unlike a global ref, does not require all of
+    the ops participating in the hierpath to contain a back pointer attribute.
     Allows users to efficiently add placements to a large number of dynamic
     instances which happen to map to a small number of static instances by
-    bulk-adding the necessary `hw.globalref` attributes.
+    bulk-adding the necessary `hw.hierpath` attributes.
 
     During the lowering, moves the operations in the body to the top level and
-    gives them the symbol of the globalref which was created to replace the
+    gives them the symbol of the hierpath which was created to replace the
     dynamic instance.
   }];
   let arguments = (ins InnerRefAttr:$instanceRef);
@@ -128,12 +154,13 @@ def DynamicInstanceOp : MSFTOp<"instance.dynamic",
   }];
 
   let extraClassDeclaration = [{
-    ::mlir::ArrayAttr globalRefPath();
+    ::mlir::ArrayAttr getPath();
   }];
 }
 
 def DynamicInstanceVerbatimAttrOp : MSFTOp<
-    "instance.verb_attr", [DeclareOpInterfaceMethods<DynInstDataOpInterface>]> {
+    "instance.verb_attr", [
+      DeclareOpInterfaceMethods<UnaryDynInstDataOpInterface>]> {
   let summary = "Specify an arbitrary attribute attached to a dynamic instance";
   let description = [{
     Allows a user to specify a custom attribute name and value which is attached
@@ -148,5 +175,11 @@ def DynamicInstanceVerbatimAttrOp : MSFTOp<
                        OptionalAttr<FlatSymbolRefAttr>:$ref);
   let assemblyFormat = [{
     ($ref^)? `name` `:` $name `value` `:` $value (`path` `:` $subPath^)? attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    Operation* getTopModule(circt::hw::HWSymbolCache &symCache) {
+      return getHierPathTopModule(getOperation()->getLoc(), symCache, getPathSym());
+    }
   }];
 }

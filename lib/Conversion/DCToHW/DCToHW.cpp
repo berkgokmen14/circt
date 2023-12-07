@@ -18,11 +18,11 @@
 #include "circt/Dialect/DC/DCPasses.h"
 #include "circt/Dialect/ESI/ESIOps.h"
 #include "circt/Dialect/ESI/ESITypes.h"
+#include "circt/Dialect/HW/ConversionPatterns.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWTypes.h"
 #include "circt/Dialect/Seq/SeqOps.h"
 #include "circt/Support/BackedgeBuilder.h"
-#include "circt/Support/ConversionPatterns.h"
 #include "circt/Support/ValueMapper.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/Pass/PassManager.h"
@@ -54,16 +54,6 @@ static Type tupleToStruct(TupleType tuple) {
   return hw::StructType::get(ctx, hwfields);
 }
 
-/// Converts the range of 'types' into a `hw`-dialect type. The range will be
-/// converted to a `hw.struct` type.
-// NOLINTNEXTLINE(misc-no-recursion)
-static Type toHWType(Type t);
-static Type toHWType(TypeRange types) {
-  if (types.size() == 1)
-    return toHWType(types.front());
-  return toHWType(mlir::TupleType::get(types[0].getContext(), types));
-}
-
 /// Converts any type 't' into a `hw`-compatible type.
 /// tuple -> hw.struct
 /// none -> i0
@@ -88,7 +78,7 @@ static Type toESIHWType(Type t) {
       llvm::TypeSwitch<Type, Type>(t)
           .Case([](ValueType vt) {
             return esi::ChannelType::get(vt.getContext(),
-                                         toHWType(vt.getInnerTypes()));
+                                         toHWType(vt.getInnerType()));
           })
           .Case([](TokenType tt) {
             return esi::ChannelType::get(tt.getContext(),
@@ -116,13 +106,13 @@ public:
   ESITypeConverter() {
     addConversion([](Type type) -> Type { return toESIHWType(type); });
     addConversion([](esi::ChannelType t) -> Type { return t; });
-
     addTargetMaterialization(
         [](mlir::OpBuilder &builder, mlir::Type resultType,
            mlir::ValueRange inputs,
            mlir::Location loc) -> std::optional<mlir::Value> {
           if (inputs.size() != 1)
             return std::nullopt;
+
           return inputs[0];
         });
 
@@ -132,6 +122,7 @@ public:
            mlir::Location loc) -> std::optional<mlir::Value> {
           if (inputs.size() != 1)
             return std::nullopt;
+
           return inputs[0];
         });
   }
@@ -263,8 +254,8 @@ struct RTLBuilder {
            "No global reset provided to this RTLBuilder - a reset "
            "signal must be provided to the reg(...) function.");
 
-    return b.create<seq::CompRegOp>(loc, in.getType(), in, resolvedClk, name,
-                                    resolvedRst, rstValue, StringAttr());
+    return b.create<seq::CompRegOp>(loc, in, resolvedClk, resolvedRst, rstValue,
+                                    name);
   }
 
   Value cmp(Value lhs, Value rhs, comb::ICmpPredicate predicate,
@@ -320,24 +311,6 @@ struct RTLBuilder {
   Value concat(ValueRange values, StringRef name = {}) {
     return buildNamedOp([&]() { return b.create<comb::ConcatOp>(loc, values); },
                         name);
-  }
-
-  ///  Packs a list of values into a hw.struct.
-  Value pack(ValueRange values, Type structType = Type(), StringRef name = {}) {
-    if (!structType)
-      structType = toHWType(values.getTypes());
-
-    return buildNamedOp(
-        [&]() { return b.create<hw::StructCreateOp>(loc, structType, values); },
-        name);
-  }
-
-  ///  Unpacks a hw.struct into a list of values.
-  ValueRange unpack(Value value) {
-    auto structType = value.getType().cast<hw::StructType>();
-    llvm::SmallVector<Type> innerTypes;
-    structType.getInnerTypes(innerTypes);
-    return b.create<hw::StructExplodeOp>(loc, innerTypes, value).getResults();
   }
 
   llvm::SmallVector<Value> extractBits(Value v, StringRef name = {}) {
@@ -493,18 +466,16 @@ static UnwrappedIO unwrapIO(Operation *op, ValueRange operands,
 ///  attributes assigned to the arguments.
 static FailureOr<std::pair<Value, Value>> getClockAndReset(Operation *op) {
   auto *parent = op->getParentOp();
-  mlir::FunctionOpInterface parentFuncOp =
-      dyn_cast<mlir::FunctionOpInterface>(parent);
+  auto parentFuncOp = dyn_cast<HWModuleLike>(parent);
   if (!parentFuncOp)
-    return parent->emitOpError(
-        "parent op does not implement FunctionOpInterface");
+    return parent->emitOpError("parent op does not implement HWModuleLike");
 
-  SmallVector<DictionaryAttr> argAttrs;
-  parentFuncOp.getAllArgAttrs(argAttrs);
+  auto argAttrs = parentFuncOp.getAllInputAttrs();
 
   std::optional<size_t> clockIdx, resetIdx;
 
-  for (auto [idx, attrs] : llvm::enumerate(argAttrs)) {
+  for (auto [idx, battrs] : llvm::enumerate(argAttrs)) {
+    auto attrs = cast<DictionaryAttr>(battrs);
     if (attrs.get("dc.clock")) {
       if (clockIdx)
         return parent->emitOpError(
@@ -526,8 +497,8 @@ static FailureOr<std::pair<Value, Value>> getClockAndReset(Operation *op) {
   if (!resetIdx)
     return parent->emitOpError("no argument contains a 'dc.reset' attribute");
 
-  return {std::make_pair(parentFuncOp.getArgument(*clockIdx),
-                         parentFuncOp.getArgument(*resetIdx))};
+  return {std::make_pair(parentFuncOp.getArgumentForInput(*clockIdx),
+                         parentFuncOp.getArgumentForInput(*resetIdx))};
 }
 
 class ForkConversionPattern : public OpConversionPattern<ForkOp> {
@@ -685,6 +656,34 @@ public:
   }
 };
 
+class ToESIConversionPattern : public OpConversionPattern<ToESIOp> {
+  // Essentially a no-op, seeing as the type converter does the heavy
+  // lifting here.
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ToESIOp op, OpAdaptor operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, operands.getOperands());
+    return success();
+  }
+};
+
+class FromESIConversionPattern : public OpConversionPattern<FromESIOp> {
+  // Essentially a no-op, seeing as the type converter does the heavy
+  // lifting here.
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(FromESIOp op, OpAdaptor operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, operands.getOperands());
+    return success();
+  }
+};
+
 class SinkConversionPattern : public OpConversionPattern<SinkOp> {
 public:
   using OpConversionPattern<SinkOp>::OpConversionPattern;
@@ -696,7 +695,7 @@ public:
     UnwrappedIO io = unwrapIO(op, operands.getOperands(), rewriter, bb);
     io.inputs[0].ready->setValue(
         RTLBuilder(op.getLoc(), rewriter).constant(1, 1));
-    rewriter.replaceOp(op, io.outputs[0].channel);
+    rewriter.eraseOp(op);
     return success();
   }
 };
@@ -711,7 +710,6 @@ public:
     UnwrappedIO io = unwrapIO(op, operands.getOperands(), rewriter, bb);
     RTLBuilder rtlb(op.getLoc(), rewriter);
     io.outputs[0].valid->setValue(rtlb.constant(1, 1));
-    io.outputs[0].data->setValue(rtlb.constant(0, 0));
     rewriter.replaceOp(op, io.outputs[0].channel);
     return success();
   }
@@ -729,14 +727,7 @@ public:
     RTLBuilder rtlb(op.getLoc(), rewriter);
     auto &input = io.inputs[0];
     auto &output = io.outputs[0];
-
-    Value packedData;
-    if (operands.getInputs().size() > 1)
-      packedData = rtlb.pack(operands.getInputs());
-    else
-      packedData = operands.getInputs()[0];
-
-    output.data->setValue(packedData);
+    output.data->setValue(operands.getInput());
     connect(input, output);
     rewriter.replaceOp(op, output.channel);
     return success();
@@ -759,10 +750,7 @@ public:
     auto &output = io.outputs[0];
 
     llvm::SmallVector<Value> unpackedValues;
-    if (op.getInput().getType().cast<ValueType>().getInnerTypes().size() != 1)
-      unpackedValues = rtlb.unpack(input.data);
-    else
-      unpackedValues.push_back(input.data);
+    unpackedValues.push_back(input.data);
 
     connect(input, output);
     llvm::SmallVector<Value> outputs;
@@ -802,10 +790,9 @@ static bool isDCType(Type type) { return type.isa<TokenType, ValueType>(); }
 ///  Returns true if the given `op` is considered as legal - i.e. it does not
 ///  contain any dc-typed values.
 static bool isLegalOp(Operation *op) {
-  if (auto funcOp = dyn_cast<FunctionOpInterface>(op)) {
-    return llvm::none_of(funcOp.getArgumentTypes(), isDCType) &&
-           llvm::none_of(funcOp.getResultTypes(), isDCType) &&
-           llvm::none_of(funcOp.getFunctionBody().getArgumentTypes(), isDCType);
+  if (auto funcOp = dyn_cast<HWModuleLike>(op)) {
+    return llvm::none_of(funcOp.getPortTypes(), isDCType) &&
+           llvm::none_of(funcOp.getBodyBlock()->getArgumentTypes(), isDCType);
   }
 
   bool operandsOK = llvm::none_of(op->getOperandTypes(), isDCType);
@@ -821,11 +808,11 @@ namespace {
 class DCToHWPass : public DCToHWBase<DCToHWPass> {
 public:
   void runOnOperation() override {
-    mlir::ModuleOp mod = getOperation();
+    Operation *parent = getOperation();
 
     // Lowering to HW requires that every DC-typed value is used exactly once.
     // Check whether this precondition is met, and if not, exit.
-    auto walkRes = mod.walk([&](Operation *op) {
+    auto walkRes = parent->walk([&](Operation *op) {
       for (auto res : op->getResults()) {
         if (res.getType().isa<dc::TokenType, dc::ValueType>()) {
           if (res.use_empty()) {
@@ -843,7 +830,7 @@ public:
     });
 
     if (walkRes.wasInterrupted()) {
-      mod->emitOpError()
+      parent->emitOpError()
           << "DCToHW: failed to verify that all values "
              "are used exactly once. Remember to run the "
              "fork/sink materialization pass before HW lowering.";
@@ -859,16 +846,17 @@ public:
     // between instantiated modules.
     target.addIllegalDialect<dc::DCDialect>();
 
-    RewritePatternSet patterns(mod.getContext());
+    RewritePatternSet patterns(parent->getContext());
 
     patterns.insert<ForkConversionPattern, JoinConversionPattern,
                     SelectConversionPattern, BranchConversionPattern,
                     PackConversionPattern, UnpackConversionPattern,
                     BufferConversionPattern, SourceConversionPattern,
-                    SinkConversionPattern, TypeConversionPattern>(
-        typeConverter, mod.getContext());
+                    SinkConversionPattern, TypeConversionPattern,
+                    ToESIConversionPattern, FromESIConversionPattern>(
+        typeConverter, parent->getContext());
 
-    if (failed(applyPartialConversion(mod, target, std::move(patterns))))
+    if (failed(applyPartialConversion(parent, target, std::move(patterns))))
       signalPassFailure();
   }
 };

@@ -99,7 +99,8 @@ bool UnrollForLoopSchedule::usesExternalMemory(AffineForOp affineFor) {
 DenseSet<AffineMapAccessInterface>
 UnrollForLoopSchedule::updateMemoryOps(AffineForOp affineFor) {
   DenseSet<AffineMapAccessInterface> memOps;
-  auto &bodyRegion = affineFor.getLoopBody();
+  assert(affineFor.getLoopRegions().size() == 1);
+  auto &bodyRegion = *affineFor.getLoopRegions().front();
   // Only affine memory dependencies are supported
   auto affineLdOps = bodyRegion.getOps<AffineLoadOp>();
   auto affineStOps = bodyRegion.getOps<AffineStoreOp>();
@@ -258,7 +259,8 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   OpBuilder builder(affineFor);
   IRRewriter rewriter(builder);
   Block *blockToFuse =
-      loopIsPromoted ? tmpBlk : &tmpFor.getLoopBody().getBlocks().front();
+      loopIsPromoted ? tmpBlk
+                     : &tmpFor.getLoopRegions().front()->getBlocks().front();
   AffineForOp newAnchorOp = nullptr;
   unsigned fuseIterations = getFuseIterations(affineFor);
   for (unsigned i = 0; i < fuseIterations; ++i) {

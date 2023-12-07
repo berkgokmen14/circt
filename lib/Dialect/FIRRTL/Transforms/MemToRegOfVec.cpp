@@ -48,10 +48,11 @@ struct MemToRegOfVecPass : public MemToRegOfVecBase<MemToRegOfVecPass> {
     });
     if (it != body->end()) {
       auto &instanceGraph = getAnalysis<InstanceGraph>();
-      auto *node = instanceGraph.lookup(cast<hw::HWModuleLike>(*it));
-      llvm::for_each(llvm::depth_first(node), [&](hw::InstanceGraphNode *node) {
-        dutModuleSet.insert(node->getModule());
-      });
+      auto *node = instanceGraph.lookup(cast<igraph::ModuleOpInterface>(*it));
+      llvm::for_each(llvm::depth_first(node),
+                     [&](igraph::InstanceGraphNode *node) {
+                       dutModuleSet.insert(node->getModule());
+                     });
     } else {
       auto mods = circtOp.getOps<FModuleOp>();
       dutModuleSet.insert(mods.begin(), mods.end());

@@ -32,18 +32,17 @@ using namespace circt;
 using namespace handshake;
 using namespace dc;
 using namespace hw;
+using namespace handshaketodc;
 
 namespace {
 
-using ConvertedOps = DenseSet<Operation *>;
-
 struct DCTuple {
   DCTuple() = default;
-  DCTuple(Value token, ValueRange data) : token(token), data(data) {}
+  DCTuple(Value token, Value data) : token(token), data(data) {}
   DCTuple(dc::UnpackOp unpack)
-      : token(unpack.getToken()), data(unpack.getOutputs()) {}
+      : token(unpack.getToken()), data(unpack.getOutput()) {}
   Value token;
-  ValueRange data;
+  Value data;
 };
 
 // Unpack a !dc.value<...> into a DCTuple.
@@ -51,11 +50,11 @@ static DCTuple unpack(OpBuilder &b, Value v) {
   if (v.getType().isa<dc::ValueType>())
     return DCTuple(b.create<dc::UnpackOp>(v.getLoc(), v));
   assert(v.getType().isa<dc::TokenType>() && "Expected a dc::TokenType");
-  return DCTuple(v, ValueRange{});
+  return DCTuple(v, {});
 }
 
-static Value pack(OpBuilder &b, Value token, ValueRange data) {
-  if (data.empty())
+static Value pack(OpBuilder &b, Value token, Value data = {}) {
+  if (!data)
     return token;
   return b.create<dc::PackOp>(token.getLoc(), token, data);
 }
@@ -85,8 +84,8 @@ public:
 
           // Materialize !dc.token -> !dc.value<>
           auto vt = resultType.dyn_cast<dc::ValueType>();
-          if (vt && vt.getInnerTypes().empty())
-            return pack(builder, inputs.front(), ValueRange{});
+          if (vt && !vt.getInnerType())
+            return pack(builder, inputs.front());
 
           return inputs[0];
         });
@@ -105,8 +104,8 @@ public:
 
           // Materialize !dc.token -> !dc.value<>
           auto vt = resultType.dyn_cast<dc::ValueType>();
-          if (vt && vt.getInnerTypes().empty())
-            return pack(builder, inputs.front(), ValueRange{});
+          if (vt && !vt.getInnerType())
+            return pack(builder, inputs.front());
 
           return inputs[0];
         });
@@ -144,7 +143,7 @@ public:
         op.getLoc(), ValueRange{condition.token, data.token});
 
     // Pack that together with the condition data.
-    auto packedCondition = pack(rewriter, join, ValueRange{condition.data});
+    auto packedCondition = pack(rewriter, join, condition.data);
 
     // Branch on the input data and the joined control input.
     auto branch = rewriter.create<dc::BranchOp>(op.getLoc(), packedCondition);
@@ -175,7 +174,7 @@ public:
     // Pack the fork result tokens with the input data, and replace the uses.
     llvm::SmallVector<Value, 4> packed;
     for (auto res : forkOut.getResults())
-      packed.push_back(pack(rewriter, res, ValueRange{input.data}));
+      packed.push_back(pack(rewriter, res, input.data));
 
     rewriter.replaceOp(op, packed);
     return success();
@@ -216,14 +215,14 @@ public:
     for (auto input : adaptor.getDataOperands()) {
       auto up = unpack(rewriter, input);
       tokens.push_back(up.token);
-      if (!up.data.empty())
-        data.push_back(up.data.front());
+      if (up.data)
+        data.push_back(up.data);
     }
 
     // control-side
     Value selectedIndex = rewriter.create<dc::MergeOp>(op.getLoc(), tokens);
     auto mergeOpUnpacked = unpack(rewriter, selectedIndex);
-    auto selValue = mergeOpUnpacked.data.front();
+    auto selValue = mergeOpUnpacked.data;
 
     Value dataSide = selectedIndex;
     if (!data.empty()) {
@@ -232,7 +231,7 @@ public:
                                                       data[0], data[1]);
       convertedOps->insert(dataMux);
       // Pack the data mux with the control token.
-      auto packed = pack(rewriter, mergeOpUnpacked.token, ValueRange{dataMux});
+      auto packed = pack(rewriter, mergeOpUnpacked.token, dataMux);
 
       dataSide = packed;
     }
@@ -243,8 +242,7 @@ public:
       selValue = rewriter.create<arith::IndexCastOp>(
           op.getLoc(), rewriter.getIndexType(), selValue);
       convertedOps->insert(selValue.getDefiningOp());
-      selectedIndex =
-          pack(rewriter, mergeOpUnpacked.token, ValueRange{selValue});
+      selectedIndex = pack(rewriter, mergeOpUnpacked.token, selValue);
     }
 
     rewriter.replaceOp(op, {dataSide, selectedIndex});
@@ -269,7 +267,7 @@ public:
     // Wrap all outputs with the synchronization token
     llvm::SmallVector<Value, 4> wrappedInputs;
     for (auto input : adaptor.getOperands())
-      wrappedInputs.push_back(pack(rewriter, syncToken, ValueRange{input}));
+      wrappedInputs.push_back(pack(rewriter, syncToken, input));
 
     rewriter.replaceOp(op, wrappedInputs);
 
@@ -291,8 +289,7 @@ public:
     auto cst =
         rewriter.create<arith::ConstantOp>(op.getLoc(), adaptor.getValue());
     convertedOps->insert(cst);
-    rewriter.replaceOp(op,
-                       pack(rewriter, token, llvm::SmallVector<Value>{cst}));
+    rewriter.replaceOp(op, pack(rewriter, token, cst));
     return success();
   }
 };
@@ -310,14 +307,11 @@ public:
   LogicalResult
   matchAndRewrite(Operation *op, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
-    if (op->getNumResults() != 1)
-      return op->emitOpError("expected single result for pattern to apply");
-
     llvm::SmallVector<Value, 4> inputData;
     llvm::SmallVector<Value, 4> inputTokens;
     for (auto input : operands) {
       auto dct = unpack(rewriter, input);
-      inputData.append(dct.data.begin(), dct.data.end());
+      inputData.push_back(dct.data);
       inputTokens.push_back(dct.token);
     }
 
@@ -339,9 +333,12 @@ public:
     Operation *newOp = rewriter.create(state);
     joinedOps->insert(newOp);
 
-    // Pack the result token with the output data, and replace the use.
-    rewriter.replaceOp(
-        op, ValueRange{pack(rewriter, join.getResult(), newOp->getResults())});
+    // Pack the result token with the output data, and replace the uses.
+    llvm::SmallVector<Value> results;
+    for (auto result : newOp->getResults())
+      results.push_back(pack(rewriter, join, result));
+
+    rewriter.replaceOp(op, results);
 
     return success();
   }
@@ -393,9 +390,9 @@ public:
   }
 };
 
-class ReturnOpConversion : public DCOpConversionPattern<handshake::ReturnOp> {
+class ReturnOpConversion : public OpConversionPattern<handshake::ReturnOp> {
 public:
-  using DCOpConversionPattern<handshake::ReturnOp>::DCOpConversionPattern;
+  using OpConversionPattern<handshake::ReturnOp>::OpConversionPattern;
   using OpAdaptor = typename handshake::ReturnOp::Adaptor;
 
   LogicalResult
@@ -421,7 +418,7 @@ public:
   matchAndRewrite(handshake::MuxOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto select = unpack(rewriter, adaptor.getSelectOperand());
-    auto selectData = select.data.front();
+    auto selectData = select.data;
     auto selectToken = select.token;
     bool isIndexType = selectData.getType().isa<IndexType>();
 
@@ -437,7 +434,7 @@ public:
     // The data and control muxes are assumed one-hot and the base-case is set
     // as the first input.
     if (withData)
-      dataMux = inputs[0].data.front();
+      dataMux = inputs[0].data;
 
     llvm::SmallVector<Value> controlMuxInputs = {inputs.front().token};
     for (auto [i, input] :
@@ -446,7 +443,7 @@ public:
         continue;
 
       Value cmpIndex;
-      Value inputData = input.data.front();
+      Value inputData = input.data;
       Value inputControl = input.token;
       if (isIndexType) {
         cmpIndex = rewriter.create<arith::ConstantIndexOp>(op.getLoc(), i);
@@ -467,50 +464,48 @@ public:
       // And similarly for the control mux, by muxing the input token with a
       // select value that has it's control from the original select token +
       // the inputSelected value.
-      auto inputSelectedControl =
-          pack(rewriter, selectToken, ValueRange{inputSelected});
+      auto inputSelectedControl = pack(rewriter, selectToken, inputSelected);
       controlMux = rewriter.create<dc::SelectOp>(
           op.getLoc(), inputSelectedControl, inputControl, controlMux);
       convertedOps->insert(controlMux.getDefiningOp());
     }
 
     // finally, pack the control and data side muxes into the output value.
-    rewriter.replaceOp(op, pack(rewriter, controlMux,
-                                withData ? ValueRange{dataMux} : ValueRange{}));
+    rewriter.replaceOp(
+        op, pack(rewriter, controlMux, withData ? dataMux : Value{}));
     return success();
   }
 };
 
-static hw::ModulePortInfo getModulePortInfoHS(TypeConverter &tc,
+static hw::ModulePortInfo getModulePortInfoHS(const TypeConverter &tc,
                                               handshake::FuncOp funcOp) {
-  hw::ModulePortInfo ports({}, {});
+  SmallVector<hw::PortInfo> inputs, outputs;
   auto *ctx = funcOp->getContext();
   auto ft = funcOp.getFunctionType();
 
   // Add all inputs of funcOp.
   for (auto [index, type] : llvm::enumerate(ft.getInputs())) {
-    ports.inputs.push_back(
-        {{StringAttr::get(ctx, "in" + std::to_string(index)),
-          tc.convertType(type), hw::ModulePort::Direction::Input},
-         index,
-         hw::InnerSymAttr{}});
+    inputs.push_back({{StringAttr::get(ctx, "in" + std::to_string(index)),
+                       tc.convertType(type), hw::ModulePort::Direction::Input},
+                      index,
+                      {}});
   }
 
   // Add all outputs of funcOp.
   for (auto [index, type] : llvm::enumerate(ft.getResults())) {
-    ports.outputs.push_back(
+    outputs.push_back(
         {{StringAttr::get(ctx, "out" + std::to_string(index)),
           tc.convertType(type), hw::ModulePort::Direction::Output},
          index,
-         hw::InnerSymAttr{}});
+         {}});
   }
 
-  return ports;
+  return hw::ModulePortInfo{inputs, outputs};
 }
 
-class FuncOpConversion : public DCOpConversionPattern<handshake::FuncOp> {
+class FuncOpConversion : public OpConversionPattern<handshake::FuncOp> {
 public:
-  using DCOpConversionPattern<handshake::FuncOp>::DCOpConversionPattern;
+  using OpConversionPattern<handshake::FuncOp>::OpConversionPattern;
   using OpAdaptor = typename handshake::FuncOp::Adaptor;
 
   // Replaces a handshake.func with a hw.module, converting the argument and
@@ -551,53 +546,19 @@ class HandshakeToDCPass : public HandshakeToDCBase<HandshakeToDCPass> {
 public:
   void runOnOperation() override {
     mlir::ModuleOp mod = getOperation();
+    auto targetModifier = [](mlir::ConversionTarget &target) {
+      target.addLegalDialect<hw::HWDialect, func::FuncDialect>();
+    };
 
-    // Maintain the set of operations which has been converted either through
-    // unit rate conversion, or as part of other conversions.
-    // Rationale:
-    // This is needed for all of the arith ops that get created as part of the
-    // handshake ops (e.g. arith.select for handshake.mux). There's a bit of a
-    // dilemma here seeing as all operations need to be converted/touched in a
-    // handshake.func - which is done so by UnitRateConversionPattern (when no
-    // other pattern applies). However, we obviously don't want to run said
-    // pattern on these newly created ops since they do not have handshake
-    // semantics.
-    ConvertedOps convertedOps;
+    auto patternBuilder = [&](TypeConverter &typeConverter,
+                              handshaketodc::ConvertedOps &convertedOps,
+                              RewritePatternSet &patterns) {
+      patterns.add<FuncOpConversion, ReturnOpConversion>(typeConverter,
+                                                         mod.getContext());
+    };
 
-    ConversionTarget target(getContext());
-    target.addIllegalDialect<handshake::HandshakeDialect>();
-    target.addLegalDialect<dc::DCDialect, func::FuncDialect, hw::HWDialect>();
-    target.addLegalOp<mlir::ModuleOp>();
-
-    // The various patterns will insert new operations into the module to
-    // facilitate the conversion - however, these operations must be
-    // distinguishable from already converted operations (which may be of the
-    // same type as the newly inserted operations). To do this, we mark all
-    // operations which have been converted as legal, and all other operations
-    // as illegal.
-    target.markUnknownOpDynamicallyLegal(
-        [&](Operation *op) { return convertedOps.contains(op); });
-
-    DCTypeConverter typeConverter;
-    RewritePatternSet patterns(&getContext());
-
-    // Add handshake conversion patterns.
-    // Note: merge/control merge are not supported - these are non-deterministic
-    // operators and we do not care for them.
-    patterns
-        .add<FuncOpConversion, BufferOpConversion, CondBranchConversionPattern,
-             SinkOpConversionPattern, SourceOpConversionPattern,
-             MuxOpConversionPattern, ReturnOpConversion,
-             ForkOpConversionPattern, JoinOpConversion,
-             ControlMergeOpConversion, ConstantOpConversion, SyncOpConversion>(
-            &getContext(), typeConverter, &convertedOps);
-
-    // ALL other single-result operations are converted via the
-    // UnitRateConversionPattern.
-    patterns.add<UnitRateConversionPattern>(&getContext(), typeConverter,
-                                            &convertedOps);
-
-    if (failed(applyPartialConversion(mod, target, std::move(patterns))))
+    LogicalResult res = runHandshakeToDC(mod, patternBuilder, targetModifier);
+    if (failed(res))
       signalPassFailure();
   }
 };
@@ -605,4 +566,63 @@ public:
 
 std::unique_ptr<mlir::Pass> circt::createHandshakeToDCPass() {
   return std::make_unique<HandshakeToDCPass>();
+}
+
+LogicalResult circt::handshaketodc::runHandshakeToDC(
+    mlir::Operation *op,
+    llvm::function_ref<void(TypeConverter &typeConverter,
+                            handshaketodc::ConvertedOps &convertedOps,
+                            RewritePatternSet &patterns)>
+        patternBuilder,
+    llvm::function_ref<void(mlir::ConversionTarget &)> configureTarget) {
+  // Maintain the set of operations which has been converted either through
+  // unit rate conversion, or as part of other conversions.
+  // Rationale:
+  // This is needed for all of the arith ops that get created as part of the
+  // handshake ops (e.g. arith.select for handshake.mux). There's a bit of a
+  // dilemma here seeing as all operations need to be converted/touched in a
+  // handshake.func - which is done so by UnitRateConversionPattern (when no
+  // other pattern applies). However, we obviously don't want to run said
+  // pattern on these newly created ops since they do not have handshake
+  // semantics.
+  handshaketodc::ConvertedOps convertedOps;
+  mlir::MLIRContext *ctx = op->getContext();
+  ConversionTarget target(*ctx);
+  target.addIllegalDialect<handshake::HandshakeDialect>();
+  target.addLegalDialect<dc::DCDialect>();
+  target.addLegalOp<mlir::ModuleOp>();
+
+  // And any user-specified target adjustments
+  if (configureTarget)
+    configureTarget(target);
+
+  // The various patterns will insert new operations into the module to
+  // facilitate the conversion - however, these operations must be
+  // distinguishable from already converted operations (which may be of the
+  // same type as the newly inserted operations). To do this, we mark all
+  // operations which have been converted as legal, and all other operations
+  // as illegal.
+  target.markUnknownOpDynamicallyLegal(
+      [&](Operation *op) { return convertedOps.contains(op); });
+
+  DCTypeConverter typeConverter;
+  RewritePatternSet patterns(ctx);
+
+  // Add handshake conversion patterns.
+  // Note: merge/control merge are not supported - these are non-deterministic
+  // operators and we do not care for them.
+  patterns
+      .add<BufferOpConversion, CondBranchConversionPattern,
+           SinkOpConversionPattern, SourceOpConversionPattern,
+           MuxOpConversionPattern, ForkOpConversionPattern, JoinOpConversion,
+           ControlMergeOpConversion, ConstantOpConversion, SyncOpConversion>(
+          ctx, typeConverter, &convertedOps);
+
+  // ALL other single-result operations are converted via the
+  // UnitRateConversionPattern.
+  patterns.add<UnitRateConversionPattern>(ctx, typeConverter, &convertedOps);
+
+  // Build any user-specified patterns
+  patternBuilder(typeConverter, convertedOps, patterns);
+  return applyPartialConversion(op, target, std::move(patterns));
 }

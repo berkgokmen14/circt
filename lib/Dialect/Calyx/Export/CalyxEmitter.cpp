@@ -44,7 +44,7 @@ static constexpr std::string_view exclamationMark() { return "!"; }
 static constexpr std::string_view equals() { return "="; }
 static constexpr std::string_view comma() { return ", "; }
 static constexpr std::string_view arrow() { return " -> "; }
-static constexpr std::string_view delimiter() { return "\""; }
+static constexpr std::string_view quote() { return "\""; }
 static constexpr std::string_view apostrophe() { return "'"; }
 static constexpr std::string_view LBraceEndL() { return "{\n"; }
 static constexpr std::string_view RBraceEndL() { return "}\n"; }
@@ -62,7 +62,7 @@ constexpr std::array<StringRef, 7> integerAttributes{
 
 /// A list of boolean attributes supported by the native Calyx compiler.
 constexpr std::array<StringRef, 12> booleanAttributes{
-    "clk",      "done",   "go",          "reset",  "generated",   "precious",
+    "clk",      "reset",  "go",          "done",   "generated",   "precious",
     "toplevel", "stable", "nointerface", "inline", "state_share", "data",
 };
 
@@ -84,18 +84,6 @@ static bool isValidCalyxAttribute(StringRef identifier) {
 
   return llvm::find(integerAttributes, identifier) != integerAttributes.end() ||
          llvm::find(booleanAttributes, identifier) != booleanAttributes.end();
-}
-
-/// Additional information about an unsupported operation.
-static std::optional<StringRef> unsupportedOpInfo(Operation *op) {
-  return llvm::TypeSwitch<Operation *, std::optional<StringRef>>(op)
-      .Case<ExtSILibOp>([](auto) -> std::optional<StringRef> {
-        static constexpr std::string_view info =
-            "calyx.std_extsi is currently not available in the native Rust "
-            "compiler (see github.com/cucapra/calyx/issues/1009)";
-        return {info};
-      })
-      .Default([](auto) { return std::nullopt; });
 }
 
 /// A tracker to determine which libraries should be imported for a given
@@ -126,9 +114,14 @@ private:
   /// Returns the library name for a given Operation Type.
   FailureOr<StringRef> getLibraryFor(Operation *op) {
     return TypeSwitch<Operation *, FailureOr<StringRef>>(op)
-        .Case<MemoryOp, RegisterOp, NotLibOp, AndLibOp, OrLibOp, XorLibOp,
-              AddLibOp, SubLibOp, GtLibOp, LtLibOp, EqLibOp, NeqLibOp, GeLibOp,
-              LeLibOp, LshLibOp, RshLibOp, SliceLibOp, PadLibOp, WireLibOp>(
+        .Case<AddLibOp, RegisterOp, UndefLibOp, WireLibOp>(
+            [&](auto op) -> FailureOr<StringRef> {
+              static constexpr std::string_view sCompile = "compile";
+              return {sCompile};
+            })
+        .Case<MemoryOp, NotLibOp, AndLibOp, OrLibOp, XorLibOp, SubLibOp,
+              GtLibOp, LtLibOp, EqLibOp, NeqLibOp, GeLibOp, LeLibOp, LshLibOp,
+              RshLibOp, SliceLibOp, PadLibOp, MuxLibOp>(
             [&](auto op) -> FailureOr<StringRef> {
               static constexpr std::string_view sCore = "core";
               return {sCore};
@@ -155,9 +148,6 @@ private:
         /*.Case<>([&](auto op) { library = "math"; })*/
         .Default([&](auto op) {
           auto diag = op->emitOpError() << "not supported for emission";
-          auto note = unsupportedOpInfo(op);
-          if (note)
-            diag.attachNote() << *note;
           return diag;
         });
   }
@@ -209,8 +199,8 @@ struct Emitter {
     auto emitImport = [&](StringRef library) {
       // Libraries share a common relative path:
       //   primitives/<library-name>.futil
-      os << "import " << delimiter() << "primitives/" << library << period()
-         << "futil" << delimiter() << semicolonEndL();
+      os << "import " << quote() << "primitives/" << library << period()
+         << "futil" << quote() << semicolonEndL();
     };
 
     auto libraryNames = importTracker.getLibraryNames(op);
@@ -254,6 +244,9 @@ struct Emitter {
 
   // Register emission
   void emitRegister(RegisterOp reg);
+
+  // Emit undefined op
+  void emitUndef(UndefLibOp op);
 
   // Memory emission
   void emitMemory(MemoryOp memory);
@@ -312,7 +305,11 @@ private:
   /// Since ports are structural in nature and not operations, an
   /// extra boolean value is added to determine whether this is a port of the
   /// given operation.
-  std::string getAttribute(Operation *op, NamedAttribute attr, bool isPort) {
+  ///
+  /// By default, this generates format (1) but can generate format (2) if
+  /// `at_format` is false.
+  std::string getAttribute(Operation *op, NamedAttribute attr, bool isPort,
+                           bool atFormat) {
 
     std::optional<StringRef> identifierOpt = getCalyxAttrIdentifier(attr);
     // Verify this is a Calyx attribute
@@ -324,29 +321,25 @@ private:
     if (!isValidCalyxAttribute(identifier))
       return "";
 
-    // Determines whether the attribute should follow format (2).
-    bool isGroupOrComponentAttr = isa<GroupOp, ComponentOp>(op) && !isPort;
-
     std::string output;
     llvm::raw_string_ostream buffer(output);
-    buffer.reserveExtraSpace(16);
+    buffer.reserveExtraSpace(32);
 
     bool isBooleanAttribute =
         llvm::find(booleanAttributes, identifier) != booleanAttributes.end();
+
     if (attr.getValue().isa<UnitAttr>()) {
       assert(isBooleanAttribute &&
              "Non-boolean attributes must provide an integer value.");
-      if (isGroupOrComponentAttr) {
-        buffer << LAngleBracket() << delimiter() << identifier << delimiter()
-               << equals() << "1" << RAngleBracket();
+      if (!atFormat) {
+        buffer << quote() << identifier << quote() << equals() << "1";
       } else {
-        buffer << addressSymbol() << identifier << space();
+        buffer << addressSymbol() << identifier;
       }
     } else if (auto intAttr = attr.getValue().dyn_cast<IntegerAttr>()) {
       APInt value = intAttr.getValue();
-      if (isGroupOrComponentAttr) {
-        buffer << LAngleBracket() << delimiter() << identifier << delimiter()
-               << equals() << value << RAngleBracket();
+      if (!atFormat) {
+        buffer << quote() << identifier << quote() << equals() << value;
       } else {
         buffer << addressSymbol() << identifier;
         // The only time we may omit the value is when it is a Boolean attribute
@@ -357,7 +350,6 @@ private:
           value.toStringUnsigned(s, /*Radix=*/10);
           buffer << LParen() << s << RParen();
         }
-        buffer << space();
       }
     }
     return buffer.str();
@@ -365,17 +357,38 @@ private:
 
   /// Emits the attributes of a dictionary. If the `attributes` dictionary is
   /// not nullptr, we assume this is for a port.
-  std::string getAttributes(Operation *op,
+  std::string getAttributes(Operation *op, bool atFormat,
                             DictionaryAttr attributes = nullptr) {
     bool isPort = attributes != nullptr;
+    bool atLeastOne = false;
+
     if (!isPort)
       attributes = op->getAttrDictionary();
 
-    SmallString<16> calyxAttributes;
-    for (auto &attr : attributes)
-      calyxAttributes.append(getAttribute(op, attr, isPort));
+    std::string calyxAttributes;
+    llvm::raw_string_ostream buf(calyxAttributes);
 
-    return calyxAttributes.c_str();
+    if (!atFormat)
+      buf << LAngleBracket();
+
+    for (auto &attr : attributes) {
+      // If the output
+      if (auto out = getAttribute(op, attr, isPort, atFormat); !out.empty()) {
+        buf << out;
+        atLeastOne = true;
+        buf << (atFormat ? space() : comma());
+      }
+    }
+
+    if (atLeastOne) {
+      auto out = buf.str();
+      // Remove the last character which is an extra space or comma.
+      out.pop_back();
+      out.append(atFormat ? space() : RAngleBracket());
+      return out;
+    }
+
+    return "";
   }
 
   /// Helper function for emitting a Calyx section. It emits the body in the
@@ -504,7 +517,7 @@ private:
     }
     // Attribute dictionary is always prepended for a control operation.
     auto prependAttributes = [&](Operation *op, StringRef sym) {
-      return (getAttributes(op) + sym).str();
+      return (getAttributes(op, /*atFormat=*/true) + sym).str();
     };
 
     for (auto &&op : *body) {
@@ -608,7 +621,7 @@ void Emitter::emitComponent(ComponentInterface op) {
   std::string combinationalPrefix = op.isComb() ? "comb " : "";
 
   indent() << combinationalPrefix << "component " << op.getName()
-           << getAttributes(op);
+           << getAttributes(op, /*atFormat=*/false, nullptr);
   // Emit the ports.
   emitComponentPorts(op);
   os << space() << LBraceEndL();
@@ -620,6 +633,7 @@ void Emitter::emitComponent(ComponentInterface op) {
   emitCalyxSection("cells", [&]() {
     for (auto &&bodyOp : *op.getBodyBlock()) {
       TypeSwitch<Operation *>(&bodyOp)
+          .Case<UndefLibOp>([&](auto op) { emitUndef(op); })
           .Case<WiresOp>([&](auto op) { wires = op; })
           .Case<ControlOp>([&](auto op) { control = op; })
           .Case<InstanceOp>([&](auto op) { emitInstance(op); })
@@ -628,7 +642,7 @@ void Emitter::emitComponent(ComponentInterface op) {
           .Case<MemoryOp>([&](auto op) { emitMemory(op); })
           .Case<SeqMemoryOp>([&](auto op) { emitSeqMemory(op); })
           .Case<hw::ConstantOp>([&](auto op) { /*Do nothing*/ })
-          .Case<SliceLibOp, PadLibOp>(
+          .Case<SliceLibOp, PadLibOp, ExtSILibOp>(
               [&](auto op) { emitLibraryPrimTypedByAllPorts(op); })
           .Case<LtLibOp, GtLibOp, EqLibOp, NeqLibOp, GeLibOp, LeLibOp, SltLibOp,
                 SgtLibOp, SeqLibOp, SneqLibOp, SgeLibOp, SleLibOp, AddLibOp,
@@ -636,6 +650,8 @@ void Emitter::emitComponent(ComponentInterface op) {
                 NotLibOp, OrLibOp, XorLibOp, WireLibOp>(
               [&](auto op) { emitLibraryPrimTypedByFirstInputPort(op); })
           .Case<SeqMultLibOp, PipelinedMultLibOp, StallableMultLibOp>(
+              [&](auto op) { emitLibraryPrimTypedByFirstOutputPort(op); })
+          .Case<MuxLibOp>(
               [&](auto op) { emitLibraryPrimTypedByFirstOutputPort(op); })
           .Case<SeqRemULibOp, SeqDivULibOp>([&](auto op) {
             emitLibraryPrimTypedByFirstOutputPort(
@@ -666,8 +682,8 @@ void Emitter::emitComponentPorts(ComponentInterface op) {
 
       // We only care about the bit width in the emitted .futil file.
       unsigned int bitWidth = port.type.getIntOrFloatBitWidth();
-      os << getAttributes(op, port.attributes) << port.name.getValue()
-         << colon() << bitWidth;
+      os << getAttributes(op, /*atFormat=*/true, port.attributes)
+         << port.name.getValue() << colon() << bitWidth;
 
       if (i + 1 < e)
         os << comma();
@@ -694,7 +710,7 @@ void Emitter::emitPrimitiveExtern(hw::HWModuleExternOp op) {
     });
     os << RSquare();
   }
-  os << getAttributes(op);
+  os << getAttributes(op, /*atFormat=*/false);
   // Emit the ports.
   emitPrimitivePorts(op);
   os << semicolonEndL();
@@ -705,44 +721,50 @@ void Emitter::emitPrimitiveExtern(hw::HWModuleExternOp op) {
 /// Emit the ports of a component.
 void Emitter::emitPrimitivePorts(hw::HWModuleExternOp op) {
   auto emitPorts = [&](auto ports, bool isInput) {
+    auto e = static_cast<size_t>(std::distance(ports.begin(), ports.end()));
     os << LParen();
-    for (size_t i = 0, e = ports.size(); i < e; ++i) {
-      const hw::PortInfo &port = ports[i];
-      DictionaryAttr portAttr =
-          isInput ? op.getArgAttrDict(i) : op.getResultAttrDict(i);
+    auto type = op.getHWModuleType();
+    for (auto [i, port] : llvm::enumerate(ports)) {
+      DictionaryAttr portAttr = cast_or_null<DictionaryAttr>(
+          op.getPortAttrs(isInput ? type.getPortIdForInputId(i)
+                                  : type.getPortIdForOutputId(i)));
 
-      os << getAttributes(op, portAttr) << port.name.getValue() << colon();
+      os << getAttributes(op, /*atFormat=*/true, portAttr)
+         << port.name.getValue() << colon();
       // We only care about the bit width in the emitted .futil file.
       // Emit parameterized or non-parameterized bit width.
       if (hw::isParametricType(port.type)) {
-        hw::ParamDeclRefAttr bitWidth = port.type.cast<hw::IntType>()
-                                            .getWidth()
-                                            .dyn_cast<hw::ParamDeclRefAttr>();
+        hw::ParamDeclRefAttr bitWidth =
+            port.type.template cast<hw::IntType>()
+                .getWidth()
+                .template dyn_cast<hw::ParamDeclRefAttr>();
         os << bitWidth.getName().str();
       } else {
         unsigned int bitWidth = port.type.getIntOrFloatBitWidth();
         os << bitWidth;
       }
 
-      if (i + 1 < e)
+      if (i < e - 1)
         os << comma();
     }
     os << RParen();
   };
-  emitPorts(op.getPorts().inputs, true);
+  hw::ModulePortInfo ports(op.getPortList());
+  emitPorts(ports.getInputs(), true);
   os << arrow();
-  emitPorts(op.getPorts().outputs, false);
+  emitPorts(ports.getOutputs(), false);
 }
 
 void Emitter::emitInstance(InstanceOp op) {
-  indent() << getAttributes(op) << op.instanceName() << space() << equals()
-           << space() << op.getComponentName() << LParen() << RParen()
-           << semicolonEndL();
+  indent() << getAttributes(op, /*atFormat=*/true) << op.instanceName()
+           << space() << equals() << space() << op.getComponentName()
+           << LParen() << RParen() << semicolonEndL();
 }
 
 void Emitter::emitPrimitive(PrimitiveOp op) {
-  indent() << getAttributes(op) << op.instanceName() << space() << equals()
-           << space() << op.getPrimitiveName() << LParen();
+  indent() << getAttributes(op, /*atFormat=*/true) << op.instanceName()
+           << space() << equals() << space() << op.getPrimitiveName()
+           << LParen();
 
   if (op.getParameters().has_value()) {
     llvm::interleaveComma(*op.getParameters(), os, [&](Attribute param) {
@@ -763,9 +785,16 @@ void Emitter::emitPrimitive(PrimitiveOp op) {
 
 void Emitter::emitRegister(RegisterOp reg) {
   size_t bitWidth = reg.getIn().getType().getIntOrFloatBitWidth();
-  indent() << getAttributes(reg) << reg.instanceName() << space() << equals()
-           << space() << "std_reg" << LParen() << std::to_string(bitWidth)
-           << RParen() << semicolonEndL();
+  indent() << getAttributes(reg, /*atFormat=*/true) << reg.instanceName()
+           << space() << equals() << space() << "std_reg" << LParen()
+           << std::to_string(bitWidth) << RParen() << semicolonEndL();
+}
+
+void Emitter::emitUndef(UndefLibOp op) {
+  size_t bitwidth = op.getOut().getType().getIntOrFloatBitWidth();
+  indent() << getAttributes(op, /*atFormat=*/true) << op.instanceName()
+           << space() << equals() << space() << "undef" << LParen()
+           << std::to_string(bitwidth) << RParen() << semicolonEndL();
 }
 
 void Emitter::emitMemory(MemoryOp memory) {
@@ -775,9 +804,10 @@ void Emitter::emitMemory(MemoryOp memory) {
                         "supported by the native Calyx compiler.");
     return;
   }
-  indent() << getAttributes(memory) << memory.instanceName() << space()
-           << equals() << space() << "std_mem_d" << std::to_string(dimension)
-           << LParen() << memory.getWidth() << comma();
+  indent() << getAttributes(memory, /*atFormat=*/true) << memory.instanceName()
+           << space() << equals() << space() << "std_mem_d"
+           << std::to_string(dimension) << LParen() << memory.getWidth()
+           << comma();
   for (Attribute size : memory.getSizes()) {
     APInt memSize = size.cast<IntegerAttr>().getValue();
     memSize.print(os, /*isSigned=*/false);
@@ -802,9 +832,10 @@ void Emitter::emitSeqMemory(SeqMemoryOp memory) {
                         "supported by the native Calyx compiler.");
     return;
   }
-  indent() << getAttributes(memory) << memory.instanceName() << space()
-           << equals() << space() << "seq_mem_d" << std::to_string(dimension)
-           << LParen() << memory.getWidth() << comma();
+  indent() << getAttributes(memory, /*atFormat=*/true) << memory.instanceName()
+           << space() << equals() << space() << "seq_mem_d"
+           << std::to_string(dimension) << LParen() << memory.getWidth()
+           << comma();
   for (Attribute size : memory.getSizes()) {
     APInt memSize = size.cast<IntegerAttr>().getValue();
     memSize.print(os, /*isSigned=*/false);
@@ -881,9 +912,9 @@ static StringRef removeCalyxPrefix(StringRef s) { return s.split(".").second; }
 
 void Emitter::emitLibraryPrimTypedByAllPorts(Operation *op) {
   auto cell = cast<CellInterface>(op);
-  indent() << getAttributes(op) << cell.instanceName() << space() << equals()
-           << space() << removeCalyxPrefix(op->getName().getStringRef())
-           << LParen();
+  indent() << getAttributes(op, /*atFormat=*/true) << cell.instanceName()
+           << space() << equals() << space()
+           << removeCalyxPrefix(op->getName().getStringRef()) << LParen();
   llvm::interleaveComma(op->getResults(), os, [&](auto res) {
     os << std::to_string(res.getType().getIntOrFloatBitWidth());
   });
@@ -894,9 +925,9 @@ void Emitter::emitLibraryPrimTypedByFirstInputPort(Operation *op) {
   auto cell = cast<CellInterface>(op);
   unsigned bitWidth = cell.getInputPorts()[0].getType().getIntOrFloatBitWidth();
   StringRef opName = op->getName().getStringRef();
-  indent() << getAttributes(op) << cell.instanceName() << space() << equals()
-           << space() << removeCalyxPrefix(opName) << LParen() << bitWidth
-           << RParen() << semicolonEndL();
+  indent() << getAttributes(op, /*atFormat=*/true) << cell.instanceName()
+           << space() << equals() << space() << removeCalyxPrefix(opName)
+           << LParen() << bitWidth << RParen() << semicolonEndL();
 }
 
 void Emitter::emitLibraryPrimTypedByFirstOutputPort(
@@ -905,8 +936,8 @@ void Emitter::emitLibraryPrimTypedByFirstOutputPort(
   unsigned bitWidth =
       cell.getOutputPorts()[0].getType().getIntOrFloatBitWidth();
   StringRef opName = op->getName().getStringRef();
-  indent() << getAttributes(op) << cell.instanceName() << space() << equals()
-           << space()
+  indent() << getAttributes(op, /*atFormat=*/true) << cell.instanceName()
+           << space() << equals() << space()
            << (calyxLibName ? *calyxLibName : removeCalyxPrefix(opName))
            << LParen() << bitWidth << RParen() << semicolonEndL();
 }
@@ -959,12 +990,15 @@ void Emitter::emitGroup(GroupInterface group) {
   } else {
     prefix = isa<CombGroupOp>(group) ? "comb group" : "group";
   }
-  auto groupHeader = (group.symName().getValue() + getAttributes(group)).str();
+  auto groupHeader =
+      (group.symName().getValue() + getAttributes(group, /*atFormat=*/false))
+          .str();
   emitCalyxSection(prefix, emitGroupBody, groupHeader);
 }
 
 void Emitter::emitEnable(EnableOp enable) {
-  indent() << getAttributes(enable) << enable.getGroupName() << semicolonEndL();
+  indent() << getAttributes(enable, /*atFormat=*/true) << enable.getGroupName()
+           << semicolonEndL();
 }
 
 void Emitter::emitControl(ControlOp control) {

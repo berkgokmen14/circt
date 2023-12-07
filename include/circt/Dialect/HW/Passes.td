@@ -35,8 +35,10 @@ def FlattenIO : Pass<"hw-flatten-io", "mlir::ModuleOp"> {
   let constructor =  "circt::hw::createFlattenIOPass()";
   
   let options = [
-    Option<"recursive", "recursive", "bool", "false",
+    Option<"recursive", "recursive", "bool", "true",
       "Recursively flatten nested structs.">,
+    Option<"flattenExtern", "flatten-extern", "bool", "false",
+      "Flatten the extern modules also.">,
   ];
 }
 
@@ -51,6 +53,11 @@ def HWSpecialize : Pass<"hw-specialize", "mlir::ModuleOp"> {
     `hw.module` and the referring `hw.instance` operation is rewritten to
     instantiate the newly specialized module.
   }];
+}
+
+def VerifyInnerRefNamespace : Pass<"hw-verify-irn"> {
+  let summary = "Verify InnerRefNamespaceLike operations, if not self-verifying.";
+  let constructor =  "circt::hw::createVerifyInnerRefNamespacePass()";
 }
 
 #endif // CIRCT_DIALECT_HW_PASSES_TD

@@ -1229,7 +1229,7 @@ firrtl.circuit "GCTDataTap" attributes {rawAnnotations = [{
     }
   ]
 }]} {
-  firrtl.extmodule private @BlackBox() attributes {defname = "BlackBox"}
+  firrtl.extmodule private @BlackBox(out probe: !firrtl.rwprobe<uint<5>>) attributes {defname = "BlackBox"}
   firrtl.module private @InnerMod() {
     %w = firrtl.wire : !firrtl.uint<1>
   }
@@ -1244,15 +1244,16 @@ firrtl.circuit "GCTDataTap" attributes {rawAnnotations = [{
     %tap_5 = firrtl.wire : !firrtl.vector<uint<1>, 1>
     %tap_6 = firrtl.wire : !firrtl.uint<1>
 
-    firrtl.instance BlackBox @BlackBox()
+    %bb_probe = firrtl.instance BlackBox @BlackBox(out probe: !firrtl.rwprobe<uint<5>>)
     firrtl.instance im @InnerMod()
   }
 }
 
 // CHECK-LABEL: firrtl.extmodule private @BlackBox
-// CHECK-SAME:    out [[tap_4:[a-zA-Z0-9_]+]]: !firrtl.probe<uint<1>>
-// CHECk-SAME:    out [[tap_5_0:[[a-zA-Z09-_]+]]]: !firrtl.probe<uint<1>>
-// CHECK-SAME:    internalPaths = ["baz.qux", "baz.quz"]
+// CHECK-SAME:    out {{[a-zA-Z0-9_]+}}: !firrtl.rwprobe<uint<5>>
+// CHECK-SAME:    out {{[a-zA-Z0-9_]+}}: !firrtl.probe<uint<1>>
+// CHECK-SAME:    out {{[a-zA-Z0-9_]+}}: !firrtl.probe<uint<1>>
+// CHECK-SAME:    internalPaths = [#firrtl.internalpath, #firrtl.internalpath<"baz.qux">, #firrtl.internalpath<"baz.quz">]
 
 // CHECK-LABEL: firrtl.module private @InnerMod
 // CHECK-SAME:    out %[[tap_6:[a-zA-Z0-9_]+]]: !firrtl.probe<uint<1>>
@@ -1504,7 +1505,7 @@ firrtl.circuit "Top"  attributes {rawAnnotations = [
     ]}]} {
   firrtl.extmodule private @ExtBar()
   // CHECK: firrtl.extmodule private @ExtBar(out random_something_external: !firrtl.probe<uint<1>>)
-  // CHECK-SAME: internalPaths = ["random.something.external"]
+  // CHECK-SAME: internalPaths = [#firrtl.internalpath<"random.something.external">]
   // CHECK:  firrtl.module private @Bar(out %[[_gen_ref2:.+]]: !firrtl.probe<uint<1>>)
   // CHECK:  %[[random:.+]] = firrtl.verbatim.expr "random.something" : () -> !firrtl.uint<1>
   // CHECK:  %0 = firrtl.ref.send %[[random]] : !firrtl.uint<1>
@@ -1521,7 +1522,7 @@ firrtl.circuit "Top"  attributes {rawAnnotations = [
     firrtl.instance b2 interesting_name  @ExtBar()
     // CHECK: %b2_random_something_external = firrtl.instance b2 interesting_name  @ExtBar(out random_something_external: !firrtl.probe<uint<1>>)
   }
-  // CHECK-LABEL firrtl.module @Top()
+  // CHECK-LABEL: firrtl.module @Top()
   firrtl.module @Top() {
     firrtl.instance foo interesting_name  @Foo()
     %tap = firrtl.wire interesting_name  : !firrtl.uint<1>
@@ -1796,7 +1797,7 @@ firrtl.circuit "Top"  attributes {rawAnnotations = [{
   firrtl.extmodule private @BlackBox() attributes {defname = "BlackBox"}
   // CHECK:  firrtl.extmodule private @BlackBox
   // CHECK-SAME:  out [[gen_ref:.+]]: !firrtl.probe<uint<1>>)
-  // CHECK-SAME: attributes {defname = "BlackBox", internalPaths = ["random.something"]}
+  // CHECK-SAME: attributes {defname = "BlackBox", internalPaths = [#firrtl.internalpath<"random.something">]}
   firrtl.module @Top(in %in: !firrtl.uint<1>) {
     %tap2 = firrtl.wire : !firrtl.bundle<wid: uint<1>>
     firrtl.instance localparam @BlackBox()

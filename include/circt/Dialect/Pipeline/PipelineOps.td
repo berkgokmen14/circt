@@ -20,22 +20,34 @@ include "mlir/IR/EnumAttr.td"
 include "mlir/IR/OpAsmInterface.td"
 
 include "circt/Dialect/Pipeline/PipelineDialect.td"
+include "circt/Dialect/Seq/SeqTypes.td"
 
 
-class PipelineBase<string mnemonic, list<Trait> traits = []> : 
+class PipelineBase<string mnemonic, list<Trait> traits = []> :
   Op<Pipeline_Dialect, mnemonic, !listconcat(traits, [
-      IsolatedFromAbove,
       Pure,
       RegionKindInterface,
-      AttrSizedOperandSegments])> {
-
-  let arguments = (ins
-    OptionalAttr<StrAttr>:$name, Variadic<AnyType>:$inputs, Variadic<AnyType>:$extInputs, Optional<I1>:$stall,
-    I1:$clock, I1:$reset, I1:$go, StrArrayAttr:$inputNames,
-    OptionalAttr<StrArrayAttr>:$extInputNames, StrArrayAttr:$outputNames
-  );
+      AttrSizedOperandSegments,
+      DeclareOpInterfaceMethods<OpAsmOpInterface, [
+        "getAsmResultNames",
+        "getAsmBlockArgumentNames"]>
+      ])> {
   let results = (outs Variadic<AnyType>:$dataOutputs, I1:$done);
   let hasCustomAssemblyFormat = 1;
+
+  let skipDefaultBuilders = 1;
+
+  let builders = [
+    OpBuilder<(ins
+      "TypeRange":$dataOutputs,
+      "ValueRange":$inputs,
+      "ArrayAttr":$inputNames, "ArrayAttr":$outputNames,
+      "Value":$clock, "Value":$reset, "Value":$go,
+      CArg<"Value", "{}">:$stall,
+      CArg<"StringAttr", "{}">:$name,
+      CArg<"ArrayAttr", "{}">:$stallability
+      )>
+  ];
 
   /// Additional class declarations inside the pipeline op.
   code extraModuleClassDeclaration = ?;
@@ -45,11 +57,10 @@ class PipelineBase<string mnemonic, list<Trait> traits = []> :
   // in the printer/parser.
   // Order:
   // 1. Inputs
-  // 2. External inputs (opt)
-  // 3. Stall (opt)
-  // 4. Clock
-  // 5. Reset
-  // 6. Go
+  // 2. Stall (opt)
+  // 3. Clock
+  // 4. Reset
+  // 5. Go
   let extraClassDeclaration = extraModuleClassDeclaration # [{
     // Returns the entry stage of this pipeline.
     Block* getEntryStage() {
@@ -57,44 +68,40 @@ class PipelineBase<string mnemonic, list<Trait> traits = []> :
       return &region->front();
     }
 
-    // Returns the inner clock signal argument of this pipeline.
-    BlockArgument getInnerClock() {
-      Block* entryStage = getEntryStage();
-      return entryStage->getArgument(entryStage->getNumArguments() - 3);
-    }
-
-    // Returns the inner reset signal argument of this pipeline.
-    BlockArgument getInnerReset() {
-      Block* entryStage = getEntryStage();
-      return getEntryStage()->getArgument(entryStage->getNumArguments() - 2);
-    }
-
-    // Returns the inner go signal argument of this pipeline.
-    BlockArgument getInnerGo() {
-      Block* entryStage = getEntryStage();
-      return getEntryStage()->getArgument(entryStage->getNumArguments() - 1);
-    }
-
     // Returns true if this pipeline has a stall signal.
     bool hasStall() {
       return static_cast<bool>(getStall());
-    }
-
-    // Returns the stall signal argument of this pipeline, if it exists.
-    BlockArgument getInnerStall() {
-      assert(hasStall() && "pipeline has no stall signal");
-      Block* entryStage = getEntryStage();
-      return getEntryStage()->getArgument(entryStage->getNumArguments() - 4);
     }
 
     llvm::ArrayRef<BlockArgument> getInnerInputs() {
       return getEntryStage()->getArguments().take_front(getInputs().size());
     }
 
-    llvm::ArrayRef<BlockArgument> getInnerExtInputs() {
-      return getEntryStage()->getArguments().slice(
-          getInputs().size(), getExtInputs().size()
-      );
+    // Returns a list of external inputs to the pipeline. These are defined
+    // as any value which is defined outside the inner pipeline region.
+    // This will walk the entire pipeline, so it is recommended to cache the
+    // result if it is used multiple times.
+    llvm::SmallVector<Value> getExtInputs() {
+      return detail::getValuesDefinedOutsideRegion(getRegion());
+    }
+
+    // Gets the n'th stage of this pipeline
+    Block* getStage(unsigned n) {
+      auto& blocks = getRegion().getBlocks();
+      assert(n < blocks.size() && "Stage index out of bounds");
+      return &*std::next(blocks.begin(), n);
+    }
+
+    // Returns the enable signal of the given pipeline stage. This is always
+    // the last block argument of a stage for anything but the entry stage.
+    Value getStageEnableSignal(size_t stageIdx) {
+      return getStageEnableSignal(getStage(stageIdx));
+    }
+
+    // Returns the enable signal for the given stage. The enable signal is always
+    // the last signal in the stage argument list.
+    Value getStageEnableSignal(Block* stage) {
+      return stage->getArguments().back();
     }
   }];
 }
@@ -104,7 +111,7 @@ def UnscheduledPipelineOp : PipelineBase<"unscheduled", [
     HasOnlyGraphRegion,
     SingleBlockImplicitTerminator<"ReturnOp">
   ]> {
-  
+
   let summary = "unscheduled pipeline operation";
   let description = [{
     The "pipeline.unscheduled" operation represents a pipeline that has not yet
@@ -117,13 +124,16 @@ def UnscheduledPipelineOp : PipelineBase<"unscheduled", [
     about the interface signals.
   }];
 
+  let arguments = (ins
+    OptionalAttr<StrAttr>:$name, Variadic<AnyType>:$inputs, Optional<I1>:$stall,
+    ClockType:$clock, I1:$reset, I1:$go, StrArrayAttr:$inputNames,
+    StrArrayAttr:$outputNames
+  );
   let regions = (region SizedRegion<1>: $body);
   let extraModuleClassDeclaration = "";
 }
 
-def ScheduledPipelineOp : PipelineBase<"scheduled", [
-    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>
-  ]> {
+def ScheduledPipelineOp : PipelineBase<"scheduled"> {
   let summary = "Scheduled pipeline operation";
   let description = [{
     The `pipeline.scheduled` operation represents a scheduled pipeline.
@@ -140,23 +150,42 @@ def ScheduledPipelineOp : PipelineBase<"scheduled", [
     the clock-enable input of the stage-separating registers.
 
     The `go` input is used to start the pipeline. This value is fed through
-    the stages as the current stage enable/next stage valid signal.
+    the stages as the current stage valid/next stage enable signal.
     Note: the op is currently only designed for pipelines with II=1. For
     pipelines with II>1, a user must themselves maintain state about when
     the pipeline is ready to accept new inputs. We plan to add support for
     head-of-pipeline backpressure in the future.
+
+    Any value defined outside the pipeline is considered an external input. An
+    external input will _not_ be registered.
+
+    The pipeline may optionally be provided with an array of bits `stallability`
+    which is used to determine which stages are stallable.
+    - If not provided and the pipeline has a stall signal, all stages are stallable.
+    - If provided, and the pipeline has a stall signal, the number of bits must
+      match the number of stages in the pipeline. Each bit represents a stage,
+      in the order of which the stages appear wrt. the `pipeline.stage` operations.
+      A bit set to 1 indicates that the stage is stallable, and 0 indicates that
+      the stage is not stallable.
+
+    The exit (non-registered) stage of a pipeline cannot be non-stallable, and
+    will always follow the stallability of the parent pipeline.
+
+    For more information about non-stallable stages, and how these are lowered,
+    please refer to the Pipeline dialect rationale.
   }];
 
+
+  let arguments = (ins
+    OptionalAttr<StrAttr>:$name,
+    Variadic<AnyType>:$inputs,
+    Optional<I1>:$stall,
+    ClockType:$clock, I1:$reset, I1:$go,
+    StrArrayAttr:$inputNames, StrArrayAttr:$outputNames,
+    OptionalAttr<BoolArrayAttr>:$stallability
+  );
   let regions = (region AnyRegion:$body);
   let hasVerifier = 1;
-  let skipDefaultBuilders = 1;
-
-  let builders = [
-    OpBuilder<(ins "TypeRange":$dataOutputs, "ValueRange":$inputs, "ValueRange":$extInputs,
-      "ArrayAttr":$inputNames, "ArrayAttr":$outputNames, "ArrayAttr":$extInputNames,
-      "Value":$clock, "Value":$reset, "Value":$go, CArg<"Value", "{}">:$stall, CArg<"StringAttr", "{}">:$name)>
-  ];
-
 
   code extraModuleClassDeclaration = [{
     static mlir::RegionKind getRegionKind(unsigned index) {
@@ -168,8 +197,9 @@ def ScheduledPipelineOp : PipelineBase<"scheduled", [
       return getRegion().getBlocks();
     }
 
-    void getAsmBlockArgumentNames(mlir::Region &region,
-                        mlir::OpAsmSetValueNameFn setNameFn);
+    size_t getNumStages() {
+      return getStages().size();
+    }
 
     // Returns all of the stages in this pipeline. The stages are ordered
     // with respect to their position in the pipeline as determined by the
@@ -180,13 +210,6 @@ def ScheduledPipelineOp : PipelineBase<"scheduled", [
     // Returns a map of stages to their index in the pipeline - this is
     // with respect to 'getOrderedStages'.
     llvm::DenseMap<Block*, unsigned> getStageMap();
-
-    // Gets the n'th stage of this pipeline
-    Block* getStage(unsigned n) {
-      auto& blocks = getRegion().getBlocks();
-      assert(n < blocks.size() && "Stage index out of bounds");
-      return &*std::next(blocks.begin(), n);
-    }
 
     // Returns the last stage in the pipeline.
     Block* getLastStage();
@@ -211,19 +234,8 @@ def ScheduledPipelineOp : PipelineBase<"scheduled", [
       return stage->getArguments().drop_back();
     }
 
-    // Returns the enable signal of the given pipeline stage. This is always
-    // the last block argument of a stage for anything but the entry stage.
-    Value getStageEnableSignal(size_t stageIdx) {
-      return getStageEnableSignal(getStage(stageIdx));
-    }
-
-    // Returns the enable signal for the given stage. The enable signal is always
-    // the last signal in the stage argument list.
-    Value getStageEnableSignal(Block* stage) {
-      if(stage != getEntryStage())
-        return stage->getArguments().back();
-      return getInnerGo();
-    }
+    // Returns the stage kind of the given stage index.
+    StageKind getStageKind(size_t stageIdx);
   }];
 }
 
@@ -269,7 +281,7 @@ def StageOp : Op<Pipeline_Dialect, "stage", [
   let assemblyFormat = [{
     $nextStage
     custom<StageRegisters>($registers, type($registers), $clockGates, $clockGatesPerRegister, $registerNames)
-    custom<Passthroughs>($passthroughs, type($passthroughs), $passthroughNames)  
+    custom<Passthroughs>($passthroughs, type($passthroughs), $passthroughNames)
     attr-dict
   }];
 
@@ -309,10 +321,9 @@ def StageOp : Op<Pipeline_Dialect, "stage", [
 
   let builders = [
     OpBuilder<(ins "Block*":$dest, "ValueRange":$registers, "ValueRange":$passthroughs)>,
-    // Clock gate builder, which takes a mapping between the registers and
-    // and their clock gate hierarchy.
     OpBuilder<(ins "Block*":$dest, "ValueRange":$registers, "ValueRange":$passthroughs,
-      "const llvm::DenseMap<Value, llvm::SmallVector<Value>>&":$clockGates,
+      // Clock gates per register, in the order of the registers.
+      "llvm::ArrayRef<llvm::SmallVector<Value>>":$clockGates,
       CArg<"mlir::ArrayAttr", "{}">:$registerNames, CArg<"mlir::ArrayAttr", "{}">:$passthroughNames)>
   ];
 }
@@ -338,7 +349,7 @@ def LatencyOp : Op<Pipeline_Dialect, "latency", [
     HasOnlyGraphRegion,
     ParentOneOf<["UnscheduledPipelineOp", "ScheduledPipelineOp"]>
   ]> {
-  
+
   let summary = "Pipeline dialect latency operation.";
   let description = [{
     The `pipeline.latency` operation represents an operation for wrapping
@@ -354,13 +365,8 @@ def LatencyOp : Op<Pipeline_Dialect, "latency", [
   let regions = (region SizedRegion<1>:$body);
   let hasVerifier = 1;
 
-  let builders = [
-    OpBuilder<(ins "unsigned":$latency)>
-  ];
-  let skipDefaultBuilders = 1;
-
   let assemblyFormat = [{
-    attr-dict $latency `->` `(` type($results) `)` $body
+    $latency `->` `(` type($results) `)` $body attr-dict
   }];
 
   let extraClassDeclaration = [{

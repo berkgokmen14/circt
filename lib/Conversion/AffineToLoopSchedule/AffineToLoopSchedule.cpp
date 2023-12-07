@@ -175,7 +175,8 @@ AffineToLoopSchedule::getSharedOperatorsProblem(affine::AffineForOp forOp) {
   SharedOperatorsProblem problem = SharedOperatorsProblem::get(forOp);
 
   // Insert memory dependences into the problem.
-  forOp.getLoopBody().walk([&](Operation *op) {
+  assert(forOp.getLoopRegions().size() == 1);
+  forOp.getLoopRegions().front()->walk([&](Operation *op) {
     if (op->getParentOfType<LoopInterface>() != nullptr)
       return;
 
@@ -262,8 +263,9 @@ AffineToLoopSchedule::getSharedOperatorsProblem(affine::AffineForOp forOp) {
 
   // Set the anchor for scheduling. Insert dependences from all stores to the
   // terminator to ensure the problem schedules them before the terminator.
-  auto *anchor = forOp.getLoopBody().back().getTerminator();
-  forOp.getLoopBody().walk([&](Operation *op) {
+  assert(forOp.getLoopRegions().size() == 1);
+  auto *anchor = forOp.getLoopRegions().front()->back().getTerminator();
+  forOp.getLoopRegions().front()->walk([&](Operation *op) {
     if (op->getParentOfType<LoopScheduleSequentialOp>() != nullptr ||
         op->getParentOfType<LoopSchedulePipelineOp>() != nullptr)
       return;
@@ -533,15 +535,17 @@ void AffineToLoopSchedule::runOnOperation() {
   for (auto loop : seqLoops) {
     // getOperation().dump();
     // loop.dump();
+    assert(loop.getLoopRegions().size() == 1);
     auto problem = getSharedOperatorsProblem(loop);
 
     // Populate the target operator types.
-    if (failed(populateOperatorTypes(loop.getOperation(), loop.getLoopBody(),
-                                     problem)))
+    if (failed(populateOperatorTypes(loop.getOperation(),
+                                     *loop.getLoopRegions().front(), problem)))
       return signalPassFailure();
 
     // Solve the scheduling problem computed by the analysis.
-    if (failed(solveSharedOperatorsProblem(loop.getLoopBody(), problem)))
+    if (failed(solveSharedOperatorsProblem(*loop.getLoopRegions().front(),
+                                           problem)))
       return signalPassFailure();
 
     // Convert the IR.
@@ -1219,7 +1223,7 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
   // Create Values for the loop's lower and upper bounds.
   Value lowerBound = lowerAffineLowerBound(loop, builder);
   Value upperBound = lowerAffineUpperBound(loop, builder);
-  int64_t stepValue = loop.getStep();
+  int64_t stepValue = loop.getStep().getSExtValue();
   auto step = builder.create<arith::ConstantOp>(
       IntegerAttr::get(builder.getIndexType(), stepValue));
 
@@ -1233,7 +1237,7 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
 
   SmallVector<Value> iterArgs;
   iterArgs.push_back(lowerBound);
-  iterArgs.append(loop.getIterOperands().begin(), loop.getIterOperands().end());
+  iterArgs.append(loop.getInits().begin(), loop.getInits().end());
 
   // If possible, attach a constant trip count attribute. This could be
   // generalized to support non-constant trip counts by supporting an AffineMap.
@@ -1351,7 +1355,8 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
   }
 
   // loop.dump();
-  for (auto it : enumerate(loop.getLoopBody().getArguments())) {
+  assert(loop.getLoopRegions().size() == 1);
+  for (auto it : enumerate(loop.getLoopRegions().front()->getArguments())) {
     auto iterArg = it.value();
     if (iterArg.getUsers().empty())
       continue;
@@ -1359,7 +1364,7 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
     unsigned startPipeTime = 0;
     if (it.index() > 0) {
       // Handle extra iter args
-      auto *term = loop.getLoopBody().back().getTerminator();
+      auto *term = loop.getLoopRegions().front()->back().getTerminator();
       auto &termOperand = term->getOpOperand(it.index() - 1);
       auto *definingOp = termOperand.get().getDefiningOp();
       assert(definingOp != nullptr);
@@ -1620,7 +1625,7 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
   // Create Values for the loop's lower and upper bounds.
   Value lowerBound = lowerAffineLowerBound(loop, builder);
   Value upperBound = lowerAffineUpperBound(loop, builder);
-  int64_t stepValue = loop.getStep();
+  int64_t stepValue = loop.getStep().getSExtValue();
   auto incr = builder.create<arith::ConstantOp>(
       IntegerAttr::get(builder.getIndexType(), stepValue));
 
@@ -1634,7 +1639,7 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
 
   SmallVector<Value> iterArgs;
   iterArgs.push_back(lowerBound);
-  iterArgs.append(loop.getIterOperands().begin(), loop.getIterOperands().end());
+  iterArgs.append(loop.getInits().begin(), loop.getInits().end());
 
   // If possible, attach a constant trip count attribute. This could be
   // generalized to support non-constant trip counts by supporting an AffineMap.
@@ -1718,7 +1723,8 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
   Block &scheduleBlock = sequential.getScheduleBlock();
 
   // llvm::errs() << "here\n";
-  if (!loop.getLoopBody().getArgument(0).getUsers().empty()) {
+  assert(loop.getLoopRegions().size() == 1);
+  if (!loop.getLoopRegions().front()->getArgument(0).getUsers().empty()) {
     // llvm::errs() << "Add extra start group\n";
     auto containsLoop = false;
     for (auto *op : startGroups[endTime]) {
@@ -1738,7 +1744,7 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
   // initially populated with the iter args.
   valueMap.clear();
   for (size_t i = 0; i < iterArgs.size(); ++i)
-    valueMap.map(loop.getLoopBody().getArgument(i),
+    valueMap.map(loop.getLoopRegions().front()->getArgument(i),
                  sequential.getScheduleBlock().getArgument(i));
 
   // Create the stages.
@@ -1767,7 +1773,8 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
     DenseSet<Operation *> opsWithReturns;
     for (auto *op : group) {
       for (auto *user : op->getUsers()) {
-        auto *userOrAncestor = loop.getLoopBody().findAncestorOpInRegion(*user);
+        auto *userOrAncestor =
+            loop.getLoopRegions().front()->findAncestorOpInRegion(*user);
         auto startTimeOpt = problem.getStartTime(userOrAncestor);
         if ((startTimeOpt.has_value() && *startTimeOpt > startTime) ||
             isLoopTerminator(user)) {

@@ -1,6 +1,8 @@
-//===- Handshake.cpp - C Interface for the Handshake Dialect --------------===//
+//===- Handshake.cpp - C interface for the Handshake dialect --------------===//
 //
-//  Implements a C Interface for the Handshake Dialect
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -15,7 +17,7 @@
 
 void registerHandshakePasses() {
   circt::handshake::registerPasses();
-  circt::registerStandardToHandshakePass();
+  circt::registerCFToHandshakePass();
   circt::registerHandshakeToHWPass();
 }
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Handshake, handshake,

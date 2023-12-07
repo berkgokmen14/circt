@@ -16,7 +16,8 @@
 #include "circt/Dialect/FIRRTL/CHIRRTLDialect.h"
 #include "circt/Dialect/FIRRTL/FIRRTLInstanceGraph.h"
 #include "circt/Dialect/FIRRTL/FIRRTLOps.h"
-#include "circt/Dialect/FIRRTL/Namespace.h"
+#include "circt/Dialect/HW/HWOps.h"
+#include "circt/Dialect/HW/InnerSymbolNamespace.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 namespace circt {
@@ -71,6 +72,69 @@ struct AnnoPathValue {
     return false;
   }
 };
+
+template <typename T>
+static T &operator<<(T &os, const AnnoPathValue &path) {
+  os << "~" << path.ref.getModule()->getParentOfType<CircuitOp>().getName()
+     << "|";
+
+  if (path.isLocal()) {
+    os << path.ref.getModule().getModuleName();
+  } else {
+    os << path.instances.front()
+              ->getParentOfType<FModuleLike>()
+              .getModuleName();
+  }
+  for (auto inst : path.instances)
+    os << "/" << inst.getName() << ":" << inst.getModuleName();
+  if (!path.isOpOfType<FModuleOp, FExtModuleOp, InstanceOp>()) {
+    os << ">" << path.ref;
+    auto type = dyn_cast<FIRRTLBaseType>(path.ref.getType());
+    if (!type)
+      return os;
+    auto targetFieldID = path.fieldIdx;
+    while (targetFieldID) {
+      FIRRTLTypeSwitch<FIRRTLBaseType>(type)
+          .Case<FVectorType>([&](FVectorType vector) {
+            auto index = vector.getIndexForFieldID(targetFieldID);
+            os << "[" << index << "]";
+            type = vector.getElementType();
+            targetFieldID -= vector.getFieldID(index);
+          })
+          .template Case<BundleType>([&](BundleType bundle) {
+            auto index = bundle.getIndexForFieldID(targetFieldID);
+            os << "." << bundle.getElementName(index);
+            type = bundle.getElementType(index);
+            targetFieldID -= bundle.getFieldID(index);
+          })
+          .Default([&](auto) { targetFieldID = 0; });
+    }
+  }
+  return os;
+}
+
+template <typename T>
+static T &operator<<(T &os, const OpAnnoTarget &target) {
+  os << target.getOp()->getAttrOfType<StringAttr>("name").getValue();
+  return os;
+}
+
+template <typename T>
+static T &operator<<(T &os, const PortAnnoTarget &target) {
+  os << target.getModule().getPortName(target.getPortNo());
+  return os;
+}
+
+template <typename T>
+static T &operator<<(T &os, const AnnoTarget &target) {
+  if (auto op = target.dyn_cast<OpAnnoTarget>())
+    os << op;
+  else if (auto port = target.dyn_cast<PortAnnoTarget>())
+    os << port;
+  else
+    os << "<<Unknown Anno Target>>";
+  return os;
+}
 
 /// Cache AnnoTargets for a module's named things.
 struct AnnoTargetCache {
@@ -189,10 +253,6 @@ std::optional<AnnoPathValue> resolvePath(StringRef rawPath, CircuitOp circuit,
                                          SymbolTable &symTbl,
                                          CircuitTargetCache &cache);
 
-/// Return true if an Annotation's class name is handled by the LowerAnnotations
-/// pass.
-bool isAnnoClassLowered(StringRef className);
-
 /// A representation of a deferred Wiring problem consisting of a source that
 /// should be connected to a sink.
 struct WiringProblem {
@@ -245,32 +305,53 @@ struct ModuleModifications {
   SmallVector<uturnPair> uturns;
 };
 
+/// A cache of existing HierPathOps, mostly used to facilitate HierPathOp reuse.
+struct HierPathCache {
+  HierPathCache(Operation *op, SymbolTable &symbolTable);
+
+  hw::HierPathOp getOpFor(ArrayAttr attr);
+
+  StringAttr getSymFor(ArrayAttr attr) {
+    return getOpFor(attr).getSymNameAttr();
+  }
+
+  FlatSymbolRefAttr getRefFor(ArrayAttr attr) {
+    return FlatSymbolRefAttr::get(getSymFor(attr));
+  }
+
+private:
+  OpBuilder builder;
+  DenseMap<ArrayAttr, hw::HierPathOp> cache;
+  SymbolTable &symbolTable;
+};
+
 /// State threaded through functions for resolving and applying annotations.
 struct ApplyState {
   using AddToWorklistFn = llvm::function_ref<void(DictionaryAttr)>;
   ApplyState(CircuitOp circuit, SymbolTable &symTbl,
              AddToWorklistFn addToWorklistFn,
-             InstancePathCache &instancePathCache)
+             InstancePathCache &instancePathCache, bool noRefTypePorts)
       : circuit(circuit), symTbl(symTbl), addToWorklistFn(addToWorklistFn),
-        instancePathCache(instancePathCache) {}
+        instancePathCache(instancePathCache), hierPathCache(circuit, symTbl),
+        noRefTypePorts(noRefTypePorts) {}
 
   CircuitOp circuit;
   SymbolTable &symTbl;
   CircuitTargetCache targetCaches;
   AddToWorklistFn addToWorklistFn;
   InstancePathCache &instancePathCache;
-  DenseMap<Attribute, FlatSymbolRefAttr> instPathToNLAMap;
+  HierPathCache hierPathCache;
   size_t numReusedHierPaths = 0;
+
+  // Options that control annotation lowering.
+  bool noRefTypePorts;
 
   DenseSet<InstanceOp> wiringProblemInstRefs;
   DenseMap<StringAttr, LegacyWiringProblem> legacyWiringProblems;
   SmallVector<WiringProblem> wiringProblems;
 
-  ModuleNamespace &getNamespace(FModuleLike module) {
-    auto &ptr = namespaces[module];
-    if (!ptr)
-      ptr = std::make_unique<ModuleNamespace>(module);
-    return *ptr;
+  hw::InnerSymbolNamespace &getNamespace(FModuleLike module) {
+    return namespaces[module];
   }
 
   IntegerAttr newID() {
@@ -279,7 +360,7 @@ struct ApplyState {
   };
 
 private:
-  DenseMap<Operation *, std::unique_ptr<ModuleNamespace>> namespaces;
+  hw::InnerSymbolNamespaceCollection namespaces;
   unsigned annotationID = 0;
 };
 
@@ -351,6 +432,80 @@ InstanceOp addPortsToModule(FModuleLike mod, InstanceOp instOnPath,
                             StringRef newName,
                             InstancePathCache &instancePathcache,
                             CircuitTargetCache *targetCaches = nullptr);
+
+///===----------------------------------------------------------------------===//
+/// LowerAnnotations
+///===----------------------------------------------------------------------===//
+
+/// Annotation resolver and handler.
+struct AnnoRecord {
+  llvm::function_ref<std::optional<AnnoPathValue>(DictionaryAttr, ApplyState &)>
+      resolver;
+  llvm::function_ref<LogicalResult(const AnnoPathValue &, DictionaryAttr,
+                                   ApplyState &)>
+      applier;
+};
+
+/// Register external annotation records.
+LogicalResult registerAnnotationRecord(
+    StringRef annoClass, AnnoRecord annoRecord,
+    const std::function<void(llvm::Twine)> &errorHandler = {});
+
+///===----------------------------------------------------------------------===//
+/// Standard Utility Resolvers
+///===----------------------------------------------------------------------===//
+
+/// (SFC) FIRRTL SingleTargetAnnotation resolver.  Uses the 'target' field of
+/// the annotation with standard parsing to resolve the path.  This requires
+/// 'target' to exist and be normalized (per docs/FIRRTLAnnotations.md).
+std::optional<AnnoPathValue> stdResolve(DictionaryAttr anno, ApplyState &state);
+
+/// Resolves with target, if it exists.  If not, resolves to the circuit.
+std::optional<AnnoPathValue> tryResolve(DictionaryAttr anno, ApplyState &state);
+
+///===----------------------------------------------------------------------===//
+/// Standard Utility Appliers
+///===----------------------------------------------------------------------===//
+
+/// An applier which puts the annotation on the target and drops the 'target'
+/// field from the annotation.  Optionally handles non-local annotations.
+LogicalResult applyWithoutTargetImpl(const AnnoPathValue &target,
+                                     DictionaryAttr anno, ApplyState &state,
+                                     bool allowNonLocal);
+
+/// An applier which puts the annotation on the target and drops the 'target'
+/// field from the annotation.  Optionally handles non-local annotations.
+/// Ensures the target resolves to an expected type of operation.
+template <bool allowNonLocal, bool allowPortAnnoTarget, typename T,
+          typename... Tr>
+static LogicalResult applyWithoutTarget(const AnnoPathValue &target,
+                                        DictionaryAttr anno,
+                                        ApplyState &state) {
+  if (target.ref.isa<PortAnnoTarget>()) {
+    if (!allowPortAnnoTarget)
+      return failure();
+  } else if (!target.isOpOfType<T, Tr...>())
+    return failure();
+
+  return applyWithoutTargetImpl(target, anno, state, allowNonLocal);
+}
+
+template <bool allowNonLocal, typename T, typename... Tr>
+static LogicalResult applyWithoutTarget(const AnnoPathValue &target,
+                                        DictionaryAttr anno,
+                                        ApplyState &state) {
+  return applyWithoutTarget<allowNonLocal, false, T, Tr...>(target, anno,
+                                                            state);
+}
+
+/// An applier which puts the annotation on the target and drops the 'target'
+/// field from the annotaiton.  Optionally handles non-local annotations.
+template <bool allowNonLocal = false>
+static LogicalResult applyWithoutTarget(const AnnoPathValue &target,
+                                        DictionaryAttr anno,
+                                        ApplyState &state) {
+  return applyWithoutTargetImpl(target, anno, state, allowNonLocal);
+}
 
 } // namespace firrtl
 } // namespace circt

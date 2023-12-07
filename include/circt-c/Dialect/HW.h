@@ -1,16 +1,8 @@
-//===-- circt-c/Dialect/HW.h - C API for HW dialect ---------------*- C -*-===//
+//===- HW.h - C interface for the HW dialect ----------------------*- C -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-//
-//===----------------------------------------------------------------------===//
-//
-// This header declares the C interface for registering and accessing the
-// HW dialect. A dialect should be registered with a context to make it
-// available to users of the context. These users must load the dialect
-// before using any of its attributes, operations or types. Parser and pass
-// manager can load registered dialects automatically.
 //
 //===----------------------------------------------------------------------===//
 
@@ -28,6 +20,16 @@ struct HWStructFieldInfo {
   MlirType type;
 };
 typedef struct HWStructFieldInfo HWStructFieldInfo;
+
+enum HWModulePortDirection { Input, Output, InOut };
+typedef enum HWModulePortDirection HWModulePortDirection;
+
+struct HWModulePort {
+  MlirAttribute name;
+  MlirType type;
+  HWModulePortDirection dir;
+};
+typedef struct HWModulePort HWModulePort;
 
 //===----------------------------------------------------------------------===//
 // Dialect API.
@@ -58,6 +60,9 @@ MLIR_CAPI_EXPORTED bool hwTypeIsAArrayType(MlirType);
 /// If the type is an HW inout.
 MLIR_CAPI_EXPORTED bool hwTypeIsAInOut(MlirType type);
 
+/// If the type is an HW module type.
+MLIR_CAPI_EXPORTED bool hwTypeIsAModuleType(MlirType type);
+
 /// If the type is an HW struct.
 MLIR_CAPI_EXPORTED bool hwTypeIsAStructType(MlirType);
 
@@ -82,6 +87,31 @@ MLIR_CAPI_EXPORTED MlirType hwInOutTypeGet(MlirType element);
 /// Returns the element type of an inout type.
 MLIR_CAPI_EXPORTED MlirType hwInOutTypeGetElementType(MlirType);
 
+/// Creates an HW module type.
+MLIR_CAPI_EXPORTED MlirType hwModuleTypeGet(MlirContext ctx, intptr_t numPorts,
+                                            HWModulePort const *ports);
+
+/// Get an HW module type's number of inputs.
+MLIR_CAPI_EXPORTED intptr_t hwModuleTypeGetNumInputs(MlirType type);
+
+/// Get an HW module type's input type at a specific index.
+MLIR_CAPI_EXPORTED MlirType hwModuleTypeGetInputType(MlirType type,
+                                                     intptr_t index);
+
+/// Get an HW module type's input name at a specific index.
+MLIR_CAPI_EXPORTED MlirStringRef hwModuleTypeGetInputName(MlirType type,
+                                                          intptr_t index);
+
+/// Get an HW module type's number of outputs.
+MLIR_CAPI_EXPORTED intptr_t hwModuleTypeGetNumOutputs(MlirType type);
+
+/// Get an HW module type's output type at a specific index.
+MLIR_CAPI_EXPORTED MlirType hwModuleTypeGetOutputType(MlirType type,
+                                                      intptr_t index);
+
+/// Get an HW module type's output name at a specific index.
+MLIR_CAPI_EXPORTED MlirStringRef hwModuleTypeGetOutputName(MlirType type,
+                                                           intptr_t index);
 /// Creates an HW struct type in the context associated with the elements.
 MLIR_CAPI_EXPORTED MlirType hwStructTypeGet(MlirContext ctx,
                                             intptr_t numElements,
@@ -94,8 +124,12 @@ MLIR_CAPI_EXPORTED MlirType hwParamIntTypeGet(MlirAttribute parameter);
 
 MLIR_CAPI_EXPORTED MlirAttribute hwParamIntTypeGetWidthAttr(MlirType);
 
+MLIR_CAPI_EXPORTED MlirAttribute
+hwStructTypeGetFieldIndex(MlirType structType, MlirStringRef fieldName);
+
 MLIR_CAPI_EXPORTED HWStructFieldInfo
 hwStructTypeGetFieldNum(MlirType structType, unsigned idx);
+
 MLIR_CAPI_EXPORTED intptr_t hwStructTypeGetNumFields(MlirType structType);
 
 MLIR_CAPI_EXPORTED MlirType hwTypeAliasTypeGet(MlirStringRef scope,
@@ -114,14 +148,15 @@ MLIR_CAPI_EXPORTED MlirStringRef hwTypeAliasTypeGetScope(MlirType typeAlias);
 // Attribute API.
 //===----------------------------------------------------------------------===//
 
+MLIR_CAPI_EXPORTED bool hwAttrIsAInnerSymAttr(MlirAttribute);
+MLIR_CAPI_EXPORTED MlirAttribute hwInnerSymAttrGet(MlirAttribute symName);
+MLIR_CAPI_EXPORTED MlirAttribute hwInnerSymAttrGetSymName(MlirAttribute);
+
 MLIR_CAPI_EXPORTED bool hwAttrIsAInnerRefAttr(MlirAttribute);
 MLIR_CAPI_EXPORTED MlirAttribute hwInnerRefAttrGet(MlirAttribute moduleName,
                                                    MlirAttribute innerSym);
 MLIR_CAPI_EXPORTED MlirAttribute hwInnerRefAttrGetName(MlirAttribute);
 MLIR_CAPI_EXPORTED MlirAttribute hwInnerRefAttrGetModule(MlirAttribute);
-
-MLIR_CAPI_EXPORTED bool hwAttrIsAGlobalRefAttr(MlirAttribute);
-MLIR_CAPI_EXPORTED MlirAttribute hwGlobalRefAttrGet(MlirAttribute symName);
 
 MLIR_CAPI_EXPORTED bool hwAttrIsAParamDeclAttr(MlirAttribute);
 MLIR_CAPI_EXPORTED MlirAttribute hwParamDeclAttrGet(MlirStringRef name,
@@ -139,6 +174,10 @@ MLIR_CAPI_EXPORTED MlirType hwParamDeclRefAttrGetType(MlirAttribute decl);
 
 MLIR_CAPI_EXPORTED bool hwAttrIsAParamVerbatimAttr(MlirAttribute);
 MLIR_CAPI_EXPORTED MlirAttribute hwParamVerbatimAttrGet(MlirAttribute text);
+
+MLIR_CAPI_EXPORTED bool hwAttrIsAOutputFileAttr(MlirAttribute);
+MLIR_CAPI_EXPORTED MlirAttribute hwOutputFileGetFromFileName(
+    MlirAttribute text, bool excludeFromFileList, bool includeReplicatedOp);
 
 #ifdef __cplusplus
 }

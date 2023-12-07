@@ -13,14 +13,6 @@
 using namespace circt;
 using namespace circt::hw;
 
-std::pair<ArrayAttr, ArrayAttr>
-instance_like_impl::getHWModuleArgAndResultNames(Operation *module) {
-  assert(isAnyModule(module) && "Can only reference a module");
-
-  return {module->getAttrOfType<ArrayAttr>("argNames"),
-          module->getAttrOfType<ArrayAttr>("resultNames")};
-}
-
 Operation *
 instance_like_impl::getReferencedModule(const HWSymbolCache *cache,
                                         Operation *instanceOp,
@@ -29,8 +21,7 @@ instance_like_impl::getReferencedModule(const HWSymbolCache *cache,
     if (auto *result = cache->getDefinition(moduleName))
       return result;
 
-  auto topLevelModuleOp = instanceOp->getParentOfType<ModuleOp>();
-  return topLevelModuleOp.lookupSymbol(moduleName.getValue());
+  return SymbolTable::lookupNearestSymbolFrom(instanceOp, moduleName);
 }
 
 LogicalResult instance_like_impl::verifyReferencedModule(
@@ -42,7 +33,7 @@ LogicalResult instance_like_impl::verifyReferencedModule(
            << moduleName.getValue() << "'";
 
   // It must be some sort of module.
-  if (!hw::isAnyModule(module))
+  if (!isa<HWModuleLike>(module))
     return instanceOp->emitError("symbol reference '")
            << moduleName.getValue() << "' isn't a module";
 
@@ -240,8 +231,11 @@ LogicalResult instance_like_impl::verifyInstanceOfHWModule(
       };
 
   // Check that input types are consistent with the referenced module.
-  auto [modArgNames, modResultNames] =
-      instance_like_impl::getHWModuleArgAndResultNames(module);
+  auto mod = cast<HWModuleLike>(module);
+  auto modArgNames =
+      ArrayAttr::get(instance->getContext(), mod.getInputNames());
+  auto modResultNames =
+      ArrayAttr::get(instance->getContext(), mod.getOutputNames());
 
   ArrayRef<Type> resolvedModInputTypesRef = getModuleType(module).getInputs();
   SmallVector<Type> resolvedModInputTypes;
@@ -355,4 +349,47 @@ void instance_like_impl::getAsmResultNames(OpAsmSetValueNameFn setNameFn,
       name += std::to_string(i);
     setNameFn(results[i], name);
   }
+}
+
+SmallVector<PortInfo> instance_like_impl::getPortList(Operation *instanceOp) {
+  auto moduleTy = getModuleType(instanceOp);
+
+  SmallVector<PortInfo> ports;
+  auto emptyDict = DictionaryAttr::get(instanceOp->getContext());
+  auto argNames = instanceOp->getAttrOfType<ArrayAttr>("argNames");
+  auto argTypes = moduleTy.getInputs();
+  auto argLocs = instanceOp->getAttrOfType<ArrayAttr>("argLocs");
+
+  auto resultNames = instanceOp->getAttrOfType<ArrayAttr>("resultNames");
+  auto resultTypes = moduleTy.getResults();
+  auto resultLocs = instanceOp->getAttrOfType<ArrayAttr>("resultLocs");
+
+  ports.reserve(argTypes.size() + resultTypes.size());
+  for (unsigned i = 0, e = argTypes.size(); i < e; ++i) {
+    auto type = argTypes[i];
+    auto direction = ModulePort::Direction::Input;
+
+    if (auto inout = type.dyn_cast<InOutType>()) {
+      type = inout.getElementType();
+      direction = ModulePort::Direction::InOut;
+    }
+
+    LocationAttr loc;
+    if (argLocs)
+      loc = argLocs[i].cast<LocationAttr>();
+    ports.push_back(
+        {{argNames[i].cast<StringAttr>(), type, direction}, i, emptyDict, loc});
+  }
+
+  for (unsigned i = 0, e = resultTypes.size(); i < e; ++i) {
+    LocationAttr loc;
+    if (resultLocs)
+      loc = resultLocs[i].cast<LocationAttr>();
+    ports.push_back({{resultNames[i].cast<StringAttr>(), resultTypes[i],
+                      ModulePort::Direction::Output},
+                     i,
+                     emptyDict,
+                     loc});
+  }
+  return ports;
 }

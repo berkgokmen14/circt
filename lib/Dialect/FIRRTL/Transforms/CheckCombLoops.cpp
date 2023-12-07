@@ -274,7 +274,7 @@ public:
             auto fieldIndex = sub.getAccessedField().getFieldID();
             if (memPorts.contains(sub.getInput())) {
               auto memPort = sub.getInput();
-              auto type = memPort.getType();
+              BundleType type = memPort.getType();
               auto enableFieldId =
                   type.getFieldID((unsigned)ReadPortSubfield::en);
               auto dataFieldId =
@@ -320,7 +320,7 @@ public:
             }
           })
           .Case<SubaccessOp>([&](SubaccessOp sub) {
-            auto vecType = sub.getInput().getType();
+            FVectorType vecType = sub.getInput().getType();
             auto res = sub.getResult();
             bool isValid = false;
             SmallVector<FieldRef, 4> fields;
@@ -333,7 +333,8 @@ public:
                   for (size_t index = 0; index < vecType.getNumElements();
                        ++index)
                     fields.push_back(subBase.getSubField(
-                        1 + index * (vecType.getElementType().getMaxFieldID() +
+                        1 + index * (hw::FieldIdImpl::getMaxFieldID(
+                                         vecType.getElementType()) +
                                      1)));
                   return success();
                 },
@@ -375,8 +376,7 @@ public:
     if (auto inst = dyn_cast_or_null<InstanceOp>(ref.getDefiningOp())) {
       auto res = cast<OpResult>(ref.getValue());
       auto portNum = res.getResultNumber();
-      auto refMod =
-          dyn_cast_or_null<FModuleOp>(*instanceGraph.getReferencedModule(inst));
+      auto refMod = inst.getReferencedModule<FModuleOp>(instanceGraph);
       if (!refMod)
         return;
       FieldRef modArg(refMod.getArgument(portNum), ref.getFieldID());

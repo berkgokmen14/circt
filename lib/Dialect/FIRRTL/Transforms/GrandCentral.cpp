@@ -21,6 +21,7 @@
 #include "circt/Dialect/FIRRTL/Passes.h"
 #include "circt/Dialect/HW/HWAttributes.h"
 #include "circt/Dialect/HW/HWOps.h"
+#include "circt/Dialect/HW/InnerSymbolNamespace.h"
 #include "circt/Dialect/SV/SVOps.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "llvm/ADT/DepthFirstIterator.h"
@@ -33,7 +34,6 @@
 
 using namespace circt;
 using namespace firrtl;
-using hw::HWModuleLike;
 
 //===----------------------------------------------------------------------===//
 // Collateral for generating a YAML representation of a SystemVerilog interface
@@ -195,7 +195,7 @@ struct MappingContextTraits<DescribedSignal, Context> {
       // unwrapping happens in reverse order of the final representation.
       auto tpe = op.signal.getType();
       while (auto vector = tpe.dyn_cast<hw::UnpackedArrayType>()) {
-        dimensions.push_back(vector.getSize());
+        dimensions.push_back(vector.getNumElements());
         tpe = vector.getElementType();
       }
       dimensions = SmallVector<unsigned>(llvm::reverse(dimensions));
@@ -577,9 +577,7 @@ struct InterfaceElemsBuilder {
 ///    instantiate interfaces and to generate the "mappings" file that produces
 ///    cross-module references (XMRs) to drive the interface.
 struct GrandCentralPass : public GrandCentralBase<GrandCentralPass> {
-  GrandCentralPass(bool instantiateCompanionOnlyFlag) {
-    instantiateCompanionOnly = instantiateCompanionOnlyFlag;
-  }
+  using GrandCentralBase::companionMode;
 
   void runOnOperation() override;
 
@@ -647,7 +645,8 @@ private:
                  SmallVector<InterfaceElemsBuilder> &interfaceBuilder);
 
   /// Return the module associated with this value.
-  HWModuleLike getEnclosingModule(Value value, FlatSymbolRefAttr sym = {});
+  igraph::ModuleOpInterface getEnclosingModule(Value value,
+                                               FlatSymbolRefAttr sym = {});
 
   /// Inforamtion about how the circuit should be extracted.  This will be
   /// non-empty if an extraction annotation is found.
@@ -677,7 +676,7 @@ private:
 
   /// The module namespaces. These are lazily constructed by
   /// `getModuleNamespace`.
-  DenseMap<Operation *, ModuleNamespace> moduleNamespaces;
+  DenseMap<Operation *, hw::InnerSymbolNamespace> moduleNamespaces;
 
   /// Return a reference to the circuit namespace.  This will lazily construct a
   /// namespace if one does not exist.
@@ -688,24 +687,20 @@ private:
   }
 
   /// Get the cached namespace for a module.
-  ModuleNamespace &getModuleNamespace(FModuleLike module) {
-    auto it = moduleNamespaces.find(module);
-    if (it != moduleNamespaces.end())
-      return it->second;
-    return moduleNamespaces.insert({module, ModuleNamespace(module)})
-        .first->second;
+  hw::InnerSymbolNamespace &getModuleNamespace(FModuleLike module) {
+    return moduleNamespaces.try_emplace(module, module).first->second;
   }
 
   /// A symbol table associated with the circuit.  This is lazily constructed by
   /// `getSymbolTable`.
-  std::optional<SymbolTable> symbolTable;
+  std::optional<SymbolTable *> symbolTable;
 
   /// Return a reference to a circuit-level symbol table.  Lazily construct one
   /// if such a symbol table does not already exist.
   SymbolTable &getSymbolTable() {
     if (!symbolTable)
-      symbolTable = SymbolTable(getOperation());
-    return *symbolTable;
+      symbolTable = &getAnalysis<SymbolTable>();
+    return **symbolTable;
   }
 
   // Utility that acts like emitOpError, but does _not_ include a note.  The
@@ -736,11 +731,8 @@ private:
   /// A store of the YAML representation of interfaces.
   DenseMap<Attribute, sv::InterfaceOp> interfaceMap;
 
-  /// Returns an operation's `inner_sym`, adding one if necessary.
-  StringAttr getOrAddInnerSym(Operation *op);
-
-  /// Returns a port's `inner_sym`, adding one if necessary.
-  StringAttr getOrAddInnerSym(FModuleLike module, size_t portIdx);
+  /// Emit the hierarchy yaml file.
+  void emitHierarchyYamlFile(SmallVectorImpl<sv::InterfaceOp> &intfs);
 };
 
 } // namespace
@@ -1267,7 +1259,8 @@ bool GrandCentralPass::traverseField(
         assert(leafValue && "leafValue not found");
 
         auto companionModule = companionIDMap.lookup(id).companion;
-        HWModuleLike enclosing = getEnclosingModule(leafValue, sym);
+        igraph::ModuleOpInterface enclosing =
+            getEnclosingModule(leafValue, sym);
 
         auto tpe = type_cast<FIRRTLBaseType>(leafValue.getType());
 
@@ -1413,9 +1406,8 @@ std::optional<TypeSum> GrandCentralPass::computeField(
             auto value = fieldRef.getValue();
             auto fieldID = fieldRef.getFieldID();
             auto tpe = firrtl::type_cast<FIRRTLBaseType>(
-                value.getType()
-                    .cast<circt::hw::FieldIDTypeInterface>()
-                    .getFinalTypeByFieldID(fieldID));
+                hw::FieldIdImpl::getFinalTypeByFieldID(value.getType(),
+                                                       fieldID));
             if (!tpe.isGround()) {
               value.getDefiningOp()->emitOpError()
                   << "cannot be added to interface with id '"
@@ -1526,17 +1518,17 @@ std::optional<StringAttr> GrandCentralPass::traverseBundle(
 
 /// Return the module that is associated with this value.  Use the cached/lazily
 /// constructed symbol table to make this fast.
-HWModuleLike GrandCentralPass::getEnclosingModule(Value value,
-                                                  FlatSymbolRefAttr sym) {
+igraph::ModuleOpInterface
+GrandCentralPass::getEnclosingModule(Value value, FlatSymbolRefAttr sym) {
   if (auto blockArg = dyn_cast<BlockArgument>(value))
-    return cast<HWModuleLike>(blockArg.getOwner()->getParentOp());
+    return cast<igraph::ModuleOpInterface>(blockArg.getOwner()->getParentOp());
 
   auto *op = value.getDefiningOp();
   if (InstanceOp instance = dyn_cast<InstanceOp>(op))
-    return getSymbolTable().lookup<HWModuleLike>(
+    return getSymbolTable().lookup<igraph::ModuleOpInterface>(
         instance.getModuleNameAttr().getValue());
 
-  return op->getParentOfType<HWModuleLike>();
+  return op->getParentOfType<igraph::ModuleOpInterface>();
 }
 
 /// This method contains the business logic of this pass.
@@ -1557,13 +1549,13 @@ void GrandCentralPass::runOnOperation() {
   bool removalError = false;
   AnnotationSet::removeAnnotations(circuitOp, [&](Annotation anno) {
     if (anno.isClass(augmentedBundleTypeClass)) {
-      // If we are in "instantiateCompanionOnly" mode, then we don't need to
+      // If we are in "Instantiate" companion mode, then we don't need to
       // create the interface, so we can skip adding it to the worklist.  This
       // is a janky hack for situations where you want to synthesize assertion
       // logic included in the companion, but don't want to have a dead
       // interface hanging around (or have problems with tools understanding
       // interfaces).
-      if (!instantiateCompanionOnly)
+      if (companionMode != CompanionMode::Instantiate)
         worklist.push_back(anno);
       ++numAnnosRemoved;
       return true;
@@ -1682,23 +1674,9 @@ void GrandCentralPass::runOnOperation() {
   // built exist.  However, still generate the YAML file if the annotation for
   // this was passed in because some flows expect this.
   if (worklist.empty()) {
-    if (!maybeHierarchyFileYAML)
-      return markAllAnalysesPreserved();
-    std::string yamlString;
-    llvm::raw_string_ostream stream(yamlString);
-    ::yaml::Context yamlContext({interfaceMap});
-    llvm::yaml::Output yout(stream);
-    OpBuilder builder(circuitOp);
     SmallVector<sv::InterfaceOp, 0> interfaceVec;
-    yamlize(yout, interfaceVec, true, yamlContext);
-    builder.setInsertionPointToStart(circuitOp.getBodyBlock());
-    builder.create<sv::VerbatimOp>(builder.getUnknownLoc(), yamlString)
-        ->setAttr("output_file",
-                  hw::OutputFileAttr::getFromFilename(
-                      &getContext(), maybeHierarchyFileYAML->getValue(),
-                      /*excludFromFileList=*/true));
-    LLVM_DEBUG({ llvm::dbgs() << "Generated YAML:" << yamlString << "\n"; });
-    return;
+    emitHierarchyYamlFile(interfaceVec);
+    return markAllAnalysesPreserved();
   }
 
   // Setup the builder to create ops _inside the FIRRTL circuit_.  This is
@@ -1732,7 +1710,7 @@ void GrandCentralPass::runOnOperation() {
   /// module as if it were the DUT.  This works by doing a depth-first walk of
   /// the instance graph, starting from the "effective" DUT and stopping the
   /// search at any modules which are known companions.
-  DenseSet<hw::HWModuleLike> dutModules;
+  DenseSet<igraph::ModuleOpInterface> dutModules;
   FModuleOp effectiveDUT = dut;
   if (!effectiveDUT)
     effectiveDUT = cast<FModuleOp>(
@@ -1745,7 +1723,7 @@ void GrandCentralPass::runOnOperation() {
       i.skipChildren();
       continue;
     }
-    dutModules.insert(i->getModule());
+    dutModules.insert(i->getModule<igraph::ModuleOpInterface>());
     // Manually increment the iterator to avoid walking off the end from
     // skipChildren.
     ++i;
@@ -1781,6 +1759,7 @@ void GrandCentralPass::runOnOperation() {
   /// Central annotations.  This is used to populate: (1) the companionIDMap and
   /// (2) the leafMap.  Annotations are removed as they are discovered and if
   /// they are not malformed.
+  DenseSet<Operation *> modulesToDelete;
   removalError = false;
   circuitOp.walk([&](Operation *op) {
     TypeSwitch<Operation *>(op)
@@ -1895,6 +1874,19 @@ void GrandCentralPass::runOnOperation() {
               if (!instance)
                 goto FModuleOp_error;
 
+              // Companions are only allowed to take inputs.
+              for (auto [i, result] : llvm::enumerate(instance->getResults())) {
+                if (instance->getPortDirection(i) == Direction::In)
+                  continue;
+                // Do not allow any outputs in the drop mode.
+                auto ty = result.getType();
+                if (ty.isa<RefType>() && companionMode != CompanionMode::Drop)
+                  continue;
+                op.emitOpError()
+                    << "companion instance cannot have output ports";
+                goto FModuleOp_error;
+              }
+
               // If no extraction info was provided, exit.  Otherwise, setup the
               // lone instance of the companion to be lowered as a bind.
               if (!maybeExtractInfo) {
@@ -1908,17 +1900,6 @@ void GrandCentralPass::runOnOperation() {
                 ++numAnnosRemoved;
                 return true;
               }
-
-              // Lower the companion to a bind unless the user told us
-              // explicitly not to.
-              if (!instantiateCompanionOnly)
-                (*instance)->setAttr("lowerToBind", builder.getUnitAttr());
-
-              (*instance)->setAttr(
-                  "output_file",
-                  hw::OutputFileAttr::getFromFilename(
-                      &getContext(), maybeExtractInfo->bindFilename.getValue(),
-                      /*excludeFromFileList=*/true));
 
               // Look for any modules/extmodules _only_ instantiated by the
               // companion.  If these have no output file attribute, then mark
@@ -1934,6 +1915,30 @@ void GrandCentralPass::runOnOperation() {
                        "(including companion):\n";
               });
 
+              if (companionMode == CompanionMode::Drop) {
+                // Delete the instance if companions are disabled.
+                OpBuilder builder(&getContext());
+                for (auto port : instance->getResults()) {
+                  builder.setInsertionPointAfterValue(port);
+                  auto wire =
+                      builder.create<WireOp>(port.getLoc(), port.getType());
+                  port.replaceAllUsesWith(wire.getResult());
+                }
+                instance->erase();
+              } else {
+                // Lower the companion to a bind unless the user told us
+                // explicitly not to.
+                if (companionMode == CompanionMode::Bind)
+                  (*instance)->setAttr("lowerToBind", builder.getUnitAttr());
+
+                (*instance)->setAttr(
+                    "output_file",
+                    hw::OutputFileAttr::getFromFilename(
+                        &getContext(),
+                        maybeExtractInfo->bindFilename.getValue(),
+                        /*excludeFromFileList=*/true));
+              }
+
               for (auto &node : llvm::depth_first(companionNode)) {
                 auto mod = node->getModule();
 
@@ -1944,7 +1949,8 @@ void GrandCentralPass::runOnOperation() {
                 auto *modNode = instancePaths->instanceGraph.lookup(mod);
                 SmallVector<InstanceRecord *> instances(modNode->uses());
                 if (modNode != companionNode &&
-                    dutModules.count(modNode->getModule()))
+                    dutModules.count(
+                        modNode->getModule<igraph::ModuleOpInterface>()))
                   continue;
 
                 LLVM_DEBUG({
@@ -1954,6 +1960,10 @@ void GrandCentralPass::runOnOperation() {
 
                 if (auto extmodule = dyn_cast<FExtModuleOp>(*mod)) {
                   for (auto anno : AnnotationSet(extmodule)) {
+                    if (companionMode == CompanionMode::Drop) {
+                      modulesToDelete.insert(mod);
+                      break;
+                    }
                     if (!anno.isClass(blackBoxInlineAnnoClass) &&
                         !anno.isClass(blackBoxPathAnnoClass))
                       continue;
@@ -1969,17 +1979,21 @@ void GrandCentralPass::runOnOperation() {
                   continue;
                 }
 
-                // Move this module under the Grand Central output directory if
-                // no pre-existing output file information is present.
-                if (!mod->hasAttr("output_file")) {
-                  mod->setAttr("output_file",
-                               hw::OutputFileAttr::getAsDirectory(
-                                   &getContext(),
-                                   maybeExtractInfo->directory.getValue(),
-                                   /*excludeFromFileList=*/true,
-                                   /*includeReplicatedOps=*/true));
-                  mod->setAttr("comment", builder.getStringAttr(
-                                              "VCS coverage exclude_file"));
+                if (companionMode == CompanionMode::Drop) {
+                  modulesToDelete.insert(mod);
+                } else {
+                  // Move this module under the Grand Central output directory
+                  // if no pre-existing output file information is present.
+                  if (!mod->hasAttr("output_file")) {
+                    mod->setAttr("output_file",
+                                 hw::OutputFileAttr::getAsDirectory(
+                                     &getContext(),
+                                     maybeExtractInfo->directory.getValue(),
+                                     /*excludeFromFileList=*/true,
+                                     /*includeReplicatedOps=*/true));
+                    mod->setAttr("comment", builder.getStringAttr(
+                                                "VCS coverage exclude_file"));
+                  }
                 }
               }
 
@@ -1999,6 +2013,26 @@ void GrandCentralPass::runOnOperation() {
 
   if (removalError)
     return signalPassFailure();
+
+  if (companionMode == CompanionMode::Drop) {
+    for (auto *mod : modulesToDelete) {
+      auto name = cast<FModuleLike>(mod).getModuleNameAttr();
+
+      DenseSet<hw::HierPathOp> nlas;
+      nlaTable->getNLAsInModule(name, nlas);
+      nlaTable->removeNLAsfromModule(nlas, name);
+      for (auto nla : nlas) {
+        if (nla.root() == name)
+          nla.erase();
+      }
+
+      mod->erase();
+    }
+
+    SmallVector<sv::InterfaceOp, 0> interfaceVec;
+    emitHierarchyYamlFile(interfaceVec);
+    return;
+  }
 
   LLVM_DEBUG({
     // Print out the companion map and all leaf values that were discovered.
@@ -2232,7 +2266,7 @@ void GrandCentralPass::runOnOperation() {
     builder.create<sv::InterfaceInstanceOp>(
         getOperation().getLoc(), topIface.getInterfaceType(),
         companionIDMap.lookup(bundle.getID()).name,
-        builder.getStringAttr(symbolName));
+        hw::InnerSymAttr::get(builder.getStringAttr(symbolName)));
 
     // If no extraction information was present, then just leave the interface
     // instantiated in the companion.  Otherwise, make it a bind.
@@ -2246,24 +2280,7 @@ void GrandCentralPass::runOnOperation() {
       continue;
   }
 
-  // If a `GrandCentralHierarchyFileAnnotation` was passed in, generate a YAML
-  // representation of the interfaces that we produced with the filename that
-  // that annotation provided.
-  if (maybeHierarchyFileYAML) {
-    std::string yamlString;
-    llvm::raw_string_ostream stream(yamlString);
-    ::yaml::Context yamlContext({interfaceMap});
-    llvm::yaml::Output yout(stream);
-    yamlize(yout, interfaceVec, true, yamlContext);
-
-    builder.setInsertionPointToStart(circuitOp.getBodyBlock());
-    builder.create<sv::VerbatimOp>(builder.getUnknownLoc(), yamlString)
-        ->setAttr("output_file",
-                  hw::OutputFileAttr::getFromFilename(
-                      &getContext(), maybeHierarchyFileYAML->getValue(),
-                      /*excludFromFileList=*/true));
-    LLVM_DEBUG({ llvm::dbgs() << "Generated YAML:" << yamlString << "\n"; });
-  }
+  emitHierarchyYamlFile(interfaceVec);
 
   // Signal pass failure if any errors were found while examining circuit
   // annotations.
@@ -2272,11 +2289,38 @@ void GrandCentralPass::runOnOperation() {
   markAnalysesPreserved<NLATable>();
 }
 
+void GrandCentralPass::emitHierarchyYamlFile(
+    SmallVectorImpl<sv::InterfaceOp> &intfs) {
+  // If a `GrandCentralHierarchyFileAnnotation` was passed in, generate a YAML
+  // representation of the interfaces that we produced with the filename that
+  // that annotation provided.
+  if (!maybeHierarchyFileYAML)
+    return;
+
+  CircuitOp circuitOp = getOperation();
+
+  std::string yamlString;
+  llvm::raw_string_ostream stream(yamlString);
+  ::yaml::Context yamlContext({interfaceMap});
+  llvm::yaml::Output yout(stream);
+  yamlize(yout, intfs, true, yamlContext);
+
+  auto builder = OpBuilder::atBlockBegin(circuitOp.getBodyBlock());
+  builder.create<sv::VerbatimOp>(builder.getUnknownLoc(), yamlString)
+      ->setAttr("output_file",
+                hw::OutputFileAttr::getFromFilename(
+                    &getContext(), maybeHierarchyFileYAML->getValue(),
+                    /*excludeFromFileList=*/true));
+  LLVM_DEBUG({ llvm::dbgs() << "Generated YAML:" << yamlString << "\n"; });
+}
+
 //===----------------------------------------------------------------------===//
 // Pass Creation
 //===----------------------------------------------------------------------===//
 
 std::unique_ptr<mlir::Pass>
-circt::firrtl::createGrandCentralPass(bool instantiateCompanionOnly) {
-  return std::make_unique<GrandCentralPass>(instantiateCompanionOnly);
+circt::firrtl::createGrandCentralPass(CompanionMode companionMode) {
+  auto pass = std::make_unique<GrandCentralPass>();
+  pass->companionMode = companionMode;
+  return pass;
 }

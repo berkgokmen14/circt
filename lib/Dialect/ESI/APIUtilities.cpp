@@ -54,6 +54,12 @@ bool ESIAPIType::isSupported() const {
   return circt::esi::isSupported(type, true);
 }
 
+uint64_t ESIAPIType::size() const {
+  if (auto chan = dyn_cast<ChannelType>(type))
+    return hw::getBitWidth(chan.getInner());
+  return hw::getBitWidth(type);
+}
+
 ESIAPIType::ESIAPIType(Type typeArg) : type(innerType(typeArg)) {
   TypeSwitch<Type>(type)
       .Case([this](IntegerType t) {
@@ -86,7 +92,7 @@ static void emitName(Type type, uint64_t id, llvm::raw_ostream &os) {
         os << intName;
       })
       .Case([&os](hw::ArrayType arrTy) {
-        os << "ArrayOf" << arrTy.getSize() << 'x';
+        os << "ArrayOf" << arrTy.getNumElements() << 'x';
         emitName(arrTy.getElementType(), 0, os);
       })
       .Case([&os](NoneType) { os << "None"; })

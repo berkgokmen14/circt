@@ -14,4 +14,10 @@
 // Pull in the dialect definition.
 #include "circt/Dialect/Ibis/IbisDialect.h.inc"
 
+// Pull in all enum type definitions and utility function declarations.
+#include "circt/Dialect/Ibis/IbisEnums.h.inc"
+
+#define GET_ATTRDEF_CLASSES
+#include "circt/Dialect/Ibis/IbisAttributes.h.inc"
+
 #endif // CIRCT_DIALECT_IBIS_IBISDIALECT_H

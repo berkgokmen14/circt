@@ -15,6 +15,7 @@
 #define CIRCT_DIALECT_HW_TYPES_H
 
 #include "circt/Dialect/HW/HWDialect.h"
+#include "circt/Dialect/HW/HWTypeInterfaces.h"
 
 #include "circt/Support/LLVM.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -37,9 +38,10 @@ class ModuleType;
 
 namespace detail {
 
-ModuleType fnToMod(Operation *op, ArrayAttr inputNames, ArrayAttr outputNames);
-ModuleType fnToMod(FunctionType fn, ArrayAttr inputNames,
-                   ArrayAttr outputNames);
+ModuleType fnToMod(Operation *op, ArrayRef<Attribute> inputNames,
+                   ArrayRef<Attribute> outputNames);
+ModuleType fnToMod(FunctionType fn, ArrayRef<Attribute> inputNames,
+                   ArrayRef<Attribute> outputNames);
 
 /// Struct defining a field. Used in structs.
 struct FieldInfo {

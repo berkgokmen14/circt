@@ -4,12 +4,13 @@
 
 from __future__ import annotations
 
-from .circt.dialects import msft
+from .circt.dialects import esi
 from .circt import ir
 
-from .types import Type, Channel, ChannelSignaling, ClockType, Bits
+from .types import Type, Bundle, Channel, ChannelSignaling, ClockType, Bits
 
 from functools import singledispatchmethod
+from typing import Optional
 
 
 class ModuleDecl:
@@ -41,6 +42,13 @@ class OutputChannel(Output):
     super().__init__(type, name)
 
 
+class SendBundle(Output):
+  """Create an ESI bundle output port (aka sending port)."""
+
+  def __init__(self, bundle: Bundle, name: str = None):
+    super().__init__(bundle, name)
+
+
 class Input(ModuleDecl):
   """Create an RTL-level input port."""
 
@@ -70,16 +78,23 @@ class InputChannel(Input):
     super().__init__(type, name)
 
 
+class RecvBundle(Input):
+  """Create an ESI bundle input port (aka receiving port)."""
+
+  def __init__(self, bundle: Bundle, name: str = None):
+    super().__init__(bundle, name)
+
+
 class AppID:
-  AttributeName = "msft.appid"
+  AttributeName = "esi.appid"
 
   @singledispatchmethod
-  def __init__(self, name: str, idx: int):
-    self._appid = msft.AppIDAttr.get(name, idx)
+  def __init__(self, name: str, idx: Optional[int] = None):
+    self._appid = esi.AppIDAttr.get(name, idx)
 
   @__init__.register(ir.Attribute)
   def __init__mlir_attr(self, attr: ir.Attribute):
-    self._appid = msft.AppIDAttr(attr)
+    self._appid = esi.AppIDAttr(attr)
 
   @property
   def name(self) -> str:

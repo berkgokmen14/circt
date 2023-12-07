@@ -79,7 +79,7 @@ public:
     return getOperation().getConditionValue();
   }
 
-  std::optional<uint64_t> getBound() override {
+  std::optional<int64_t> getBound() override {
     return getOperation().getBound();
   }
 
@@ -293,6 +293,7 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
     /// We walk the operations of the funcOp to ensure that all def's have
     /// been visited before their uses.
     bool opBuiltSuccessfully = true;
+    llvm::errs() << "here\n";
     funcOp.walk([&](Operation *op) {
       opBuiltSuccessfully &=
           TypeSwitch<mlir::Operation *, bool>(op)
@@ -317,7 +318,8 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
                     return true;
                   })
               .Default([&](auto op) {
-                op->emitError() << "Unhandled operation during BuildOpGroups()";
+                op->dump();
+                op->emitError() << "Unhandled operation during BuildOpGroups() test " << op;
                 return false;
               });
 

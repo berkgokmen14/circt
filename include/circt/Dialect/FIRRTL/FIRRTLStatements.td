@@ -17,6 +17,7 @@ include "FIRRTLDialect.td"
 include "FIRRTLEnums.td"
 include "FIRRTLOpInterfaces.td"
 include "FIRRTLTypes.td"
+include "circt/Dialect/HW/HWTypes.td"
 include "mlir/IR/SymbolInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
@@ -180,8 +181,7 @@ def CoverOp : VerifOp<"cover"> {
   let summary = "Cover Verification Statement";
 }
 
-def WhenOp : FIRRTLOp<"when", [SingleBlock, NoTerminator, NoRegionArguments,
-                               RecursiveMemoryEffects, RecursivelySpeculatable]> {
+def WhenOp : FIRRTLOp<"when", [SingleBlock, NoTerminator, NoRegionArguments]> {
   let summary = "When Statement";
   let description = [{
     The "firrtl.when" operation represents a conditional.  Connections within
@@ -194,6 +194,7 @@ def WhenOp : FIRRTLOp<"when", [SingleBlock, NoTerminator, NoRegionArguments,
   let regions = (region SizedRegion<1>:$thenRegion, AnyRegion:$elseRegion);
 
   let skipDefaultBuilders = 1;
+  let hasCanonicalizeMethod = 1;
   let builders = [
     OpBuilder<(ins "Value":$condition, "bool":$withElseRegion,
                       CArg<"std::function<void()>", "{}">:$thenCtor,
@@ -277,8 +278,8 @@ def MatchOp : FIRRTLOp<"match", [SingleBlock, NoTerminator,
   }];
 }
 
-def PropAssignOp : FIRRTLOp<"propassign", [FConnectLike, SameTypeOperands,
-                                           HasParent<"FModuleOp">]> {
+def PropAssignOp : FIRRTLOp<"propassign",
+  [FConnectLike, SameTypeOperands, ParentOneOf<["FModuleOp", "ClassOp"]>]> {
   let summary = "Assign to a sink property value.";
   let description = [{
     Assign an output property value. The types must match exactly.
@@ -306,17 +307,6 @@ def ForceOp : FIRRTLOp<"force", [SameTypeOperands]> {
   let results = (outs);
   let assemblyFormat =
     "$dest `,` $src attr-dict `:` qualified(type($dest)) `,` qualified(type($src))";
-}
-
-def ProbeOp : FIRRTLOp<"probe"> {
-  let summary = "FIRRTL Value Probe";
-  let description = [{
-    Captures values without binding to any accidental name.
-  }];
-  let arguments = (ins SymbolNameAttr:$inner_sym, Variadic<FIRRTLBaseType>:$captured);
-  let results = (outs);
-
-  let assemblyFormat = "$inner_sym attr-dict ( `,` $captured^  `:` qualified(type($captured)))?";
 }
 
 //===- Reference force/release --------------------------------------------===//
@@ -358,6 +348,20 @@ def RefReleaseInitialOp : FIRRTLOp<"ref.release_initial"> {
   let hasCanonicalizer = 1;
 }
 
+def XMRRefOp : FIRRTLOp<"xmr.ref"> {
+  let summary = "FIRRTL XMR operation, targetable by ref ops.";
+  let arguments = (ins FlatSymbolRefAttr:$ref, DefaultValuedAttr<StrAttr, "{}">:$verbatimSuffix);
+  let results = (outs RefType:$dest);
+  let assemblyFormat = "$ref (`,` $verbatimSuffix^)? attr-dict `:` qualified(type($dest))";
+}
+
+def XMRDerefOp : FIRRTLOp<"xmr.deref"> {
+  let summary = "FIRRTL XMR operation, reading an XMR target.";
+  let arguments = (ins FlatSymbolRefAttr:$ref, DefaultValuedAttr<StrAttr, "{}">:$verbatimSuffix);
+  let results = (outs PassiveType:$dest);
+  let assemblyFormat = "$ref (`,` $verbatimSuffix^)? attr-dict `:` qualified(type($dest))";
+}
+
 //===----------------------------------------------------------------------===//
 // Verif Dialect Intrinsics
 //===----------------------------------------------------------------------===//
@@ -377,33 +381,35 @@ def VerifAssumeIntrinsicOp : VerifIntrinsicOp<"assume">;
 def VerifCoverIntrinsicOp : VerifIntrinsicOp<"cover">;
 
 //===----------------------------------------------------------------------===//
-// Group Op
+// Layer Block Op
 //===----------------------------------------------------------------------===//
 
-def GroupOp : FIRRTLOp<
-  "group",
+def LayerBlockOp : FIRRTLOp<
+  "layerblock",
   [SingleBlock, NoTerminator, NoRegionArguments,
-   ParentOneOf<["firrtl::FModuleOp", "firrtl::GroupOp"]>,
+   ParentOneOf<["firrtl::FModuleOp", "firrtl::LayerBlockOp"]>,
    DeclareOpInterfaceMethods<SymbolUserOpInterface>]
 > {
-  let summary = "A definition of an optional group";
+  let summary = "A definition of a layer block";
   let description = [{
-    The `firrtl.group` operation defines optional code that is conditionally
-    part of a `firrtl.module`.  This is typically used to store verification or
-    debugging code that is lowered to a SystemVerilog `bind` instantiation.  An
-    optional group can read from (capture) values defined in parent group
-    definitions or in the parent module, but may not write to hardware declared
-    outside the group.
+    The `firrtl.layerblock` operation defines optional code that is
+    conditionally part of a `firrtl.module` if its referenced `firrtl.layer` is
+    enabled.  This is typically used to store verification or debugging code
+    that is lowered to a module that is "enabled" using the `firrtl.layer`'s
+    convention (e.g., remote instantiation via SystemVerilog `bind`).  A layer
+    block can read from (capture) values defined in parent layer blocks or in
+    the parent module, but may not write to hardware declared outside the layer
+    block.
 
-    A `firrtl.group` must refer to an existing optional group declaration
-    (`firrtl.declgroup`) via a symbol reference.  A nested `firrtl.group` refers
-    to a nested group declaration via a nested symbol reference.
+    A `firrtl.layerblock` must refer to an existing layer definition
+    (`firrtl.layer`) via a symbol reference.  A nested `firrtl.layerblock`
+    refers to a nested layer definition via a nested symbol reference.
   }];
-  let arguments = (ins SymbolRefAttr:$groupName);
+  let arguments = (ins SymbolRefAttr:$layerName);
   let results = (outs);
   let regions = (region SizedRegion<1>:$region);
   let assemblyFormat = [{
-    $groupName $region attr-dict
+    $layerName $region attr-dict
   }];
   let hasVerifier = 1;
 }

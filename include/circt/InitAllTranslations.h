@@ -16,6 +16,7 @@
 #include "circt/Dialect/FIRRTL/FIREmitter.h"
 #include "circt/Dialect/FIRRTL/FIRParser.h"
 #include "circt/Dialect/MSFT/ExportTcl.h"
+#include "circt/Target/DebugInfo.h"
 #include "circt/Target/ExportSystemC.h"
 
 #ifndef CIRCT_INITALLTRANSLATIONS_H
@@ -28,11 +29,11 @@ namespace circt {
 // automatically.
 inline void registerAllTranslations() {
   static bool initOnce = []() {
-    esi::registerESITranslations();
     calyx::registerToCalyxTranslation();
     firrtl::registerFromFIRFileTranslation();
     firrtl::registerToFIRFileTranslation();
     ExportSystemC::registerExportSystemCTranslation();
+    debug::registerTranslations();
     return true;
   }();
   (void)initOnce;

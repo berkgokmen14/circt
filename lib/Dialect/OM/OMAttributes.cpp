@@ -14,6 +14,7 @@
 #include "circt/Dialect/OM/OMDialect.h"
 #include "circt/Dialect/OM/OMTypes.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -33,6 +34,11 @@ Type circt::om::SymbolRefAttr::getType() {
 
 Type circt::om::ListAttr::getType() {
   return ListType::get(getContext(), getElementType());
+}
+
+Type circt::om::MapAttr::getType() {
+  return MapType::get(getContext(), StringType::get(getContext()),
+                      getValueType());
 }
 
 circt::om::SymbolRefAttr circt::om::SymbolRefAttr::get(mlir::Operation *op) {
@@ -65,6 +71,62 @@ circt::om::ListAttr::verify(function_ref<InFlightDiagnostic()> emitError,
 
     return true;
   }));
+}
+
+LogicalResult
+circt::om::MapAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                           mlir::Type valueType,
+                           mlir::DictionaryAttr elements) {
+  for (auto attr : elements) {
+    auto typedAttr = llvm::dyn_cast<mlir::TypedAttr>(attr.getValue());
+    if (!typedAttr)
+      return emitError()
+             << "a value of a map attribute must be a typed attr but got "
+             << attr.getValue();
+    if (typedAttr.getType() != valueType)
+      return emitError() << "a value of a map attribute must have a type "
+                         << valueType << " but field " << attr.getName()
+                         << " has " << typedAttr.getType();
+  }
+  return success();
+}
+
+void PathAttr::print(AsmPrinter &odsPrinter) const {
+  odsPrinter << '[';
+  llvm::interleaveComma(getPath(), odsPrinter, [&](PathElement element) {
+    odsPrinter.printKeywordOrString(element.module);
+    odsPrinter << ':';
+    odsPrinter.printKeywordOrString(element.instance);
+  });
+  odsPrinter << ']';
+}
+
+Attribute PathAttr::parse(AsmParser &odsParser, Type odsType) {
+  auto *context = odsParser.getContext();
+  SmallVector<PathElement> path;
+  if (odsParser.parseCommaSeparatedList(
+          OpAsmParser::Delimiter::Square, [&]() -> ParseResult {
+            std::string module;
+            std::string instance;
+            if (odsParser.parseKeywordOrString(&module) ||
+                odsParser.parseColon() ||
+                odsParser.parseKeywordOrString(&instance))
+              return failure();
+            path.emplace_back(StringAttr::get(context, module),
+                              StringAttr::get(context, instance));
+            return success();
+          }))
+    return nullptr;
+  return PathAttr::get(context, path);
+}
+
+LogicalResult PathAttr::verify(function_ref<mlir::InFlightDiagnostic()>,
+                               ArrayRef<PathElement> path) {
+  return success();
+}
+
+Type circt::om::IntegerAttr::getType() {
+  return OMIntegerType::get(getContext());
 }
 
 void circt::om::OMDialect::registerAttributes() {

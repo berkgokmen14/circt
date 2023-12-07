@@ -13,12 +13,12 @@
 #include "circt/Conversion/HWArithToHW.h"
 #include "../PassDetail.h"
 #include "circt/Dialect/Comb/CombOps.h"
+#include "circt/Dialect/HW/ConversionPatterns.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HWArith/HWArithOps.h"
 #include "circt/Dialect/MSFT/MSFTOps.h"
 #include "circt/Dialect/SV/SVOps.h"
 #include "circt/Dialect/Seq/SeqOps.h"
-#include "circt/Support/ConversionPatterns.h"
 
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -51,13 +51,12 @@ improveNamehint(Value oldValue, Operation *newOp,
 // Extract a bit range, specified via start bit and width, from a given value.
 static Value extractBits(OpBuilder &builder, Location loc, Value value,
                          unsigned startBit, unsigned bitWidth) {
-  SmallVector<Value, 1> result;
-  builder.createOrFold<comb::ExtractOp>(result, loc, value, startBit, bitWidth);
-  Value extractedValue = result[0];
-  if (extractedValue != value) {
+  Value extractedValue =
+      builder.createOrFold<comb::ExtractOp>(loc, value, startBit, bitWidth);
+  Operation *definingOp = extractedValue.getDefiningOp();
+  if (extractedValue != value && definingOp) {
     // only change namehint if a new operation was created.
-    auto *newOp = extractedValue.getDefiningOp();
-    improveNamehint(value, newOp, [&](StringRef oldNamehint) {
+    improveNamehint(value, definingOp, [&](StringRef oldNamehint) {
       return (oldNamehint + "_" + std::to_string(startBit) + "_to_" +
               std::to_string(startBit + bitWidth))
           .str();
@@ -82,10 +81,8 @@ static Value extendTypeWidth(OpBuilder &builder, Location loc, Value value,
     // Sign extension
     Value highBit = extractBits(builder, loc, value,
                                 /*startBit=*/sourceWidth - 1, /*bitWidth=*/1);
-    SmallVector<Value, 1> result;
-    builder.createOrFold<comb::ReplicateOp>(result, loc, highBit,
-                                            extensionLength);
-    extensionBits = result[0];
+    extensionBits =
+        builder.createOrFold<comb::ReplicateOp>(loc, highBit, extensionLength);
   } else {
     // Zero extension
     extensionBits = builder
@@ -135,6 +132,12 @@ static bool isLegalOp(Operation *op) {
     return llvm::none_of(funcOp.getArgumentTypes(), isSignednessType) &&
            llvm::none_of(funcOp.getResultTypes(), isSignednessType) &&
            llvm::none_of(funcOp.getFunctionBody().getArgumentTypes(),
+                         isSignednessType);
+  }
+
+  if (auto modOp = dyn_cast<hw::HWModuleLike>(op)) {
+    return llvm::none_of(modOp.getPortTypes(), isSignednessType) &&
+           llvm::none_of(modOp.getModuleBody().getArgumentTypes(),
                          isSignednessType);
   }
 
@@ -354,7 +357,7 @@ Type HWArithToHWTypeConverter::removeSignedness(Type type) {
           })
           .Case<hw::ArrayType>([this](auto type) {
             return hw::ArrayType::get(removeSignedness(type.getElementType()),
-                                      type.getSize());
+                                      type.getNumElements());
           })
           .Case<hw::StructType>([this](auto type) {
             // Recursively convert each element.

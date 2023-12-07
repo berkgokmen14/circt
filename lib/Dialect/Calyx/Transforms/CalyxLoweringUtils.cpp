@@ -454,6 +454,12 @@ void ComponentLoweringStateInterface::registerMemoryInterface(
   memories[memref] = memoryInterface;
 }
 
+void ComponentLoweringStateInterface::removeMemoryInterface(
+    Value memref) {
+  assert(memories.contains(memref));
+  memories.erase(memref);
+}
+
 calyx::MemoryInterface
 ComponentLoweringStateInterface::getMemoryInterface(Value memref) {
   auto it = memories.find(memref);

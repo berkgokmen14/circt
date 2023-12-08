@@ -984,7 +984,8 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
     }
 
     return TypeSwitch<Operation *, WalkResult>(op)
-        .Case<IfOp, AffineYieldOp, arith::ConstantOp, CmpIOp, IndexCastOp,
+        .Case<IfOp, AffineYieldOp, arith::ConstantOp, arith::ExtSIOp,
+              arith::ExtUIOp, arith::TruncIOp, CmpIOp, IndexCastOp,
               memref::AllocaOp, memref::AllocOp, loopschedule::AllocInterface,
               YieldOp, func::ReturnOp>([&](Operation *combOp) {
           // Some known combinational ops.

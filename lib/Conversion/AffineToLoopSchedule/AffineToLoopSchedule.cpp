@@ -1012,7 +1012,8 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
               Problem::OperatorType memOpr = problem.getOrInsertOperatorType(
                   "mem_" + std::to_string(hash_value(memRef)));
               problem.setLatency(memOpr, 1);
-              problem.setLimit(memOpr, 2);
+              // External memories are 1 RW port
+              problem.setLimit(memOpr, 1);
               problem.addExtraLimitingType(loopOp, memOpr);
             } else if (isa<LoadInterface>(op)) {
               auto loadOp = cast<loopschedule::LoadInterface>(*op);
@@ -1038,7 +1039,7 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
           });
           return WalkResult::advance();
         })
-        .Case<memref::StoreOp>([&](Operation *memOp) {
+        .Case<memref::StoreOp, AffineStoreOp>([&](Operation *memOp) {
           // Some known sequential ops. In certain cases, reads may be
           // combinational in Calyx, but taking advantage of that is left as
           // a future enhancement.
@@ -1052,7 +1053,7 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
           problem.setLinkedOperatorType(memOp, memOpr);
           return WalkResult::advance();
         })
-        .Case<memref::LoadOp>([&](Operation *memOp) {
+        .Case<memref::LoadOp, AffineLoadOp>([&](Operation *memOp) {
           // Some known sequential ops. In certain cases, reads may be
           // combinational in Calyx, but taking advantage of that is left as
           // a future enhancement.

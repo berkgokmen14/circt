@@ -992,7 +992,7 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
           problem.setLinkedOperatorType(combOp, combOpr);
           return WalkResult::advance();
         })
-        .Case<AddIOp, CmpIOp, ShLIOp, AndIOp, ShRSIOp, ShRUIOp>(
+        .Case<AddIOp, SubIOp, CmpIOp, ShLIOp, AndIOp, ShRSIOp, ShRUIOp>(
             [&](Operation *seqOp) {
               // These ops need to be sequential for now because we do not
               // have enough information to chain them together yet.

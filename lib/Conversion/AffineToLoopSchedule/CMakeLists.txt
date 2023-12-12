@@ -11,4 +11,5 @@ add_circt_library(CIRCTAffineToLoopSchedule
   CIRCTSchedulingAnalysis
   CIRCTLoopSchedule
   MLIRArithTransforms
+  CIRCTTransforms 
   )

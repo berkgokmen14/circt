@@ -4,6 +4,7 @@ add_circt_library(CIRCTTransforms
   UnrollForLoopSchedule.cpp
   MapArithToComb.cpp
   UnrollForLoopSchedule.cpp
+  HoistInterIterationArg.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${CIRCT_MAIN_INCLUDE_DIR}/circt/Transforms

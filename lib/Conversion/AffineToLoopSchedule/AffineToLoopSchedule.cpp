@@ -14,6 +14,7 @@
 #include "circt/Dialect/SSP/SSPInterfaces.h"
 #include "circt/Scheduling/Algorithms.h"
 #include "circt/Scheduling/Problems.h"
+#include "circt/Transforms/Passes.h"
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Dialect/Affine/Analysis/AffineAnalysis.h"
 #include "mlir/Dialect/Affine/Analysis/LoopAnalysis.h"
@@ -944,7 +945,8 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures() {
       [&](LoopLikeOpInterface loopLike) { moveLoopInvariantCode(loopLike); });
 
   mlir::PassManager pm(context);
-  pm.addPass(arith::createIntRangeOptimizationsPass());
+  // pm.addPass(circt ::createHoistInterIterationArgPass());
+  //  pm.addPass(arith::createIntRangeOptimizationsPass());
   if (failed(pm.run(op)))
     signalPassFailure();
 

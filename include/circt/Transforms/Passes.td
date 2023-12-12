@@ -60,6 +60,13 @@ def UnrollForLoopSchedule : Pass<"unroll-for-loop-schedule", "::mlir::func::Func
   let dependentDialects = ["mlir::affine::AffineDialect", "mlir::func::FuncDialect"];
 }
 
+def HoistInterIterationArg : Pass<"hoist-iter-arg", "::mlir::func::FuncOp"> {
+  let summary = "Coalesce nested for loops with the innermost having iter arguments";
+  let description = [{Coalesce nested for loops with the innermost having iter arguments}];
+  let constructor = "circt::createHoistInterIterationArgPass()";
+  let dependentDialects = ["mlir::affine::AffineDialect", "mlir::func::FuncDialect"];
+}
+
 def MapArithToCombPass : InterfacePass<"map-arith-to-comb", "circt::hw::HWModuleLike"> {
   let summary = "Map arith ops to combinational logic";
   let description = [{

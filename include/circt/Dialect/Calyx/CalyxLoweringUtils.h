@@ -107,6 +107,34 @@ struct MemoryPortsImpl {
   std::optional<Value> writeDone;
   SmallVector<Value> addrPorts;
   bool isDynamic;
+
+  bool operator==(const MemoryPortsImpl &other) const {
+    if (readData != other.readData)
+      return false;
+
+    if (readEn != other.readEn)
+      return false;
+
+    if (readDone != other.readDone)
+      return false;
+
+    if (writeData != other.writeData)
+      return false;
+
+    if (writeEn != other.writeEn)
+      return false;
+
+    if (writeDone != other.writeDone)
+      return false;
+
+    if (addrPorts != other.addrPorts)
+      return false;
+
+    if (isDynamic != other.isDynamic)
+      return false;
+
+    return true;
+  }
 };
 
 // Represents the interface of memory in Calyx. The various lowering passes
@@ -117,6 +145,10 @@ struct MemoryInterface {
   explicit MemoryInterface(const MemoryPortsImpl &ports);
   explicit MemoryInterface(calyx::MemoryOp memOp);
   explicit MemoryInterface(calyx::SeqMemoryOp memOp);
+
+  bool operator==(const MemoryInterface &interface) const {
+    return impl == interface.impl;
+  }
 
   // Getter methods for each memory interface port.
   Value readData();

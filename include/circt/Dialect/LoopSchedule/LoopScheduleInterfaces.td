@@ -54,7 +54,11 @@ def LoopOpInterface : OpInterface<"LoopInterface"> {
     InterfaceMethod<
       "Returns if the loop is pipelined and false otherwise",
       "bool",
-      "isPipelined">
+      "isPipelined">,
+    InterfaceMethod<
+      "Returns if the loop has inputs that might stall",
+      "bool",
+      "canStall">
   ];
 
   let verify = [{ return verifyLoop(op); }];

@@ -443,6 +443,8 @@ public:
   /// Returns the memory interface registered for the given memref.
   calyx::MemoryInterface getMemoryInterface(Value memref);
 
+  void removeMemoryInterface(Value memref);
+
   /// Returns true if a memory interface exists for provided value.
   bool hasMemoryInterface(Value memref);
 

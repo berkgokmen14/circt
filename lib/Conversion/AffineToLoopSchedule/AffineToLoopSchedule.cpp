@@ -485,19 +485,21 @@ void AffineToLoopSchedule::runOnOperation() {
   //   }
   // }
 
+  // getOperation()->getParentOfType<ModuleOp>().dump();
+
   // getOperation().walk([&](Operation *op) {
   //   ArrayRef<MemoryDependence> dependences =
   //       dependenceAnalysis->getDependences(op);
   //   if (dependences.empty())
   //     return;
   //   op->dump();
-  //   llvm::errs() << "===============================\n";
   //   for (auto &memoryDep : dependences) {
   //     if (!hasDependence(memoryDep.dependenceType))
   //       continue;
   //     llvm::errs() << "deps: ";
   //     memoryDep.source->dump();
   //   }
+  //   llvm::errs() << "===============================\n\n";
   // });
 
   // After dependence analysis, materialize affine structures.
@@ -1090,6 +1092,19 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
           if (limitOpt.has_value())
             problem.setLimit(portOpr, limitOpt.value());
           problem.setLinkedOperatorType(op, portOpr);
+
+          return WalkResult::advance();
+        })
+        .Case<loopschedule::SchedulableInterface>([&](Operation *op) {
+          auto schedOp = cast<SchedulableInterface>(op);
+          auto latency = schedOp.getOpLatency();
+          auto limitOpt = schedOp.getOpLimit();
+          Problem::OperatorType opr =
+              problem.getOrInsertOperatorType(schedOp.getUniqueId());
+          problem.setLatency(opr, latency);
+          if (limitOpt.has_value())
+            problem.setLimit(opr, limitOpt.value());
+          problem.setLinkedOperatorType(op, opr);
 
           return WalkResult::advance();
         })
@@ -1961,6 +1976,10 @@ AffineToLoopSchedule::createFuncLoopSchedule(FuncOp &funcOp,
     if (isa<AffineYieldOp, YieldOp, func::ReturnOp, memref::AllocaOp,
             arith::ConstantOp, memref::AllocOp, AllocInterface>(op))
       continue;
+    if (auto schedOp = dyn_cast<SchedulableInterface>(op)) {
+      if (schedOp.isInitOp())
+        continue;
+    }
     auto startTime = problem.getStartTime(op);
     startGroups[*startTime].push_back(op);
   }
@@ -2081,6 +2100,10 @@ AffineToLoopSchedule::createFuncLoopSchedule(FuncOp &funcOp,
         isa<func::ReturnOp, memref::AllocaOp, arith::ConstantOp,
             memref::AllocOp, AllocInterface>(op))
       return;
+    if (auto schedOp = dyn_cast<SchedulableInterface>(op)) {
+      if (schedOp.isInitOp())
+        return;
+    }
     op->dropAllUses();
     op->dropAllDefinedValueUses();
     op->dropAllReferences();

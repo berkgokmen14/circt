@@ -183,6 +183,38 @@ def StoreOpInterface : OpInterface<"StoreInterface"> {
   /* let verify = [{ return verifyGroupInterface(op); }]; */
 }
 
+// Op interface for allocations.
+def SchedulableOpInterface : OpInterface<"SchedulableInterface"> {
+  let cppNamespace = "::circt::loopschedule";
+
+  let description = [{
+    This is an op interface for alloc ops to be lowered.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      "This returns the number of cycles it takes for an op to complete.",
+      "uint32_t",
+      "getOpLatency",
+      (ins)>,
+    InterfaceMethod<
+      "This returns the number of this op that can be scheduled at the same time.",
+      "std::optional<uint32_t>",
+      "getOpLimit",
+      (ins)>,
+    InterfaceMethod<
+      "This returns a unique identifier for this op",
+      "std::string",
+      "getUniqueId",
+      (ins)>,
+    InterfaceMethod<
+      "This returns true if this is an init op (like an alloc, constant, etc)",
+      "bool",
+      "isInitOp",
+      (ins)>,
+  ];
+}
+
 // Op interface for AffineOps.
 def SchedulableAffineOpInterface : OpInterface<"SchedulableAffineInterface"> {
   let cppNamespace = "::circt::loopschedule";

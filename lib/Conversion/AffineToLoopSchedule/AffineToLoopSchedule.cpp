@@ -1098,7 +1098,7 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
           auto latency = schedOp.getOpLatency();
           auto limitOpt = schedOp.getOpLimit();
           Problem::OperatorType opr =
-            problem.getOrInsertOperatorType(schedOp.getUniqueId());
+              problem.getOrInsertOperatorType(schedOp.getUniqueId());
           problem.setLatency(opr, latency);
           if (limitOpt.has_value())
             problem.setLimit(opr, limitOpt.value());
@@ -2097,7 +2097,7 @@ AffineToLoopSchedule::createFuncLoopSchedule(FuncOp &funcOp,
         inTopLevelStepOp(op) ||
         isa<func::ReturnOp, memref::AllocaOp, arith::ConstantOp,
             memref::AllocOp, AllocInterface>(op))
-      return; 
+      return;
     if (auto schedOp = dyn_cast<SchedulableInterface>(op)) {
       if (schedOp.isInitOp())
         return;

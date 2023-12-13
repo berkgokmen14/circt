@@ -454,8 +454,7 @@ void ComponentLoweringStateInterface::registerMemoryInterface(
   memories[memref] = memoryInterface;
 }
 
-void ComponentLoweringStateInterface::removeMemoryInterface(
-    Value memref) {
+void ComponentLoweringStateInterface::removeMemoryInterface(Value memref) {
   assert(memories.contains(memref));
   memories.erase(memref);
 }

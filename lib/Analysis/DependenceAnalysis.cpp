@@ -187,8 +187,9 @@ static Value getMemref(Operation *op) {
 
 /// Helper to iterate through memory operation pairs and check for dependencies
 /// at a given loop nesting depth.
-static void checkSchedInterfaceDependence(SmallVectorImpl<Operation *> &memoryOps,
-                                          MemoryDependenceResult &results) {
+static void
+checkSchedInterfaceDependence(SmallVectorImpl<Operation *> &memoryOps,
+                              MemoryDependenceResult &results) {
 
   auto funcOp = memoryOps.front()->getParentOfType<func::FuncOp>();
 
@@ -214,7 +215,7 @@ static void checkSchedInterfaceDependence(SmallVectorImpl<Operation *> &memoryOp
       if (depth > 0) {
         if (auto *commonBlock =
                 getCommonBlockInAffineScope(source, destination)) {
-          
+
           Operation *srcOrAncestor =
               commonBlock->findAncestorOpInBlock(*source);
           Operation *dstOrAncestor =
@@ -276,7 +277,7 @@ static void checkSchedInterfaceDependence(SmallVectorImpl<Operation *> &memoryOp
 
       if (commonParent == nullptr)
         continue;
-        // commonParent = funcOp;
+      // commonParent = funcOp;
 
       // Check the common parent's regions.
       for (auto &commonRegion : commonParent->getRegions()) {
@@ -327,7 +328,7 @@ static void checkSchedInterfaceDependence(SmallVectorImpl<Operation *> &memoryOp
 /// Helper to iterate through memory operation pairs and check for dependencies
 /// at a given loop nesting depth.
 static void checkNonAffineDependence(SmallVectorImpl<Operation *> &memoryOps,
-                                          MemoryDependenceResult &results) {
+                                     MemoryDependenceResult &results) {
 
   auto funcOp = memoryOps.front()->getParentOfType<func::FuncOp>();
 
@@ -336,10 +337,11 @@ static void checkNonAffineDependence(SmallVectorImpl<Operation *> &memoryOps,
       if (source == destination)
         continue;
 
-      assert(isa<LoadInterface>(source) || isa<StoreInterface>(source) 
-              || isa<SchedulableAffineInterface>(source));
-      assert(isa<LoadInterface>(destination) || isa<StoreInterface>(destination)
-              || isa<SchedulableAffineInterface>(destination));
+      assert(isa<LoadInterface>(source) || isa<StoreInterface>(source) ||
+             isa<SchedulableAffineInterface>(source));
+      assert(isa<LoadInterface>(destination) ||
+             isa<StoreInterface>(destination) ||
+             isa<SchedulableAffineInterface>(destination));
 
       // Initialize the dependence list for this destination.
       if (results.count(destination) == 0)
@@ -351,7 +353,7 @@ static void checkNonAffineDependence(SmallVectorImpl<Operation *> &memoryOps,
       if (depth > 0) {
         if (auto *commonBlock =
                 getCommonBlockInAffineScope(source, destination)) {
-          
+
           Operation *srcOrAncestor =
               commonBlock->findAncestorOpInBlock(*source);
           Operation *dstOrAncestor =
@@ -372,7 +374,8 @@ static void checkNonAffineDependence(SmallVectorImpl<Operation *> &memoryOps,
               hasDep = dst.hasDependence(source);
             } else if (auto dst = dyn_cast<StoreInterface>(destination)) {
               hasDep = dst.hasDependence(source);
-            } else if (auto dst = dyn_cast<SchedulableAffineInterface>(destination)) {
+            } else if (auto dst =
+                           dyn_cast<SchedulableAffineInterface>(destination)) {
               hasDep = dst.hasDependence(source);
             }
 
@@ -444,7 +447,8 @@ static void checkNonAffineDependence(SmallVectorImpl<Operation *> &memoryOps,
             hasDep = dst.hasDependence(source);
           } else if (auto dst = dyn_cast<StoreInterface>(destination)) {
             hasDep = dst.hasDependence(source);
-          } else if (auto dst = dyn_cast<SchedulableAffineInterface>(destination)) {
+          } else if (auto dst =
+                         dyn_cast<SchedulableAffineInterface>(destination)) {
             hasDep = dst.hasDependence(source);
           }
 
@@ -472,7 +476,6 @@ static void checkNonAffineDependence(SmallVectorImpl<Operation *> &memoryOps,
     }
   }
 }
-
 
 /// MemoryDependenceAnalysis traverses any AffineForOps in the FuncOp body and
 /// checks for memory access dependences. Results are captured in a
@@ -564,8 +567,9 @@ void circt::analysis::MemoryDependenceAnalysis::replaceOp(Operation *oldOp,
   // TODO(mikeurbach): consider adding an inverted index to avoid this scan.
   for (auto &it : results)
     for (auto &dep : it.second)
-      if (OperationEquivalence::isEquivalentTo(dep.source, oldOp, OperationEquivalence::IgnoreLocations)) {
-      // if (dep.source == oldOp) {
+      if (OperationEquivalence::isEquivalentTo(
+              dep.source, oldOp, OperationEquivalence::IgnoreLocations)) {
+        // if (dep.source == oldOp) {
         // llvm::errs() << "replace dest\n";
         // it.first->dump();
         // llvm::errs() << "replace src\n";
@@ -589,7 +593,8 @@ bool circt::analysis::MemoryDependenceAnalysis::containsOp(Operation *op) {
 
   for (auto &it : results)
     for (auto &dep : it.second)
-      // if (OperationEquivalence::isEquivalentTo(dep.source, op, OperationEquivalence::IgnoreLocations)) {
+      // if (OperationEquivalence::isEquivalentTo(dep.source, op,
+      // OperationEquivalence::IgnoreLocations)) {
       if (dep.source == op) {
         // llvm::errs() << "dep.dest\n";
         // it.first->dump();

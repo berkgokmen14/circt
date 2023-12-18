@@ -1,4 +1,4 @@
-//===- PipelineForLoopSchedule.cpp - Unroll nested loops for parallelism
+//===- PipelineForLoopSchedule.cpp - Pipeline and unroll innermost loops
 //---===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -17,12 +17,9 @@
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dominance.h"
-#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Pass/Pass.h"
-#include "llvm/ADT/TypeSwitch.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdint>

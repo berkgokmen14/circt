@@ -3,7 +3,7 @@ add_circt_library(CIRCTTransforms
   StripDebugInfoWithPred.cpp
   UnrollForLoopSchedule.cpp
   MapArithToComb.cpp
-  UnrollForLoopSchedule.cpp
+  PipelineForLoopSchedule.cpp
   MaximizeSSA.cpp
   InsertMergeBlocks.cpp
 

@@ -53,10 +53,17 @@ def StripDebugInfoWithPred : Pass<"strip-debuginfo-with-pred", "::mlir::ModuleOp
            "intended to be used for testing."> ];
 }
 
-def UnrollForLoopSchedule : Pass<"unroll-for-loop-schedule", "::mlir::func::FuncOp"> {
-  let summary = "Unroll loops to find pipeline parallelism and iteration parallelism";
-  let description = [{Unroll loops to find pipeline parallelism and iteration parallelism}];
+def UnrollForLoopSchedule : Pass<"unroll-for-loopschedule", "::mlir::func::FuncOp"> {
+  let summary = "Unroll loops to exploit data-level parallelism";
+  let description = [{Unroll loops to exploit data-level parallelism}];
   let constructor = "circt::createUnrollForLoopSchedulePass()";
+  let dependentDialects = ["mlir::affine::AffineDialect", "mlir::func::FuncDialect"];
+}
+
+def PipelineForLoopSchedule : Pass<"pipeline-for-loopschedule", "::mlir::func::FuncOp"> {
+  let summary = "Unroll and pipeline loops inner loops";
+  let description = [{Unroll and pipeline loops inner loops}];
+  let constructor = "circt::createPipelineForLoopSchedulePass()";
   let dependentDialects = ["mlir::affine::AffineDialect", "mlir::func::FuncDialect"];
 }
 

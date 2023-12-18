@@ -16,13 +16,11 @@
 #include "mlir/Dialect/Affine/LoopUtils.h"
 #include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/TypeSwitch.h"
-#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <limits>
@@ -42,18 +40,11 @@ private:
   bool hasAllocDefinition(TypedValue<MemRefType> val);
   bool usesExternalMemory(AffineForOp affineFor);
   DenseSet<AffineMapAccessInterface> updateMemoryOps(AffineForOp affineFor);
-  uint64_t getMinDepDistance(AffineForOp affineFor);
   std::optional<uint64_t> consumePragma(AffineForOp affineFor);
   unsigned getFuseIterations(AffineForOp &forOp);
   AffineForOp cloneIntoNewBlock(AffineForOp affineFor, IRMapping &irMapping,
                                 DenseSet<Operation *> &dontTouchSet);
   LogicalResult unrollForDataParallel(AffineForOp affineFor);
-  std::pair<SmallVector<AffineForOp>, unsigned>
-  getDeepestNestedForOps(std::pair<SmallVector<AffineForOp>, unsigned> pair);
-  LogicalResult unrollForPipelineParallel(AffineForOp affineFor);
-  DenseMap<AffineForOp, DenseSet<AffineMapAccessInterface>> loopToMemOps;
-  DenseMap<Operation *, unsigned> approxASAP;
-  MemoryDependenceAnalysis *memDepAnalysis;
 };
 } // namespace
 
@@ -106,42 +97,7 @@ UnrollForLoopSchedule::updateMemoryOps(AffineForOp affineFor) {
   auto affineStOps = bodyRegion.getOps<AffineStoreOp>();
   memOps.insert(affineLdOps.begin(), affineLdOps.end());
   memOps.insert(affineStOps.begin(), affineStOps.end());
-  loopToMemOps[affineFor] = memOps;
   return memOps;
-}
-
-// Find the limiting carried dependence and get its distance
-uint64_t UnrollForLoopSchedule::getMinDepDistance(AffineForOp affineFor) {
-
-  // We don't have real dependence analysis on scf/memref ops so this is good
-  // enough for now
-  if (!affineFor.getOps<memref::StoreOp>().empty())
-    return 1;
-
-  auto memOps = loopToMemOps[affineFor];
-  uint64_t minDistance = std::numeric_limits<uint64_t>::max();
-  for (auto memOp : memOps) {
-
-    ArrayRef<MemoryDependence> dependences =
-        memDepAnalysis->getDependences(memOp);
-    if (dependences.empty())
-      continue;
-
-    for (MemoryDependence memoryDep : dependences) {
-      if (!hasDependence(memoryDep.dependenceType))
-        continue;
-
-      auto lb = memoryDep.dependenceComponents.back().lb;
-      if (!lb.has_value())
-        continue;
-      int64_t distanceComp = *memoryDep.dependenceComponents.back().lb;
-      minDistance =
-          std::min(minDistance, distanceComp < 0 ? (uint64_t)distanceComp * -1
-                                                 : (uint64_t)distanceComp);
-    }
-  }
-
-  return minDistance;
 }
 
 // Get unroll factor from IR if it is there
@@ -362,70 +318,6 @@ UnrollForLoopSchedule::unrollForDataParallel(AffineForOp affineFor) {
   return success();
 }
 
-// This looks for pipeline parallelism via unrolling to increase the amount of
-// work per II
-LogicalResult
-UnrollForLoopSchedule::unrollForPipelineParallel(AffineForOp affineFor) {
-
-  updateMemoryOps(affineFor);
-  uint64_t minDepDistance = getMinDepDistance(affineFor);
-  std::optional<uint64_t> maxUnrollFactor = consumePragma(affineFor);
-
-  // Unroll factor is roughly the min recurrence II : Latency / Distance
-
-  // Latency is simply ASAP times / critical path, given a latency model for the
-  // operations. However, latency can be bounded above by the number of ops for
-  // now. Here is a super hacky heuristic to know how much to unroll by:
-  assert(affineFor.getOps<AffineForOp>().empty());
-  uint64_t largeLatencyBound = 0;
-  for (auto &op : affineFor.getOps())
-    if (isa<arith::MulIOp>(op))
-      largeLatencyBound += 3; // Mul will typically be longer latency
-    else if (!isa<AffineMapAccessInterface>(op) && op.getNumOperands() >= 2)
-      largeLatencyBound += op.getNumOperands();
-
-  largeLatencyBound /=
-      std::max(1UL, (uint64_t)affineFor.getNumRegionIterArgs());
-  // Do ceiling division
-  minDepDistance = std::max(1UL, minDepDistance);
-  uint64_t approxII = largeLatencyBound / minDepDistance +
-                      (largeLatencyBound % minDepDistance > 0);
-
-  uint64_t unrollFactor = std::min(
-      approxII, maxUnrollFactor.value_or(std::numeric_limits<uint64_t>::max()));
-
-  OpBuilder builder(affineFor);
-  affineFor->setAttr("hls.pipeline", builder.getUnitAttr());
-
-  if (unrollFactor <= 1)
-    return success();
-
-  if (loopUnrollUpToFactor(affineFor, unrollFactor).failed())
-    return failure();
-
-  return success();
-}
-
-std::pair<SmallVector<AffineForOp>, unsigned>
-UnrollForLoopSchedule::getDeepestNestedForOps(
-    std::pair<SmallVector<AffineForOp>, unsigned> pair) {
-  auto roots = pair.first;
-  auto rootDepth = pair.second;
-  for (auto root : roots) {
-    SmallVector<AffineForOp> nestedOps(root.getOps<AffineForOp>());
-    if (nestedOps.empty())
-      continue;
-    auto recur = getDeepestNestedForOps(std::pair(nestedOps, rootDepth + 1));
-    if (recur.second > pair.second ||
-        (recur.second == pair.second &&
-         recur.first.size() > pair.first.size())) {
-      pair.second = recur.second;
-      pair.first = recur.first;
-    }
-  }
-  return pair;
-}
-
 void UnrollForLoopSchedule::runOnOperation() {
   SmallVector<AffineForOp> rootForOps(getOperation().getOps<AffineForOp>());
   for (auto loop : rootForOps)
@@ -435,20 +327,6 @@ void UnrollForLoopSchedule::runOnOperation() {
   // After we unroll and merge, get rid of redundant loads
   affineScalarReplace(getOperation(), getAnalysis<DominanceInfo>(),
                       getAnalysis<PostDominanceInfo>());
-
-  SmallVector<AffineForOp> opsToPipeline =
-      getDeepestNestedForOps(
-          std::pair(
-              SmallVector<AffineForOp>(getOperation().getOps<AffineForOp>()),
-              0))
-          .first;
-
-  // Get scheduling analyses
-  memDepAnalysis = &getAnalysis<MemoryDependenceAnalysis>();
-
-  for (auto loop : opsToPipeline)
-    if (unrollForPipelineParallel(loop).failed())
-      return signalPassFailure();
 }
 
 namespace circt {

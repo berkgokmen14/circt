@@ -30,6 +30,7 @@ std::unique_ptr<mlir::Pass> createFlattenMemRefCallsPass();
 std::unique_ptr<mlir::Pass> createStripDebugInfoWithPredPass(
     const std::function<bool(mlir::Location)> &pred);
 std::unique_ptr<mlir::Pass> createUnrollForLoopSchedulePass();
+std::unique_ptr<mlir::Pass> createPipelineForLoopSchedulePass();
 std::unique_ptr<mlir::Pass> createMaximizeSSAPass();
 std::unique_ptr<mlir::Pass> createInsertMergeBlocksPass();
 

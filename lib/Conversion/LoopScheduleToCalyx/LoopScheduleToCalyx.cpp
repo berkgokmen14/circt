@@ -1410,6 +1410,18 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
         if (isIterArg)
           continue;
 
+        if (!isa<LoopSchedulePipelineOp>(phase->getParentOp()) &&
+            isa<PhaseInterface>(value.getDefiningOp())) {
+          // It won't be in the regMap if the value was loaded from memory and
+          // not re-registered yet
+          if (regMap.contains(value)) {
+            auto reg = regMap[value];
+            getState<ComponentLoweringState>().addPhaseReg(phase, reg, i);
+            regMap[phaseResult] = reg;
+            continue;
+          }
+        }
+
         // If value is produced by a sequential op just pass it
         // on to next phase.
         if (auto cell = value.getDefiningOp<calyx::CellInterface>();

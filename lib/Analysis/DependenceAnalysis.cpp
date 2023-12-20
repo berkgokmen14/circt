@@ -23,9 +23,11 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/OperationSupport.h"
+#include <cassert>
 
 using namespace mlir;
 using namespace mlir::affine;
+// using namespace circt;
 using namespace circt::analysis;
 using namespace circt::loopschedule;
 
@@ -337,11 +339,10 @@ static void checkNonAffineDependence(SmallVectorImpl<Operation *> &memoryOps,
       if (source == destination)
         continue;
 
-      assert(isa<LoadInterface>(source) || isa<StoreInterface>(source) ||
-             isa<SchedulableAffineInterface>(source));
-      assert(isa<LoadInterface>(destination) ||
-             isa<StoreInterface>(destination) ||
-             isa<SchedulableAffineInterface>(destination));
+      assert((isa<LoadInterface, StoreInterface, memref::LoadOp,
+                  memref::StoreOp, SchedulableAffineInterface>(source)));
+      assert((isa<LoadInterface, StoreInterface, memref::LoadOp,
+                  memref::StoreOp, SchedulableAffineInterface>(destination)));
 
       // Initialize the dependence list for this destination.
       if (results.count(destination) == 0)
@@ -377,6 +378,9 @@ static void checkNonAffineDependence(SmallVectorImpl<Operation *> &memoryOps,
             } else if (auto dst =
                            dyn_cast<SchedulableAffineInterface>(destination)) {
               hasDep = dst.hasDependence(source);
+            } else if (isa<memref::LoadOp, memref::StoreOp, AffineLoadOp,
+                           AffineStoreOp>(source)) {
+              hasDep = getMemref(destination) == getMemref(source);
             }
 
             if (hasDep) {
@@ -450,6 +454,9 @@ static void checkNonAffineDependence(SmallVectorImpl<Operation *> &memoryOps,
           } else if (auto dst =
                          dyn_cast<SchedulableAffineInterface>(destination)) {
             hasDep = dst.hasDependence(source);
+          } else if (isa<memref::LoadOp, memref::StoreOp, AffineLoadOp,
+                         AffineStoreOp>(source)) {
+            hasDep = getMemref(destination) == getMemref(source);
           }
 
           if (hasDep) {
@@ -510,7 +517,8 @@ circt::analysis::MemoryDependenceAnalysis::MemoryDependenceAnalysis(
 
   SmallVector<Operation *> memoryOps;
   funcOp.walk([&](Operation *op) {
-    if (isa<LoadInterface, StoreInterface, SchedulableAffineInterface>(op))
+    if (isa<LoadInterface, StoreInterface, SchedulableAffineInterface,
+            memref::LoadOp, memref::StoreOp>(op))
       memoryOps.push_back(op);
   });
 

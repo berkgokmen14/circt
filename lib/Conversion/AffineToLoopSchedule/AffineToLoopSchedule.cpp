@@ -1768,7 +1768,8 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
     }
     if (auto load = dyn_cast<LoadInterface>(op)) {
       auto startTime = problem.getStartTime(op);
-      auto resTime = *startTime + *load.getLatency();
+      auto latency = load.getLatency().has_value() ? *load.getLatency() : 1;
+      auto resTime = *startTime + latency;
       if (hasLaterUse(op, resTime) && !startGroups.contains(resTime)) {
         startGroups[resTime] = SmallVector<Operation *>();
       }
@@ -1908,8 +1909,9 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
           reregisterValues[startTime + 1].push_back(load.getResult());
         }
       } else if (auto load = dyn_cast<LoadInterface>(op)) {
-        if (hasLaterUse(op, startTime + *load.getLatency())) {
-          auto resTime = startTime + *load.getLatency();
+        auto latency = load.getLatency().has_value() ? *load.getLatency() : 1;
+        if (hasLaterUse(op, startTime + latency)) {
+          auto resTime = startTime + latency;
           reregisterValues[resTime].push_back(load.getResult());
         }
       }

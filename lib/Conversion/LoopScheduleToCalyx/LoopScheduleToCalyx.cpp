@@ -306,8 +306,8 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
                              calyx::AllocLoweringInterface,
                              /// standard arithmetic
                              AddIOp, SubIOp, CmpIOp, ShLIOp, ShRUIOp, ShRSIOp,
-                             AndIOp, XOrIOp, OrIOp, ExtUIOp, TruncIOp, MulIOp,
-                             DivUIOp, RemUIOp, RemSIOp, IndexCastOp,
+                             AndIOp, XOrIOp, OrIOp, ExtUIOp, ExtSIOp, TruncIOp,
+                             MulIOp, DivUIOp, RemUIOp, RemSIOp, IndexCastOp,
                              /// loop schedule
                              LoopInterface, LoopScheduleTerminatorOp>(
                   [&](auto op) { return buildOp(rewriter, op).succeeded(); })
@@ -318,7 +318,8 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
                   })
               .Default([&](auto op) {
                 op->dump();
-                op->emitError() << "Unhandled operation during BuildOpGroups() test " << op;
+                op->emitError()
+                    << "Unhandled operation during BuildOpGroups() test " << op;
                 return false;
               });
 
@@ -351,6 +352,7 @@ private:
   LogicalResult buildOp(PatternRewriter &rewriter, CmpIOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, TruncIOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, ExtUIOp op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter, ExtSIOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, ReturnOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, IndexCastOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, memref::AllocOp op) const;
@@ -1085,6 +1087,12 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
 LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      ExtUIOp op) const {
   return buildLibraryOp<calyx::CombGroupOp, calyx::PadLibOp>(
+      rewriter, op, {op.getOperand().getType()}, {op.getType()});
+}
+
+LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                                     ExtSIOp op) const {
+  return buildLibraryOp<calyx::CombGroupOp, calyx::ExtSILibOp>(
       rewriter, op, {op.getOperand().getType()}, {op.getType()});
 }
 
@@ -2363,9 +2371,9 @@ public:
     target.addIllegalDialect<FuncDialect>();
     target.addIllegalDialect<ArithDialect>();
     target.addLegalOp<AddIOp, SubIOp, CmpIOp, ShLIOp, ShRUIOp, ShRSIOp, AndIOp,
-                      XOrIOp, OrIOp, ExtUIOp, TruncIOp, CondBranchOp, BranchOp,
-                      MulIOp, DivUIOp, DivSIOp, RemUIOp, RemSIOp, DivSIOp,
-                      ReturnOp, arith::ConstantOp, IndexCastOp, FuncOp,
+                      XOrIOp, OrIOp, ExtUIOp, ExtSIOp, TruncIOp, CondBranchOp,
+                      BranchOp, MulIOp, DivUIOp, DivSIOp, RemUIOp, RemSIOp,
+                      DivSIOp, ReturnOp, arith::ConstantOp, IndexCastOp, FuncOp,
                       ExtSIOp>();
 
     RewritePatternSet legalizePatterns(&getContext());

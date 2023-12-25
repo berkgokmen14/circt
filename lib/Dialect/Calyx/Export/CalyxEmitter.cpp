@@ -121,7 +121,7 @@ private:
             })
         .Case<MemoryOp, NotLibOp, AndLibOp, OrLibOp, XorLibOp, SubLibOp,
               GtLibOp, LtLibOp, EqLibOp, NeqLibOp, GeLibOp, LeLibOp, LshLibOp,
-              RshLibOp, SliceLibOp, PadLibOp, MuxLibOp>(
+              RshLibOp, SliceLibOp, PadLibOp, ExtSILibOp, MuxLibOp>(
             [&](auto op) -> FailureOr<StringRef> {
               static constexpr std::string_view sCore = "core";
               return {sCore};

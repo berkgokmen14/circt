@@ -31,6 +31,7 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
+#include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Visitors.h"
@@ -716,6 +717,91 @@ private:
   MemoryDependenceAnalysis &dependenceAnalysis;
 };
 
+template <typename OpTy>
+struct FoldSign : OpConversionPattern<OpTy> {
+  using OpConversionPattern<OpTy>::OpConversionPattern;
+
+  static std::optional<IntegerType> operandIsExtended(Value operand) {
+    auto *definingOp = operand.getDefiningOp();
+    if (!definingOp)
+      return std::nullopt;
+
+    if (!isa<IntegerType>(operand.getType()))
+      return std::nullopt;
+
+    if (auto extOp = dyn_cast<arith::ExtSIOp>(*definingOp))
+      return cast<IntegerType>(extOp->getOperand(0).getType());
+    if (auto extOp = dyn_cast<arith::ExtUIOp>(*definingOp))
+      return cast<IntegerType>(extOp->getOperand(0).getType());
+
+    return std::nullopt;
+  }
+
+  static std::optional<IntegerType>
+  valIsTruncated(TypedValue<IntegerType> val) {
+    if (!val.hasOneUse())
+      return std::nullopt;
+    auto *op = *val.getUsers().begin();
+    if (auto trunc = dyn_cast<arith::TruncIOp>(*op))
+      if (auto truncType = dyn_cast<IntegerType>(trunc.getType()))
+        return truncType;
+
+    return std::nullopt;
+  }
+
+  static bool opIsLegal(OpTy op) {
+    if (op->getNumResults() != 1)
+      return true;
+    if (op->getNumOperands() <= 0)
+      return true;
+    if (!isa<IntegerType>(op->getResultTypes().front()))
+      return true;
+
+    auto outType =
+        valIsTruncated(cast<TypedValue<IntegerType>>(op->getResult(0)));
+    if (!outType.has_value())
+      return true;
+
+    auto operandType = operandIsExtended(op->getOperand(0));
+    if (!operandType.has_value() || operandType != outType)
+      return true;
+
+    // Extension and trunc should be opt away
+    SmallVector<Value> operands;
+    for (auto operand : op->getOperands()) {
+      auto oW = operandIsExtended(operand);
+      if (oW != operandType)
+        return true;
+    }
+    return false;
+  }
+
+  LogicalResult
+  matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    if (opIsLegal(op))
+      return failure();
+
+    auto outType =
+        valIsTruncated(cast<TypedValue<IntegerType>>(op->getResult(0)));
+
+    // Extension and trunc should be opt away
+    SmallVector<Value> operands;
+    for (auto operand : op->getOperands())
+      operands.push_back(operand.getDefiningOp()->getOperand(0));
+
+    SmallVector<Type> resultTypes = {*outType};
+    auto newOp = rewriter.create<OpTy>(op.getLoc(), resultTypes, operands);
+    auto trunc = *op->getUsers().begin();
+    trunc->getResult(0).replaceAllUsesWith(newOp->getResult(0));
+    trunc->erase();
+    rewriter.eraseOp(op);
+
+    return success();
+  }
+};
+
 struct MulStrengthReduction : OpConversionPattern<MulIOp> {
   using OpConversionPattern<MulIOp>::OpConversionPattern;
 
@@ -855,6 +941,7 @@ static bool mulLegalityCallback(Operation *op) {
         return false;
       }
     }
+    return FoldSign<arith::MulIOp>::opIsLegal(mulOp);
   }
   return true;
 }
@@ -937,11 +1024,16 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures() {
   patterns.clear();
   populateAffineToStdConversionPatterns(patterns);
   target.addIllegalOp<AffineApplyOp>();
+  patterns.add<FoldSign<arith::AddIOp>>(context);
+  patterns.add<FoldSign<arith::SubIOp>>(context);
+  patterns.add<FoldSign<arith::MulIOp>>(context);
   patterns.add<MulStrengthReduction>(context);
   patterns.add<DivSIStrengthReduction>(context);
   patterns.add<RemUIStrengthReduction>(context);
   patterns.add<RemSIStrengthReduction>(context);
 
+  target.addDynamicallyLegalOp<AddIOp>(FoldSign<AddIOp>::opIsLegal);
+  target.addDynamicallyLegalOp<SubIOp>(FoldSign<SubIOp>::opIsLegal);
   target.addDynamicallyLegalOp<MulIOp>(mulLegalityCallback);
   target.addDynamicallyLegalOp<DivSIOp>(DivSIOpLegalityCallback);
   target.addDynamicallyLegalOp<RemUIOp>(remUILegalityCallback);

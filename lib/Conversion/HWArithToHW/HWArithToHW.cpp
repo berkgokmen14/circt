@@ -13,12 +13,12 @@
 #include "circt/Conversion/HWArithToHW.h"
 #include "../PassDetail.h"
 #include "circt/Dialect/Comb/CombOps.h"
+#include "circt/Dialect/HW/ConversionPatterns.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HWArith/HWArithOps.h"
 #include "circt/Dialect/MSFT/MSFTOps.h"
 #include "circt/Dialect/SV/SVOps.h"
 #include "circt/Dialect/Seq/SeqOps.h"
-#include "circt/Support/ConversionPatterns.h"
 
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -51,13 +51,12 @@ improveNamehint(Value oldValue, Operation *newOp,
 // Extract a bit range, specified via start bit and width, from a given value.
 static Value extractBits(OpBuilder &builder, Location loc, Value value,
                          unsigned startBit, unsigned bitWidth) {
-  SmallVector<Value, 1> result;
-  builder.createOrFold<comb::ExtractOp>(result, loc, value, startBit, bitWidth);
-  Value extractedValue = result[0];
-  if (extractedValue != value) {
+  Value extractedValue =
+      builder.createOrFold<comb::ExtractOp>(loc, value, startBit, bitWidth);
+  Operation *definingOp = extractedValue.getDefiningOp();
+  if (extractedValue != value && definingOp) {
     // only change namehint if a new operation was created.
-    auto *newOp = extractedValue.getDefiningOp();
-    improveNamehint(value, newOp, [&](StringRef oldNamehint) {
+    improveNamehint(value, definingOp, [&](StringRef oldNamehint) {
       return (oldNamehint + "_" + std::to_string(startBit) + "_to_" +
               std::to_string(startBit + bitWidth))
           .str();
@@ -82,10 +81,8 @@ static Value extendTypeWidth(OpBuilder &builder, Location loc, Value value,
     // Sign extension
     Value highBit = extractBits(builder, loc, value,
                                 /*startBit=*/sourceWidth - 1, /*bitWidth=*/1);
-    SmallVector<Value, 1> result;
-    builder.createOrFold<comb::ReplicateOp>(result, loc, highBit,
-                                            extensionLength);
-    extensionBits = result[0];
+    extensionBits =
+        builder.createOrFold<comb::ReplicateOp>(loc, highBit, extensionLength);
   } else {
     // Zero extension
     extensionBits = builder
@@ -135,6 +132,12 @@ static bool isLegalOp(Operation *op) {
     return llvm::none_of(funcOp.getArgumentTypes(), isSignednessType) &&
            llvm::none_of(funcOp.getResultTypes(), isSignednessType) &&
            llvm::none_of(funcOp.getFunctionBody().getArgumentTypes(),
+                         isSignednessType);
+  }
+
+  if (auto modOp = dyn_cast<hw::HWModuleLike>(op)) {
+    return llvm::none_of(modOp.getPortTypes(), isSignednessType) &&
+           llvm::none_of(modOp.getModuleBody().getArgumentTypes(),
                          isSignednessType);
   }
 
@@ -257,24 +260,20 @@ namespace {
 // the information whether the comparison contains signed values to the
 // corresponding comb::ICmpPredicate.
 static comb::ICmpPredicate lowerPredicate(ICmpPredicate pred, bool isSigned) {
-#define _CREATE_HWARITH_ICMP_CASE(x)                                           \
-  case ICmpPredicate::x:                                                       \
-    return isSigned ? comb::ICmpPredicate::s##x : comb::ICmpPredicate::u##x
-
   switch (pred) {
   case ICmpPredicate::eq:
     return comb::ICmpPredicate::eq;
-
   case ICmpPredicate::ne:
     return comb::ICmpPredicate::ne;
-
-    _CREATE_HWARITH_ICMP_CASE(lt);
-    _CREATE_HWARITH_ICMP_CASE(ge);
-    _CREATE_HWARITH_ICMP_CASE(le);
-    _CREATE_HWARITH_ICMP_CASE(gt);
+  case ICmpPredicate::lt:
+    return isSigned ? comb::ICmpPredicate::slt : comb::ICmpPredicate::ult;
+  case ICmpPredicate::ge:
+    return isSigned ? comb::ICmpPredicate::sge : comb::ICmpPredicate::uge;
+  case ICmpPredicate::le:
+    return isSigned ? comb::ICmpPredicate::sle : comb::ICmpPredicate::ule;
+  case ICmpPredicate::gt:
+    return isSigned ? comb::ICmpPredicate::sgt : comb::ICmpPredicate::ugt;
   }
-
-#undef _CREATE_HWARITH_ICMP_CASE
 
   llvm_unreachable(
       "Missing hwarith::ICmpPredicate to comb::ICmpPredicate lowering");
@@ -354,7 +353,7 @@ Type HWArithToHWTypeConverter::removeSignedness(Type type) {
           })
           .Case<hw::ArrayType>([this](auto type) {
             return hw::ArrayType::get(removeSignedness(type.getElementType()),
-                                      type.getSize());
+                                      type.getNumElements());
           })
           .Case<hw::StructType>([this](auto type) {
             // Recursively convert each element.

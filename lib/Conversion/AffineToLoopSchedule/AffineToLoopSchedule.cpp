@@ -1219,9 +1219,15 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
       &loop->getParentOfType<FuncOp>().getBody().front());
 
   // Create Values for the loop's lower and upper bounds.
+<<<<<<< HEAD
   Value lowerBound = lowerAffineLowerBound(loop, builder);
   Value upperBound = lowerAffineUpperBound(loop, builder);
   int64_t stepValue = loop.getStep();
+=======
+  Value lowerBound = lowerAffineLowerBound(innerLoop, builder);
+  Value upperBound = lowerAffineUpperBound(innerLoop, builder);
+  int64_t stepValue = innerLoop.getStep().getSExtValue();
+>>>>>>> main
   auto step = builder.create<arith::ConstantOp>(
       IntegerAttr::get(builder.getIndexType(), stepValue));
 
@@ -1235,7 +1241,11 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
 
   SmallVector<Value> iterArgs;
   iterArgs.push_back(lowerBound);
+<<<<<<< HEAD
   iterArgs.append(loop.getIterOperands().begin(), loop.getIterOperands().end());
+=======
+  iterArgs.append(innerLoop.getInits().begin(), innerLoop.getInits().end());
+>>>>>>> main
 
   // If possible, attach a constant trip count attribute. This could be
   // generalized to support non-constant trip counts by supporting an AffineMap.

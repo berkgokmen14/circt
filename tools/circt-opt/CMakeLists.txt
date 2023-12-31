@@ -2,8 +2,11 @@ set(LLVM_LINK_COMPONENTS
   Support
 )
 
-add_llvm_tool(circt-opt
+add_circt_tool(circt-opt
   circt-opt.cpp
+
+  DEPENDS
+  SUPPORT_PLUGINS
 )
 llvm_update_compile_flags(circt-opt)
 target_link_libraries(circt-opt
@@ -15,6 +18,7 @@ target_link_libraries(circt-opt
   CIRCTArcTransforms
   CIRCTCalyx
   CIRCTCalyxToHW
+  CIRCTCalyxNative
   CIRCTCalyxToFSM
   CIRCTCalyxTransforms
   CIRCTComb
@@ -23,6 +27,7 @@ target_link_libraries(circt-opt
   CIRCTDC
   CIRCTDCToHW
   CIRCTDCTransforms
+  CIRCTDebug
   CIRCTESI
   CIRCTExportChiselInterface
   CIRCTExportVerilog
@@ -51,7 +56,9 @@ target_link_libraries(circt-opt
   CIRCTHW
   CIRCTHWArith
   CIRCTHWArithToHW
+  CIRCTHWToBTOR2
   CIRCTIbis
+  CIRCTIbisTransforms
   CIRCTInteropDialect
   CIRCTHWToLLHD
   CIRCTHWToSystemC
@@ -63,11 +70,13 @@ target_link_libraries(circt-opt
   CIRCTSCFToCalyx
   CIRCTScheduling
   CIRCTSeq
+  CIRCTSeqToSV
   CIRCTSeqTransforms
   CIRCTSSP
   CIRCTSSPTransforms
-  CIRCTStandardToHandshake
+  CIRCTCFToHandshake
   CIRCTOM
+  CIRCTOMTransforms
   CIRCTPipelineOps
   CIRCTSTGOps
   CIRCTPipelineToHW
@@ -92,4 +101,7 @@ target_link_libraries(circt-opt
   MLIRSCFDialect
   MLIREmitCDialect
   MLIRFuncInlinerExtension
+  MLIRVectorDialect
 )
+
+export_executable_symbols_for_plugins(circt-opt)

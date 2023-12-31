@@ -1,4 +1,5 @@
-// RUN: circt-opt --pass-pipeline='builtin.module(firrtl.circuit(firrtl-lower-intrinsics))' %s   | FileCheck %s
+// RUN: circt-opt --pass-pipeline='builtin.module(firrtl.circuit(firrtl-lower-intrinsics))' %s | FileCheck %s --check-prefixes=CHECK,CHECK-NOEICG
+// RUN: circt-opt --pass-pipeline='builtin.module(firrtl.circuit(firrtl-lower-intrinsics{fixup-eicg-wrapper}))' %s | FileCheck %s --check-prefixes=CHECK,CHECK-EICG
 
 // CHECK-LABEL: "Foo"
 firrtl.circuit "Foo" {
@@ -193,5 +194,46 @@ firrtl.circuit "Foo" {
     // CHECK: firrtl.int.mux4cell
     %sel_0, %high, %low, %out_0 = firrtl.instance "mux2" @Mux2Cell(in sel: !firrtl.uint<1>, in high: !firrtl.uint, in low: !firrtl.uint, out out: !firrtl.uint)
     %sel_1, %v4, %v3, %v2, %v1, %out_1 = firrtl.instance "mux4" @Mux4Cell(in sel: !firrtl.uint<2>, in v3: !firrtl.uint, in v2: !firrtl.uint, in v1: !firrtl.uint, in v0: !firrtl.uint, out out: !firrtl.uint)
+  }
+
+  // CHECK-NOT: HBRInt1
+  // CHECK-NOT: HBRInt2
+  // CHECK-NOT: HBRInt3
+  firrtl.intmodule @HBRInt1(in clock: !firrtl.clock, in reset: !firrtl.uint<1>, out out: !firrtl.uint<1>) attributes {intrinsic = "circt.has_been_reset"}
+  firrtl.intmodule @HBRInt2(in clock: !firrtl.clock, in reset: !firrtl.asyncreset, out out: !firrtl.uint<1>) attributes {intrinsic = "circt.has_been_reset"}
+  firrtl.intmodule @HBRInt3(in clock: !firrtl.clock, in reset: !firrtl.reset, out out: !firrtl.uint<1>) attributes {intrinsic = "circt.has_been_reset"}
+
+  // CHECK: HasBeenReset
+  firrtl.module @HasBeenReset(in %clock: !firrtl.clock, in %reset1: !firrtl.uint<1>, in %reset2: !firrtl.asyncreset, in %reset3: !firrtl.reset) {
+    // CHECK-NOT: firrtl.instance
+    // CHECK: firrtl.int.has_been_reset {{%.+}}, {{%.+}} : !firrtl.uint<1>
+    // CHECK-NOT: firrtl.instance
+    // CHECK: firrtl.int.has_been_reset {{%.+}}, {{%.+}} : !firrtl.asyncreset
+    // CHECK-NOT: firrtl.instance
+    // CHECK: firrtl.int.has_been_reset {{%.+}}, {{%.+}} : !firrtl.reset
+    %in_clock1, %in_reset1, %hbr1 = firrtl.instance "" @HBRInt1(in clock: !firrtl.clock, in reset: !firrtl.uint<1>, out out: !firrtl.uint<1>)
+    %in_clock2, %in_reset2, %hbr2 = firrtl.instance "" @HBRInt2(in clock: !firrtl.clock, in reset: !firrtl.asyncreset, out out: !firrtl.uint<1>)
+    %in_clock3, %in_reset3, %hbr3 = firrtl.instance "" @HBRInt3(in clock: !firrtl.clock, in reset: !firrtl.reset, out out: !firrtl.uint<1>)
+    firrtl.strictconnect %in_clock1, %clock : !firrtl.clock
+    firrtl.strictconnect %in_clock2, %clock : !firrtl.clock
+    firrtl.strictconnect %in_clock3, %clock : !firrtl.clock
+    firrtl.strictconnect %in_reset1, %reset1 : !firrtl.uint<1>
+    firrtl.strictconnect %in_reset2, %reset2 : !firrtl.asyncreset
+    firrtl.strictconnect %in_reset3, %reset3 : !firrtl.reset
+  }
+
+  // CHECK-NOEICG: LegacyClockGate
+  // CHECK-EICG-NOT: LegacyClockGate
+  firrtl.extmodule @LegacyClockGate(in in: !firrtl.clock, in test_en: !firrtl.uint<1>, in en: !firrtl.uint<1>, out out: !firrtl.clock) attributes {defname = "EICG_wrapper"}
+
+  // CHECK: FixupEICGWrapper
+  firrtl.module @FixupEICGWrapper(in %clock: !firrtl.clock, in %en: !firrtl.uint<1>) {
+    // CHECK-NOEICG: firrtl.instance
+    // CHECK-EICG-NOT: firrtl.instance
+    // CHECK-EICG: firrtl.int.clock_gate
+    %ckg_in, %ckg_test_en, %ckg_en, %ckg_out = firrtl.instance ckg @LegacyClockGate(in in: !firrtl.clock, in test_en: !firrtl.uint<1>, in en: !firrtl.uint<1>, out out: !firrtl.clock)
+    firrtl.strictconnect %ckg_in, %clock : !firrtl.clock
+    firrtl.strictconnect %ckg_test_en, %en : !firrtl.uint<1>
+    firrtl.strictconnect %ckg_en, %en : !firrtl.uint<1>
   }
 }

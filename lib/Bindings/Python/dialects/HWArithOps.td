@@ -1,4 +1,4 @@
-//===-- HWArithOps.td - Entry point for HWArithOps bindings *- tablegen -*-===//
+//===- HWArithOps.td - Entry point for HWArith bindings ----*- tablegen -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -9,7 +9,6 @@
 #ifndef BINDINGS_PYTHON_HWARITH_OPS
 #define BINDINGS_PYTHON_HWARITH_OPS
 
-include "mlir/Bindings/Python/Attributes.td"
 include "circt/Dialect/HWArith/HWArith.td"
 
 #endif

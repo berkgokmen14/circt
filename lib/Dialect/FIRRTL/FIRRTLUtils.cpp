@@ -11,6 +11,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "circt/Dialect/FIRRTL/FIRRTLUtils.h"
+#include "circt/Dialect/HW/HWOps.h"
+#include "circt/Dialect/HW/InnerSymbolNamespace.h"
+#include "circt/Dialect/Seq/SeqTypes.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -35,12 +38,18 @@ void circt::firrtl::emitConnect(ImplicitLocOpBuilder &builder, Value dst,
   // Special Connects (non-base, foreign):
   if (!dstType) {
     // References use ref.define.  Add cast if types don't match.
-    if (isa<RefType>(dstFType)) {
+    if (type_isa<RefType>(dstFType)) {
       if (dstFType != srcFType)
         src = builder.create<RefCastOp>(dstFType, src);
       builder.create<RefDefineOp>(dst, src);
     } else // Other types, give up and leave a connect
       builder.create<ConnectOp>(dst, src);
+    return;
+  }
+
+  // More special connects
+  if (isa<AnalogType>(dstType)) {
+    builder.create<AttachOp>(ArrayRef{dst, src});
     return;
   }
 
@@ -95,7 +104,7 @@ void circt::firrtl::emitConnect(ImplicitLocOpBuilder &builder, Value dst,
     src = builder.create<UninferredResetCastOp>(srcType, src);
   }
 
-  // Handle ground types with possibly uninferred widths.
+  // Handle passive types with possibly uninferred widths.
   auto dstWidth = dstType.getBitWidthOrSentinel();
   auto srcWidth = srcType.getBitWidthOrSentinel();
   if (dstWidth < 0 || srcWidth < 0) {
@@ -105,7 +114,6 @@ void circt::firrtl::emitConnect(ImplicitLocOpBuilder &builder, Value dst,
     // Const-cast as needed, using widthless version of dest.
     // (dest is either widthless already, or source is and if the types
     //  can be const-cast'd, do so)
-    assert(srcType.isGround() && dstType.isGround());
     if (dstType != srcType && dstType.getWidthlessType() != srcType &&
         areTypesConstCastable(dstType.getWidthlessType(), srcType)) {
       src = builder.create<ConstCastOp>(dstType.getWidthlessType(), src);
@@ -344,8 +352,9 @@ bool circt::firrtl::walkDrivers(FIRRTLBaseValue value, bool lookThroughWires,
 
       // The value is a port.
       if (auto blockArg = dyn_cast<BlockArgument>(val)) {
-        FModuleOp op = cast<FModuleOp>(val.getParentBlock()->getParentOp());
-        auto direction = op.getPortDirection(blockArg.getArgNumber());
+        auto *parent = val.getParentBlock()->getParentOp();
+        auto module = cast<FModuleLike>(parent);
+        auto direction = module.getPortDirection(blockArg.getArgNumber());
         // Base case: this is one of the module's input ports.
         if (direction == Direction::In) {
           if (!callback(original, fieldRef))
@@ -432,7 +441,7 @@ bool circt::firrtl::walkDrivers(FIRRTLBaseValue value, bool lookThroughWires,
       auto fieldID = back.fieldID;
 
       if (auto subfield = dyn_cast<SubfieldOp>(user)) {
-        auto bundleType = subfield.getInput().getType();
+        BundleType bundleType = subfield.getInput().getType();
         auto index = subfield.getFieldIndex();
         auto subID = bundleType.getFieldID(index);
         // If the index of this operation doesn't match the target, skip it.
@@ -443,7 +452,7 @@ bool circt::firrtl::walkDrivers(FIRRTLBaseValue value, bool lookThroughWires,
         auto value = subfield.getResult();
         workStack.emplace_back(subOriginal, subRef, value, fieldID - subID);
       } else if (auto subindex = dyn_cast<SubindexOp>(user)) {
-        auto vectorType = subindex.getInput().getType();
+        FVectorType vectorType = subindex.getInput().getType();
         auto index = subindex.getIndex();
         auto subID = vectorType.getFieldID(index);
         // If the index of this operation doesn't match the target, skip it.
@@ -470,52 +479,49 @@ bool circt::firrtl::walkDrivers(FIRRTLBaseValue value, bool lookThroughWires,
 // FieldRef helpers
 //===----------------------------------------------------------------------===//
 
-FieldRef circt::firrtl::getFieldRefFromValue(Value value) {
-  // This code walks upwards from the subfield and calculates the field ID at
-  // each level. At each stage, it must take the current id, and re-index it as
-  // a nested bundle under the parent field.. This is accomplished by using the
-  // parent field's ID as a base, and adding the field ID of the child.
+/// Get the delta indexing from a value, as a FieldRef.
+FieldRef circt::firrtl::getDeltaRef(Value value, bool lookThroughCasts) {
+  // Handle bad input.
+  if (LLVM_UNLIKELY(!value))
+    return FieldRef();
+
+  // Block arguments are not index results, empty delta.
+  auto *op = value.getDefiningOp();
+  if (!op)
+    return FieldRef();
+
+  // Otherwise, optionally look through casts (delta of 0),
+  // dispatch to index operations' getAccesssedField(),
+  // or return no delta.
+  return TypeSwitch<Operation *, FieldRef>(op)
+      .Case<RefCastOp, ConstCastOp, UninferredResetCastOp>(
+          [lookThroughCasts](auto op) {
+            if (!lookThroughCasts)
+              return FieldRef();
+            return FieldRef(op.getInput(), 0);
+          })
+      .Case<SubfieldOp, OpenSubfieldOp, SubindexOp, OpenSubindexOp, RefSubOp,
+            ObjectSubfieldOp>(
+          [](auto subOp) { return subOp.getAccessedField(); })
+      .Default(FieldRef());
+}
+
+FieldRef circt::firrtl::getFieldRefFromValue(Value value,
+                                             bool lookThroughCasts) {
+  if (LLVM_UNLIKELY(!value))
+    return {value, 0};
+
+  // Walk through indexing operations, and optionally through casts.
   unsigned id = 0;
-  while (value) {
-    Operation *op = value.getDefiningOp();
-
-    // If this is a block argument, we are done.
-    if (!op)
-      break;
-
-    auto handled =
-        TypeSwitch<Operation *, bool>(op)
-            .Case<SubfieldOp, OpenSubfieldOp>([&](auto subfieldOp) {
-              value = subfieldOp.getInput();
-              auto bundleType = subfieldOp.getInput().getType();
-              // Rebase the current index on the parent field's
-              // index.
-              id += bundleType.getFieldID(subfieldOp.getFieldIndex());
-              return true;
-            })
-            .Case<SubindexOp, OpenSubindexOp>([&](auto subindexOp) {
-              value = subindexOp.getInput();
-              auto vecType = subindexOp.getInput().getType();
-              // Rebase the current index on the parent field's
-              // index.
-              id += vecType.getFieldID(subindexOp.getIndex());
-              return true;
-            })
-            .Case<RefSubOp>([&](RefSubOp refSubOp) {
-              value = refSubOp.getInput();
-              auto refInputType = refSubOp.getInput().getType();
-              id += FIRRTLTypeSwitch<FIRRTLBaseType, size_t>(
-                        refInputType.getType())
-                        .Case<FVectorType, BundleType>([&](auto type) {
-                          return type.getFieldID(refSubOp.getIndex());
-                        });
-              return true;
-            })
-            .Default(false);
-    if (!handled)
-      break;
+  while (true) {
+    auto deltaRef = getDeltaRef(value, lookThroughCasts);
+    if (!deltaRef)
+      return {value, id};
+    // Update total fieldID.
+    id = deltaRef.getSubField(id).getFieldID();
+    // Chase to next value.
+    value = deltaRef.getValue();
   }
-  return {value, id};
 }
 
 /// Get the string name of a value which is a direct child of a declaration op.
@@ -524,14 +530,20 @@ static void getDeclName(Value value, SmallString<64> &string, bool nameSafe) {
   while (value) {
     if (auto arg = dyn_cast<BlockArgument>(value)) {
       // Get the module ports and get the name.
-      auto module = cast<FModuleOp>(arg.getOwner()->getParentOp());
-      SmallVector<PortInfo> ports = module.getPorts();
-      string += ports[arg.getArgNumber()].name.getValue();
+      auto *op = arg.getOwner()->getParentOp();
+      TypeSwitch<Operation *>(op).Case<FModuleOp, ClassOp>([&](auto op) {
+        auto name = cast<StringAttr>(op.getPortNames()[arg.getArgNumber()]);
+        string += name.getValue();
+      });
       return;
     }
 
     auto *op = value.getDefiningOp();
     TypeSwitch<Operation *>(op)
+        .Case<ObjectOp>([&](ObjectOp op) {
+          string += op.getInstanceName();
+          value = nullptr;
+        })
         .Case<InstanceOp, MemOp>([&](auto op) {
           string += op.getName();
           string += nameSafe ? "_" : ".";
@@ -587,7 +599,26 @@ circt::firrtl::getFieldName(const FieldRef &fieldRef, bool nameSafe) {
       // Recurse in to the element type.
       type = element.type;
       localID = localID - bundleType.getFieldID(index);
+    } else if (auto bundleType = type_dyn_cast<OpenBundleType>(type)) {
+      auto index = bundleType.getIndexForFieldID(localID);
+      // Add the current field string, and recurse into a subfield.
+      auto &element = bundleType.getElements()[index];
+      if (!name.empty())
+        name += nameSafe ? "_" : ".";
+      name += element.name.getValue();
+      // Recurse in to the element type.
+      type = element.type;
+      localID = localID - bundleType.getFieldID(index);
     } else if (auto vecType = type_dyn_cast<FVectorType>(type)) {
+      auto index = vecType.getIndexForFieldID(localID);
+      name += nameSafe ? "_" : "[";
+      name += std::to_string(index);
+      if (!nameSafe)
+        name += "]";
+      // Recurse in to the element type.
+      type = vecType.getElementType();
+      localID = localID - vecType.getFieldID(index);
+    } else if (auto vecType = type_dyn_cast<OpenVectorType>(type)) {
       auto index = vecType.getIndexForFieldID(localID);
       name += nameSafe ? "_" : "[";
       name += std::to_string(index);
@@ -603,6 +634,13 @@ circt::firrtl::getFieldName(const FieldRef &fieldRef, bool nameSafe) {
       name += element.name.getValue();
       type = element.type;
       localID = localID - enumType.getFieldID(index);
+    } else if (auto classType = type_dyn_cast<ClassType>(type)) {
+      auto index = classType.getIndexForFieldID(localID);
+      auto &element = classType.getElement(index);
+      name += nameSafe ? "_" : ".";
+      name += element.name.getValue();
+      type = element.type;
+      localID = localID - classType.getFieldID(index);
     } else {
       // If we reach here, the field ref is pointing inside some aggregate type
       // that isn't a bundle or a vector. If the type is a ground type, then the
@@ -657,10 +695,10 @@ Value circt::firrtl::getValueByFieldID(ImplicitLocOpBuilder builder,
 
 /// Walk leaf ground types in the `firrtlType` and apply the function `fn`.
 /// The first argument of `fn` is field ID, and the second argument is a
-/// leaf ground type.
+/// leaf ground type and the third argument is a bool to indicate flip.
 void circt::firrtl::walkGroundTypes(
     FIRRTLType firrtlType,
-    llvm::function_ref<void(uint64_t, FIRRTLBaseType)> fn) {
+    llvm::function_ref<void(uint64_t, FIRRTLBaseType, bool)> fn) {
   auto type = getBaseType(firrtlType);
 
   // If this is not a base type, return.
@@ -669,85 +707,92 @@ void circt::firrtl::walkGroundTypes(
 
   // If this is a ground type, don't call recursive functions.
   if (type.isGround())
-    return fn(0, type);
+    return fn(0, type, false);
 
   uint64_t fieldID = 0;
-  auto recurse = [&](auto &&f, FIRRTLBaseType type) -> void {
+  auto recurse = [&](auto &&f, FIRRTLBaseType type, bool isFlip) -> void {
     FIRRTLTypeSwitch<FIRRTLBaseType>(type)
         .Case<BundleType>([&](BundleType bundle) {
           for (size_t i = 0, e = bundle.getNumElements(); i < e; ++i) {
             fieldID++;
-            f(f, bundle.getElementType(i));
+            f(f, bundle.getElementType(i),
+              isFlip ^ bundle.getElement(i).isFlip);
           }
         })
         .template Case<FVectorType>([&](FVectorType vector) {
           for (size_t i = 0, e = vector.getNumElements(); i < e; ++i) {
             fieldID++;
-            f(f, vector.getElementType());
+            f(f, vector.getElementType(), isFlip);
           }
         })
         .template Case<FEnumType>([&](FEnumType fenum) {
           for (size_t i = 0, e = fenum.getNumElements(); i < e; ++i) {
             fieldID++;
-            f(f, fenum.getElementType(i));
+            f(f, fenum.getElementType(i), isFlip);
           }
         })
         .Default([&](FIRRTLBaseType groundType) {
           assert(groundType.isGround() &&
                  "only ground types are expected here");
-          fn(fieldID, groundType);
+          fn(fieldID, groundType, isFlip);
         });
   };
-  recurse(recurse, type);
+  recurse(recurse, type, false);
 }
 
-/// Returns an operation's `inner_sym`, adding one if necessary.
+/// Return the inner sym target for the specified value and fieldID.
+/// If root is a blockargument, this must be FModuleLike.
+hw::InnerSymTarget circt::firrtl::getTargetFor(FieldRef ref) {
+  auto root = ref.getValue();
+  if (auto arg = dyn_cast<BlockArgument>(root)) {
+    auto mod = cast<FModuleLike>(arg.getOwner()->getParentOp());
+    return hw::InnerSymTarget(arg.getArgNumber(), mod, ref.getFieldID());
+  }
+  return hw::InnerSymTarget(root.getDefiningOp(), ref.getFieldID());
+}
+
+// Return InnerSymAttr with sym on specified fieldID.
+std::pair<hw::InnerSymAttr, StringAttr> circt::firrtl::getOrAddInnerSym(
+    MLIRContext *context, hw::InnerSymAttr attr, uint64_t fieldID,
+    llvm::function_ref<hw::InnerSymbolNamespace &()> getNamespace) {
+  SmallVector<hw::InnerSymPropertiesAttr> props;
+  if (attr) {
+    // If already present, return it.
+    if (auto sym = attr.getSymIfExists(fieldID))
+      return {attr, sym};
+    llvm::append_range(props, attr.getProps());
+  }
+
+  // Otherwise, create symbol and add to list.
+  auto sym = StringAttr::get(context, getNamespace().newName("sym"));
+  props.push_back(hw::InnerSymPropertiesAttr::get(
+      context, sym, fieldID, StringAttr::get(context, "public")));
+  // TODO: store/ensure always sorted, insert directly, faster search.
+  // For now, just be good and sort by fieldID.
+  llvm::sort(props,
+             [](auto &p, auto &q) { return p.getFieldID() < q.getFieldID(); });
+  return {hw::InnerSymAttr::get(context, props), sym};
+}
+
 StringAttr circt::firrtl::getOrAddInnerSym(
     const hw::InnerSymTarget &target,
-    llvm::function_ref<ModuleNamespace &(FModuleOp)> getNamespace) {
-
-  // Return InnerSymAttr with sym on specified fieldID.
-  auto getOrAdd = [&](auto mod, hw::InnerSymAttr attr,
-                      auto fieldID) -> std::pair<hw::InnerSymAttr, StringAttr> {
-    assert(mod);
-    auto *context = mod.getContext();
-
-    SmallVector<hw::InnerSymPropertiesAttr> props;
-    if (attr) {
-      // If already present, return it.
-      if (auto sym = attr.getSymIfExists(fieldID))
-        return {attr, sym};
-      llvm::append_range(props, attr.getProps());
-    }
-
-    // Otherwise, create symbol and add to list.
-    auto sym = StringAttr::get(context, getNamespace(mod).newName("sym"));
-    props.push_back(hw::InnerSymPropertiesAttr::get(
-        context, sym, fieldID, StringAttr::get(context, "public")));
-    // TODO: store/ensure always sorted, insert directly, faster search.
-    // For now, just be good and sort by fieldID.
-    llvm::sort(props, [](auto &p, auto &q) {
-      return p.getFieldID() < q.getFieldID();
-    });
-    return {hw::InnerSymAttr::get(context, props), sym};
-  };
-
+    llvm::function_ref<hw::InnerSymbolNamespace &()> getNamespace) {
   if (target.isPort()) {
     if (auto mod = dyn_cast<FModuleOp>(target.getOp())) {
       auto portIdx = target.getPort();
       assert(portIdx < mod.getNumPorts());
       auto [attr, sym] =
-          getOrAdd(mod, mod.getPortSymbolAttr(portIdx), target.getField());
+          getOrAddInnerSym(mod.getContext(), mod.getPortSymbolAttr(portIdx),
+                           target.getField(), getNamespace);
       mod.setPortSymbolsAttr(portIdx, attr);
       return sym;
     }
   } else {
     // InnerSymbols only supported if op implements the interface.
     if (auto symOp = dyn_cast<hw::InnerSymbolOpInterface>(target.getOp())) {
-      auto mod = symOp->getParentOfType<FModuleOp>();
-      assert(mod);
       auto [attr, sym] =
-          getOrAdd(mod, symOp.getInnerSymAttr(), target.getField());
+          getOrAddInnerSym(symOp.getContext(), symOp.getInnerSymAttr(),
+                           target.getField(), getNamespace);
       symOp.setInnerSymbolAttr(attr);
       return sym;
     }
@@ -757,11 +802,25 @@ StringAttr circt::firrtl::getOrAddInnerSym(
   return {};
 }
 
+StringAttr circt::firrtl::getOrAddInnerSym(const hw::InnerSymTarget &target,
+                                           GetNamespaceCallback getNamespace) {
+  FModuleLike module;
+  if (target.isPort())
+    module = cast<FModuleLike>(target.getOp());
+  else
+    module = target.getOp()->getParentOfType<FModuleOp>();
+  assert(module);
+
+  return getOrAddInnerSym(target, [&]() -> hw::InnerSymbolNamespace & {
+    return getNamespace(module);
+  });
+}
+
 /// Obtain an inner reference to an operation, possibly adding an `inner_sym`
 /// to that operation.
-hw::InnerRefAttr circt::firrtl::getInnerRefTo(
-    const hw::InnerSymTarget &target,
-    llvm::function_ref<ModuleNamespace &(FModuleOp)> getNamespace) {
+hw::InnerRefAttr
+circt::firrtl::getInnerRefTo(const hw::InnerSymTarget &target,
+                             GetNamespaceCallback getNamespace) {
   auto mod = target.isPort() ? dyn_cast<FModuleOp>(target.getOp())
                              : target.getOp()->getParentOfType<FModuleOp>();
   assert(mod &&
@@ -895,18 +954,29 @@ circt::firrtl::maybeStringToLocation(StringRef spelling, bool skipParsing,
 /// Given a type, return the corresponding lowered type for the HW dialect.
 /// Non-FIRRTL types are simply passed through. This returns a null type if it
 /// cannot be lowered.
-Type circt::firrtl::lowerType(Type type) {
+Type circt::firrtl::lowerType(
+    Type type, std::optional<Location> loc,
+    llvm::function_ref<hw::TypeAliasType(Type, BaseTypeAliasType, Location)>
+        getTypeDeclFn) {
   auto firType = type_dyn_cast<FIRRTLBaseType>(type);
   if (!firType)
     return type;
 
+  // If not known how to lower alias types, then ignore the alias.
+  if (getTypeDeclFn)
+    if (BaseTypeAliasType aliasType = dyn_cast<BaseTypeAliasType>(firType)) {
+      if (!loc)
+        loc = UnknownLoc::get(type.getContext());
+      type = lowerType(aliasType.getInnerType(), loc, getTypeDeclFn);
+      return getTypeDeclFn(type, aliasType, *loc);
+    }
   // Ignore flip types.
   firType = firType.getPassiveType();
 
   if (auto bundle = type_dyn_cast<BundleType>(firType)) {
     mlir::SmallVector<hw::StructType::FieldInfo, 8> hwfields;
     for (auto element : bundle) {
-      Type etype = lowerType(element.type);
+      Type etype = lowerType(element.type, loc, getTypeDeclFn);
       if (!etype)
         return {};
       hwfields.push_back(hw::StructType::FieldInfo{element.name, etype});
@@ -914,7 +984,7 @@ Type circt::firrtl::lowerType(Type type) {
     return hw::StructType::get(type.getContext(), hwfields);
   }
   if (auto vec = type_dyn_cast<FVectorType>(firType)) {
-    auto elemTy = lowerType(vec.getElementType());
+    auto elemTy = lowerType(vec.getElementType(), loc, getTypeDeclFn);
     if (!elemTy)
       return {};
     return hw::ArrayType::get(elemTy, vec.getNumElements());
@@ -924,7 +994,7 @@ Type circt::firrtl::lowerType(Type type) {
     SmallVector<Attribute> names;
     bool simple = true;
     for (auto element : fenum) {
-      Type etype = lowerType(element.type);
+      Type etype = lowerType(element.type, loc, getTypeDeclFn);
       if (!etype)
         return {};
       hwfields.push_back(hw::UnionType::FieldInfo{element.name, etype, 0});
@@ -943,6 +1013,8 @@ Type circt::firrtl::lowerType(Type type) {
         {StringAttr::get(type.getContext(), "body"), bodyTy}};
     return hw::StructType::get(type.getContext(), fields);
   }
+  if (type_isa<ClockType>(firType))
+    return seq::ClockType::get(firType.getContext());
 
   auto width = firType.getBitWidthOrSentinel();
   if (width >= 0) // IntType, analog with known width, clock, etc.

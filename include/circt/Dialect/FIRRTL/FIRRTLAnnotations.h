@@ -15,10 +15,14 @@
 
 #include "circt/Support/LLVM.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/PointerLikeTypeTraits.h"
 
 namespace circt {
+namespace hw {
+struct InnerSymbolNamespace;
+} // namespace hw
 namespace firrtl {
 
 class AnnotationSetIterator;
@@ -26,7 +30,6 @@ class FModuleOp;
 class FModuleLike;
 class MemOp;
 class InstanceOp;
-struct ModuleNamespace;
 class FIRRTLType;
 
 /// Return the name of the attribute used for annotations on FIRRTL ops.
@@ -49,6 +52,19 @@ public:
 
   explicit Annotation(Attribute attr) : attr(attr) {
     assert(attr && "null attributes not allowed");
+  }
+
+  // Make a new annotation which is a clone of anno with a new fieldID.
+  Annotation(Annotation anno, uint64_t fieldID) : attr(anno.attr) {
+    auto oldFieldID = anno.getMember<IntegerAttr>("circt.fieldID");
+    if (oldFieldID && !fieldID) {
+      removeMember("circt.fieldID");
+      return;
+    }
+    if (fieldID)
+      setMember("circt.fieldID",
+                IntegerAttr::get(IntegerType::get(anno.attr.getContext(), 32),
+                                 APInt(32, fieldID)));
   }
 
   /// Get the data dictionary of this attribute.
@@ -91,6 +107,10 @@ public:
   void removeMember(StringAttr name);
   void removeMember(StringRef name);
 
+  /// Returns true if this is an annotation which can be safely deleted without
+  /// consequence.
+  bool canBeDeleted();
+
   using iterator = llvm::ArrayRef<NamedAttribute>::iterator;
   iterator begin() const { return getDict().begin(); }
   iterator end() const { return getDict().end(); }
@@ -127,6 +147,8 @@ private:
 ///
 class AnnotationSet {
 public:
+  using ElementType = Annotation;
+
   /// Form an empty annotation set.
   explicit AnnotationSet(MLIRContext *context)
       : annotations(ArrayAttr::get(context, {})) {}
@@ -260,6 +282,10 @@ public:
   static bool setDontTouch(Operation *op, bool dontTouch);
   static bool addDontTouch(Operation *op);
   static bool removeDontTouch(Operation *op);
+
+  /// Check if every annotation can be deleted.
+  bool canBeDeleted() const;
+  static bool canBeDeleted(Operation *op);
 
   bool operator==(const AnnotationSet &other) const {
     return annotations == other.annotations;
@@ -424,12 +450,8 @@ struct AnnoTarget {
   /// Get the parent module of the target.
   FModuleLike getModule() const;
 
-  /// Get the inner_sym attribute of an op.  If there is no attached inner_sym,
-  /// then one will be created and attached to the op.
-  StringAttr getInnerSym(ModuleNamespace &moduleNamespace) const;
-
   /// Get a reference to this target suitable for use in an NLA.
-  Attribute getNLAReference(ModuleNamespace &moduleNamespace) const;
+  Attribute getNLAReference(hw::InnerSymbolNamespace &moduleNamespace) const;
 
   /// Get the type of the target.
   FIRRTLType getType() const;
@@ -448,8 +470,7 @@ struct OpAnnoTarget : public AnnoTarget {
 
   AnnotationSet getAnnotations() const;
   void setAnnotations(AnnotationSet annotations) const;
-  StringAttr getInnerSym(ModuleNamespace &moduleNamespace) const;
-  Attribute getNLAReference(ModuleNamespace &moduleNamespace) const;
+  Attribute getNLAReference(hw::InnerSymbolNamespace &moduleNamespace) const;
   FIRRTLType getType() const;
 
   static bool classof(const AnnoTarget &annoTarget) {
@@ -470,8 +491,7 @@ struct PortAnnoTarget : public AnnoTarget {
 
   AnnotationSet getAnnotations() const;
   void setAnnotations(AnnotationSet annotations) const;
-  StringAttr getInnerSym(ModuleNamespace &moduleNamespace) const;
-  Attribute getNLAReference(ModuleNamespace &moduleNamespace) const;
+  Attribute getNLAReference(hw::InnerSymbolNamespace &moduleNamespace) const;
   FIRRTLType getType() const;
 
   static bool classof(const AnnoTarget &annoTarget) {

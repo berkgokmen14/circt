@@ -13,7 +13,9 @@
 #ifndef CIRCT_DIALECT_FIRRTL_TYPES_H
 #define CIRCT_DIALECT_FIRRTL_TYPES_H
 
+#include "circt/Dialect/FIRRTL/FIRRTLAttributes.h"
 #include "circt/Dialect/FIRRTL/FIRRTLDialect.h"
+#include "circt/Dialect/FIRRTL/FIRRTLTypeInterfaces.h"
 #include "circt/Dialect/HW/HWTypeInterfaces.h"
 #include "circt/Support/LLVM.h"
 #include "mlir/IR/OpDefinition.h"
@@ -33,8 +35,11 @@ struct RefTypeStorage;
 struct BaseTypeAliasStorage;
 struct OpenBundleTypeStorage;
 struct OpenVectorTypeStorage;
+struct ClassTypeStorage;
 } // namespace detail.
 
+class AnyRefType;
+class ClassType;
 class ClockType;
 class ResetType;
 class AsyncResetType;
@@ -49,9 +54,11 @@ class FEnumType;
 class RefType;
 class PropertyType;
 class StringType;
-class BigIntType;
+class FIntegerType;
 class ListType;
-class MapType;
+class PathType;
+class BoolType;
+class DoubleType;
 class BaseTypeAliasType;
 
 /// A collection of bits indicating the recursive properties of a type.
@@ -186,33 +193,6 @@ public:
 
   /// Return true if this is a valid "reset" type.
   bool isResetType();
-
-  //===--------------------------------------------------------------------===//
-  // hw::FieldIDTypeInterface
-  //===--------------------------------------------------------------------===//
-
-  /// Get the maximum field ID of this type.  For integers and other ground
-  /// types, there are no subfields and the maximum field ID is 0.  For bundle
-  /// types and vector types, each field is assigned a field ID in a depth-first
-  /// walk order. This function is used to calculate field IDs when this type is
-  /// nested under another type.
-  uint64_t getMaxFieldID();
-
-  /// Get the sub-type of a type for a field ID, and the subfield's ID. Strip
-  /// off a single layer of this type and return the sub-type and a field ID
-  /// targeting the same field, but rebased on the sub-type.
-  std::pair<circt::hw::FieldIDTypeInterface, uint64_t>
-  getSubTypeByFieldID(uint64_t fieldID);
-
-  /// Return the final type targeted by this field ID by recursively walking all
-  /// nested aggregate types. This is the identity function for ground types.
-  circt::hw::FieldIDTypeInterface getFinalTypeByFieldID(uint64_t fieldID);
-
-  /// Returns the effective field id when treating the index field as the
-  /// root of the type.  Essentially maps a fieldID to a fieldID after a
-  /// subfield op. Returns the new id and whether the id is in the given
-  /// child.
-  std::pair<uint64_t, bool> rootChildFieldID(uint64_t fieldID, uint64_t index);
 };
 
 /// Returns true if this is a 'const' type whose value is guaranteed to be
@@ -266,6 +246,11 @@ bool areAnonymousTypesEquivalent(mlir::Type lhs, mlir::Type rhs);
 
 mlir::Type getPassiveType(mlir::Type anyBaseFIRRTLType);
 
+/// Returns true if the given type has some flipped (aka unaligned) dataflow.
+/// This will be true if the port contains either bi-directional signals or
+/// analog types. Non-HW types (e.g., ref types) are never considered InOut.
+bool isTypeInOut(mlir::Type type);
+
 //===----------------------------------------------------------------------===//
 // Width Qualified Ground Types
 //===----------------------------------------------------------------------===//
@@ -282,16 +267,16 @@ class WidthQualifiedTypeTrait
 public:
   /// Return an optional containing the width, if the width is known (or empty
   /// if width is unknown).
-  std::optional<int32_t> getWidth() {
-    auto width = static_cast<ConcreteType *>(this)->getWidthOrSentinel();
+  std::optional<int32_t> getWidth() const {
+    auto width = static_cast<const ConcreteType *>(this)->getWidthOrSentinel();
     if (width < 0)
       return std::nullopt;
     return width;
   }
 
   /// Return true if this integer type has a known width.
-  bool hasWidth() {
-    return 0 <= static_cast<ConcreteType *>(this)->getWidthOrSentinel();
+  bool hasWidth() const {
+    return 0 <= static_cast<const ConcreteType *>(this)->getWidthOrSentinel();
   }
 };
 
@@ -316,7 +301,7 @@ public:
   bool isUnsigned() { return isa<UIntType>(); }
 
   /// Return the width of this type, or -1 if it has none specified.
-  int32_t getWidthOrSentinel();
+  int32_t getWidthOrSentinel() const;
 
   /// Return a 'const' or non-'const' version of this type.
   IntType getConstType(bool isConst);
@@ -332,12 +317,52 @@ class PropertyType : public FIRRTLType {
 public:
   /// Support method to enable LLVM-style type casting.
   static bool classof(Type type) {
-    return llvm::isa<StringType, BigIntType, ListType, MapType>(type);
+    return llvm::isa<AnyRefType, ClassType, StringType, FIntegerType, ListType,
+                     PathType, BoolType, DoubleType>(type);
   }
 
 protected:
   using FIRRTLType::FIRRTLType;
 };
+
+//===----------------------------------------------------------------------===//
+// ClassElement
+//===----------------------------------------------------------------------===//
+
+struct ClassElement {
+  ClassElement(StringAttr name, Type type, Direction direction)
+      : name(name), type(type), direction(direction) {}
+
+  StringAttr name;
+  Type type;
+  Direction direction;
+
+  StringRef getName() const { return name.getValue(); }
+
+  /// Return true if this is a simple output-only element.  If you want the
+  /// direction of the port, use the \p direction field directly.
+  bool isInput() const { return direction == Direction::In && !isInOut(); }
+
+  /// Return true if this is a simple input-only element.  If you want the
+  /// direction of the port, use the \p direction field directly.
+  bool isOutput() const { return direction == Direction::Out && !isInOut(); }
+
+  /// Return true if this is an inout port.  This will be true if the port
+  /// contains either bi-directional signals or analog types.
+  /// Non-HW types (e.g., ref types) are never considered InOut.
+  bool isInOut() const { return isTypeInOut(type); }
+
+  bool operator==(const ClassElement &rhs) const {
+    return name == rhs.name && type == rhs.type;
+  }
+
+  bool operator!=(const ClassElement &rhs) const { return !(*this == rhs); }
+};
+
+// NOLINTNEXTLINE(readability-identifier-naming)
+inline llvm::hash_code hash_value(const ClassElement &element) {
+  return llvm::hash_combine(element.name, element.type, element.direction);
+}
 
 //===----------------------------------------------------------------------===//
 // Type helpers
@@ -570,6 +595,24 @@ public:
 private:
   /// A flag detailing if we have already found a match.
   bool foundMatch = false;
+};
+
+template <typename BaseTy>
+class BaseTypeAliasOr
+    : public ::mlir::Type::TypeBase<BaseTypeAliasOr<BaseTy>,
+                                    firrtl::FIRRTLBaseType,
+                                    detail::FIRRTLBaseTypeStorage> {
+
+public:
+  using mlir::Type::TypeBase<BaseTypeAliasOr<BaseTy>, firrtl::FIRRTLBaseType,
+                             detail::FIRRTLBaseTypeStorage>::Base::Base;
+  // Support LLVM isa/cast/dyn_cast to BaseTy.
+  static bool classof(Type other) { return type_isa<BaseTy>(other); }
+
+  // Support C++ implicit conversions to BaseTy.
+  operator BaseTy() const { return circt::firrtl::type_cast<BaseTy>(*this); }
+
+  BaseTy get() const { return circt::firrtl::type_cast<BaseTy>(*this); }
 };
 
 } // namespace firrtl

@@ -7,6 +7,7 @@ from ..constructs import ControlReg, Wire
 from ..module import Module, generator
 from ..system import System
 from ..types import bit, types, Bits
+from .. import esi
 
 import glob
 from io import FileIO
@@ -221,6 +222,7 @@ def XrtBSP(user_module):
 
       # Copy additional sources
       sys: System = System.current()
+      sys.add_packaging_step(esi.package)
       sys.add_packaging_step(top.package)
 
     @staticmethod
@@ -245,10 +247,5 @@ def XrtBSP(user_module):
 
       shutil.copy(__dir__ / "xrt.ini", sys.output_directory / "xrt.ini")
       shutil.copy(__dir__ / "xsim.tcl", sys.output_directory / "xsim.tcl")
-
-      runtime_dir = sys.runtime_output_dir / sys.name
-      shutil.copy(__dir__ / "xrt_api.py", runtime_dir / "xrt.py")
-      shutil.copy(__dir__ / "EsiXrtPython.cpp",
-                  runtime_dir / "EsiXrtPython.cpp")
 
   return top

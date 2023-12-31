@@ -9,12 +9,13 @@
 #ifndef CIRCT_DIALECT_ARC_ARCPASSES_TD
 #define CIRCT_DIALECT_ARC_ARCPASSES_TD
 
+include "mlir/IR/EnumAttr.td"
 include "mlir/Pass/PassBase.td"
 
 def AddTaps : Pass<"arc-add-taps", "mlir::ModuleOp"> {
   let summary = "Add taps to ports and wires such that they remain observable";
   let constructor = "circt::arc::createAddTapsPass()";
-  let dependentDialects = ["arc::ArcDialect"];
+  let dependentDialects = ["arc::ArcDialect", "seq::SeqDialect"];
   let options = [
     Option<"tapPorts", "ports", "bool", "true", "Make module ports observable">,
     Option<"tapWires", "wires", "bool", "true", "Make wires observable">,
@@ -73,6 +74,8 @@ def InferMemories : Pass<"arc-infer-memories", "mlir::ModuleOp"> {
   let options = [
     Option<"tapPorts", "tap-ports", "bool", "true",
       "Make memory ports observable">,
+    Option<"tapMemories", "tap-memories", "bool", "true",
+      "Make memory contents observable">,
   ];
 }
 
@@ -111,8 +114,21 @@ def InlineModules : Pass<"arc-inline-modules", "mlir::ModuleOp"> {
 def InferStateProperties : Pass<"arc-infer-state-properties",
                                 "mlir::ModuleOp"> {
   let summary = "Add resets and enables explicitly to the state operations";
-  let constructor = "circt::arc::createInferStatePropertiesPass()";
   let dependentDialects = ["circt::hw::HWDialect", "circt::comb::CombDialect"];
+  let options = [
+    Option<"detectEnables", "enables", "bool", "true", "Infer enable signals">,
+    Option<"detectResets", "resets", "bool", "true", "Infer reset signals">,
+  ];
+  let statistics = [
+    Statistic<"addedEnables", "added-enables",
+      "Enables added explicitly to a StateOp">,
+    Statistic<"addedResets", "added-resets",
+      "Resets added explicitly to a StateOp">,
+    Statistic<"missedEnables", "missed-enables",
+      "Detected enables that could not be added explicitly to a StateOp">,
+    Statistic<"missedResets", "missed-resets",
+      "Detected resets that could not be added explicitly to a StateOp">,
+  ];
 }
 
 def IsolateClocks : Pass<"arc-isolate-clocks", "mlir::ModuleOp"> {
@@ -140,10 +156,16 @@ def LegalizeStateUpdate : Pass<"arc-legalize-state-update", "mlir::ModuleOp"> {
   let dependentDialects = ["arc::ArcDialect"];
 }
 
+def LowerArcsToFuncs : Pass<"arc-lower-arcs-to-funcs", "mlir::ModuleOp"> {
+  let summary = "Lower arc definitions into functions";
+  let constructor = "circt::arc::createLowerArcsToFuncsPass()";
+  let dependentDialects = ["mlir::func::FuncDialect", "mlir::LLVM::LLVMDialect"];
+}
+
 def LowerClocksToFuncs : Pass<"arc-lower-clocks-to-funcs", "mlir::ModuleOp"> {
   let summary = "Lower clock trees into functions";
   let constructor = "circt::arc::createLowerClocksToFuncsPass()";
-  let dependentDialects = ["mlir::func::FuncDialect"];
+  let dependentDialects = ["mlir::func::FuncDialect", "mlir::scf::SCFDialect"];
 }
 
 def LowerLUT : Pass<"arc-lower-lut", "arc::DefineOp"> {
@@ -157,7 +179,80 @@ def LowerState : Pass<"arc-lower-state", "mlir::ModuleOp"> {
   let constructor = "circt::arc::createLowerStatePass()";
   let dependentDialects = [
     "arc::ArcDialect", "mlir::scf::SCFDialect", "mlir::func::FuncDialect",
-    "mlir::LLVM::LLVMDialect"
+    "mlir::LLVM::LLVMDialect", "comb::CombDialect", "seq::SeqDialect"
+  ];
+}
+
+def LowerVectorizationsMode : I32EnumAttr<
+  "LowerVectorizationsModeEnum", "Lowering Mode", [
+    I32EnumAttrCase<"Boundary", 0, "boundary">,
+    I32EnumAttrCase<"Body", 1, "body">,
+    I32EnumAttrCase<"InlineBody", 2, "inline-body">,
+    I32EnumAttrCase<"Full", 3>,
+  ]> {
+  let cppNamespace = "circt::arc";
+}
+
+def LowerVectorizations : Pass<"arc-lower-vectorizations", "mlir::ModuleOp"> {
+  let summary = "lower `arc.vectorize` operations";
+  let description = [{
+    This pass lowers `arc.vectorize` operations. By default, the operation will
+    be fully lowered (i.e., the op disappears in the IR). Alternatively, it can
+    be partially lowered.
+    
+    The "mode" pass option allows to only lower the boundary, only the body, or
+    only inline the body given that both the boundary and the body are already
+    lowered.
+
+    The pass supports vectorization within scalar registers and SIMD
+    vectorization and prioritizes vectorization by packing the vector elements
+    into a scalar value if it can fit into 64 bits.
+
+    Example:
+    ```mlir
+    hw.module @example(%in0: i8, %in1: i8, %in2: i8) -> (out0: i8, out1: i8) {
+      %0:2 = arc.vectorize (%in0, %in1), (%in2, %in2) :
+        (i8, i8, i8, i8) -> (i8, i8) {
+      ^bb0(%arg0: i8, %arg1: i8):
+        %1 = comb.and %arg0, %arg1 : i8
+        arc.vectorize.return %1 : i8
+      }
+      hw.output %0#0, %0#1 : i8, i8
+    }
+    ```
+    This piece of IR is lowered to the following fully vectorized IR:
+    ```mlir
+    hw.module @example(%in0: i8, %in1: i8, %in2: i8) -> (out0: i8, out1: i8) {
+      %0 = comb.concat %in0, %in1 : i8, i8
+      %1 = comb.concat %in2, %in2 : i8, i8
+      %2 = comb.and %0, %1 : i16
+      %3 = comb.extract %2 from 0 : (i16) -> i8
+      %4 = comb.extract %2 from 8 : (i16) -> i8
+      hw.output %3, %4 : i8, i8
+    }
+    ```
+  }];
+  let constructor = "circt::arc::createLowerVectorizationsPass()";
+
+  let options = [
+    Option<"mode", "mode", "circt::arc::LowerVectorizationsModeEnum",
+           /*default=*/"circt::arc::LowerVectorizationsModeEnum::Full",
+           "Select what should be lowered.",
+           [{::llvm::cl::values(
+             clEnumValN(circt::arc::LowerVectorizationsModeEnum::Boundary,
+             "boundary", "Lower boundary only."),
+             clEnumValN(circt::arc::LowerVectorizationsModeEnum::Body,
+             "body", "Lower body only."),
+             clEnumValN(circt::arc::LowerVectorizationsModeEnum::InlineBody,
+             "inline-body", "Inline already vectorized ops only."),
+             clEnumValN(circt::arc::LowerVectorizationsModeEnum::Full,
+             "full", "Perform the complete lowering.")
+           )}]>,
+  ];
+
+  let dependentDialects = [
+    "arc::ArcDialect", "circt::comb::CombDialect", "mlir::arith::ArithDialect",
+    "mlir::vector::VectorDialect",
   ];
 }
 

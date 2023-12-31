@@ -14,6 +14,7 @@
 #define CIRCT_DIALECT_FIRRTL_FIRRTLTYPESIMPL_TD
 
 include "FIRRTLDialect.td"
+include "circt/Dialect/FIRRTL/FIRRTLTypeInterfaces.td"
 include "circt/Dialect/HW/HWTypeInterfaces.td"
 
 // Base class for other typedefs. Provides dialact-specific defaults.
@@ -32,19 +33,11 @@ class FIRRTLImplType<string name,
 }
 
 //===----------------------------------------------------------------------===//
-// Type Traits
-//===----------------------------------------------------------------------===//
-
-def WidthQualifiedTypeTrait : NativeTypeTrait<"WidthQualifiedTypeTrait"> {
-  let cppNamespace = "::circt::firrtl";
-}
-
-//===----------------------------------------------------------------------===//
 // Type Definitions
 //===----------------------------------------------------------------------===//
 
 def SIntImpl : FIRRTLImplType<"SInt",
-                              [WidthQualifiedTypeTrait, FieldIDTypeInterface],
+                              [WidthQualifiedTypeTrait],
                               "::circt::firrtl::IntType"> {
   let summary = "A signed integer type, whose width may not be known.";
   let parameters = (ins "int32_t":$widthOrSentinel, "bool":$isConst);
@@ -63,7 +56,7 @@ def SIntImpl : FIRRTLImplType<"SInt",
 }
 
 def UIntImpl : FIRRTLImplType<"UInt",
-                              [WidthQualifiedTypeTrait, FieldIDTypeInterface],
+                              [WidthQualifiedTypeTrait],
                               "::circt::firrtl::IntType"> {
   let summary = "An unsigned integer type, whose width may not be known.";
   let parameters = (ins "int32_t":$widthOrSentinel, "bool":$isConst);
@@ -81,7 +74,7 @@ def UIntImpl : FIRRTLImplType<"UInt",
   }];
 }
 
-def ClockTypeImpl : FIRRTLImplType<"Clock", [FieldIDTypeInterface]> {
+def ClockTypeImpl : FIRRTLImplType<"Clock"> {
   let summary = "Clock signal";
   let parameters = (ins "bool":$isConst);
   let storageClass = "FIRRTLBaseTypeStorage";
@@ -95,7 +88,7 @@ def ClockTypeImpl : FIRRTLImplType<"Clock", [FieldIDTypeInterface]> {
   }];
 }
 
-def ResetTypeImpl : FIRRTLImplType<"Reset", [FieldIDTypeInterface]> {
+def ResetTypeImpl : FIRRTLImplType<"Reset"> {
   let summary = "Reset Signal";
   let parameters = (ins "bool":$isConst);
   let storageClass = "FIRRTLBaseTypeStorage";
@@ -109,7 +102,7 @@ def ResetTypeImpl : FIRRTLImplType<"Reset", [FieldIDTypeInterface]> {
   }];
 }
 
-def AsyncResetTypeImpl : FIRRTLImplType<"AsyncReset", [FieldIDTypeInterface]> {
+def AsyncResetTypeImpl : FIRRTLImplType<"AsyncReset"> {
   let summary = "AsyncReset signal";
   let parameters = (ins "bool":$isConst);
   let storageClass = "FIRRTLBaseTypeStorage";
@@ -124,7 +117,7 @@ def AsyncResetTypeImpl : FIRRTLImplType<"AsyncReset", [FieldIDTypeInterface]> {
 }
 
 def AnalogTypeImpl : FIRRTLImplType<"Analog",
-  [WidthQualifiedTypeTrait, FieldIDTypeInterface]> {
+  [WidthQualifiedTypeTrait]> {
   let summary = "Analog signal";
   let parameters = (ins "int32_t":$widthOrSentinel, "bool":$isConst);
   let storageClass = "WidthTypeStorage";
@@ -139,7 +132,8 @@ def AnalogTypeImpl : FIRRTLImplType<"Analog",
   let genVerifyDecl = true;
 }
 
-class BaseVectorTypeImpl<string name, string ElementType, list<Trait> traits = [], string BaseType = ElementType> : FIRRTLImplType<name, traits, BaseType> {
+class BaseVectorTypeImpl<string name, string ElementType, list<Trait> traits = [], string BaseType = ElementType> 
+  : FIRRTLImplType<name, traits # [DeclareTypeInterfaceMethods<FieldIDTypeInterface>], BaseType> {
   let summary = "a fixed size collection of elements, like an array.";
   let parameters = (ins
       TypeParameter<ElementType, "Type of vector elements">:$elementType,
@@ -168,35 +162,6 @@ class BaseVectorTypeImpl<string name, string ElementType, list<Trait> traits = [
     /// Return the recursive properties of the type.
     RecursiveTypeProperties getRecursiveTypeProperties() const;
 
-    /// Get an integer ID for the field. Field IDs start at 1, and are assigned
-    /// to each field in a vector in a recursive depth-first walk of all
-    /// elements. A field ID of 0 is used to reference the vector itself.
-    uint64_t getFieldID(uint64_t index);
-
-    /// Find the element index corresponding to the desired fieldID.  If the
-    /// fieldID corresponds to a field in nested under an element, it will
-    /// return the index of the parent element.
-    uint64_t getIndexForFieldID(uint64_t fieldID);
-
-    /// Find the index of the element that contains the given fieldID.
-    /// As well, rebase the fieldID to the element.
-    std::pair<uint64_t, uint64_t> getIndexAndSubfieldID(uint64_t fieldID);
-
-    /// Strip off a single layer of this type and return the sub-type and a
-    /// field ID targeting the same field, but rebased on the sub-type.
-    std::pair<circt::hw::FieldIDTypeInterface, uint64_t>
-    getSubTypeByFieldID(uint64_t fieldID);
-
-    /// Get the maximum field ID in this vector.  This is helpful for
-    /// constructing field IDs when this VectorType is nested in another
-    /// aggregate type.
-    uint64_t getMaxFieldID();
-
-    /// Returns the effective field id when treating the index field as the root
-    /// of the type.  Essentially maps a fieldID to a fieldID after a subfield
-    /// op. Returns the new id and whether the id is in the given child.
-    std::pair<uint64_t, bool> rootChildFieldID(uint64_t fieldID, uint64_t index);
-
     /// Const support.
     bool isConst();
     ElementType getElementTypePreservingConst();
@@ -207,7 +172,7 @@ class BaseVectorTypeImpl<string name, string ElementType, list<Trait> traits = [
   }] # firrtlExtraClassDeclaration;
 }
 
-def FVectorImpl : BaseVectorTypeImpl<"FVector","::circt::firrtl::FIRRTLBaseType", [FieldIDTypeInterface]> {
+def FVectorImpl : BaseVectorTypeImpl<"FVector","::circt::firrtl::FIRRTLBaseType"> {
   let firrtlExtraClassDeclaration = [{
     /// Return this type with any flip types recursively removed from itself.
     FIRRTLBaseType getPassiveType();
@@ -220,11 +185,12 @@ def FVectorImpl : BaseVectorTypeImpl<"FVector","::circt::firrtl::FIRRTLBaseType"
   }];
 }
 
-def OpenVectorImpl : BaseVectorTypeImpl<"OpenVector","::circt::firrtl::FIRRTLType", [DeclareTypeInterfaceMethods<FieldIDTypeInterface>]> {
+def OpenVectorImpl : BaseVectorTypeImpl<"OpenVector","::circt::firrtl::FIRRTLType"> {
   let genVerifyDecl = 1;
 }
 
-class BaseBundleTypeImpl<string name, string ElementType, list<Trait> traits = [], string BaseType = ElementType> : FIRRTLImplType<name, traits, BaseType> {
+class BaseBundleTypeImpl<string name, string ElementType, list<Trait> traits = [], string BaseType = ElementType>
+ : FIRRTLImplType<name, traits # [DeclareTypeInterfaceMethods<FieldIDTypeInterface>], BaseType> {
   let summary = "an aggregate of named elements. This is effectively a struct.";
   let parameters = (ins "ArrayRef<BundleElement>":$elements, "bool":$isConst);
   let storageClass = name # "TypeStorage";
@@ -238,7 +204,7 @@ class BaseBundleTypeImpl<string name, string ElementType, list<Trait> traits = [
 
   let extraClassDeclaration = [{
     using ElementType = }] # ElementType # [{;
-
+  
     /// Each element of a bundle, which is a name and type.
     struct BundleElement {
       StringAttr name;
@@ -262,7 +228,7 @@ class BaseBundleTypeImpl<string name, string ElementType, list<Trait> traits = [
 
     ArrayRef<BundleElement> getElements() const;
 
-    size_t getNumElements() { return getElements().size(); }
+    size_t getNumElements() const { return getElements().size(); }
 
     /// Look up an element's index by name.  This returns None on failure.
     std::optional<unsigned> getElementIndex(StringAttr name);
@@ -284,42 +250,10 @@ class BaseBundleTypeImpl<string name, string ElementType, list<Trait> traits = [
     ElementType getElementType(StringRef name);
 
     /// Look up an element type by index.
-    ElementType getElementType(size_t index);
+    ElementType getElementType(size_t index) const;
 
     /// Return the recursive properties of the type.
     RecursiveTypeProperties getRecursiveTypeProperties() const;
-
-    /// Get an integer ID for the field. Field IDs start at 1, and are assigned
-    /// to each field in a bundle in a recursive pre-order walk of all fields,
-    /// visiting all nested bundle fields.  A field ID of 0 is used to reference
-    /// the bundle itself. The ID can be used to uniquely identify any specific
-    /// field in this bundle.
-    uint64_t getFieldID(uint64_t index);
-
-    /// Find the element index corresponding to the desired fieldID.  If the
-    /// fieldID corresponds to a field in a nested bundle, it will return the
-    /// index of the parent field.
-    uint64_t getIndexForFieldID(uint64_t fieldID);
-
-    /// Find the index of the element that contains the given fieldID.
-    /// As well, rebase the fieldID to the element.
-    std::pair<uint64_t, uint64_t> getIndexAndSubfieldID(uint64_t fieldID);
-
-    /// Strip off a single layer of this type and return the sub-type and a
-    /// field ID targeting the same field, but rebased on the sub-type.
-    std::pair<circt::hw::FieldIDTypeInterface, uint64_t>
-    getSubTypeByFieldID(uint64_t fieldID);
-
-    /// Get the maximum field ID in this bundle.  This is helpful for
-    /// constructing field IDs when this BundleType is nested in another
-    /// aggregate type.
-    uint64_t getMaxFieldID();
-
-    /// Returns the effective field id when treating the index field as the root
-    /// of the type.  Essentially maps a fieldID to a fieldID after a subfield
-    /// op. Returns the new id and whether the id is in the given child.
-    std::pair<uint64_t, bool> rootChildFieldID(uint64_t fieldID,
-                                               uint64_t index);
 
     using iterator = ArrayRef<BundleElement>::iterator;
     iterator begin() const { return getElements().begin(); }
@@ -335,7 +269,7 @@ class BaseBundleTypeImpl<string name, string ElementType, list<Trait> traits = [
   }] # firrtlExtraClassDeclaration;
 }
 
-def BundleImpl : BaseBundleTypeImpl<"Bundle","::circt::firrtl::FIRRTLBaseType", [FieldIDTypeInterface]> {
+def BundleImpl : BaseBundleTypeImpl<"Bundle","::circt::firrtl::FIRRTLBaseType"> {
   let firrtlExtraClassDeclaration = [{
     /// Return this type with any flip types recursively removed from itself.
     FIRRTLBaseType getPassiveType();
@@ -348,11 +282,11 @@ def BundleImpl : BaseBundleTypeImpl<"Bundle","::circt::firrtl::FIRRTLBaseType", 
   }];
 }
 
-def OpenBundleImpl : BaseBundleTypeImpl<"OpenBundle","::circt::firrtl::FIRRTLType", [DeclareTypeInterfaceMethods<FieldIDTypeInterface>]> {
+def OpenBundleImpl : BaseBundleTypeImpl<"OpenBundle","::circt::firrtl::FIRRTLType"> {
   let genVerifyDecl = 1;
 }
 
-def FEnumImpl : FIRRTLImplType<"FEnum", [FieldIDTypeInterface]> {
+def FEnumImpl : FIRRTLImplType<"FEnum", [DeclareTypeInterfaceMethods<FieldIDTypeInterface>]> {
   let summary = "a sum type of named elements.";
   let parameters = (ins "ArrayRef<EnumElement>":$elements, "bool":$isConst);
   let storageClass = "FEnumTypeStorage";
@@ -384,7 +318,7 @@ def FEnumImpl : FIRRTLImplType<"FEnum", [FieldIDTypeInterface]> {
 
     ArrayRef<EnumElement> getElements() const;
 
-    size_t getNumElements() { return getElements().size(); }
+    size_t getNumElements() const { return getElements().size(); }
 
     FEnumType getConstType(bool isConst);
 
@@ -414,43 +348,11 @@ def FEnumImpl : FIRRTLImplType<"FEnum", [FieldIDTypeInterface]> {
     FIRRTLBaseType getElementType(StringRef name);
 
     /// Look up an element type by index.
-    FIRRTLBaseType getElementType(size_t index);
+    FIRRTLBaseType getElementType(size_t index) const;
     FIRRTLBaseType getElementTypePreservingConst(size_t index);
 
     /// Return the recursive properties of the type.
     RecursiveTypeProperties getRecursiveTypeProperties() const;
-
-    /// Get an integer ID for the field. Field IDs start at 1, and are assigned
-    /// to each field in a enum in a recursive pre-order walk of all fields,
-    /// visiting all nested enum fields.  A field ID of 0 is used to reference
-    /// the enum itself. The ID can be used to uniquely identify any specific
-    /// field in this enum.
-    uint64_t getFieldID(uint64_t index);
-
-    /// Find the element index corresponding to the desired fieldID.  If the
-    /// fieldID corresponds to a field in a nested enum, it will return the
-    /// index of the parent field.
-    uint64_t getIndexForFieldID(uint64_t fieldID);
-
-    /// Find the index of the element that contains the given fieldID.
-    /// As well, rebase the fieldID to the element.
-    std::pair<uint64_t, uint64_t> getIndexAndSubfieldID(uint64_t fieldID);
-
-    /// Strip off a single layer of this type and return the sub-type and a
-    /// field ID targeting the same field, but rebased on the sub-type.
-    std::pair<circt::hw::FieldIDTypeInterface, uint64_t>
-    getSubTypeByFieldID(uint64_t fieldID);
-
-    /// Get the maximum field ID in this bundle.  This is helpful for
-    /// constructing field IDs when this FEnumType is nested in another
-    /// aggregate type.
-    uint64_t getMaxFieldID();
-
-    /// Returns the effective field id when treating the index field as the root
-    /// of the type.  Essentially maps a fieldID to a fieldID after a subfield
-    /// op. Returns the new id and whether the id is in the given child.
-    std::pair<uint64_t, bool> rootChildFieldID(uint64_t fieldID,
-                                               uint64_t index);
 
     using iterator = ArrayRef<EnumElement>::iterator;
     iterator begin() const { return getElements().begin(); }
@@ -459,15 +361,15 @@ def FEnumImpl : FIRRTLImplType<"FEnum", [FieldIDTypeInterface]> {
 }
 
 def RefImpl : FIRRTLImplType<"Ref",
-                             [DeclareTypeInterfaceMethods<FieldIDTypeInterface>],
+                             [],
                              "::circt::firrtl::FIRRTLType"> {
-  let summary = [{
+  let summary = "A reference to a signal elsewhere.";
+  let description = [{
     A reference type, such as `firrtl.probe<uint<1>>` or `firrtl.rwprobe<uint<2>>`.
 
     Used for remote reads and writes of the wrapped base type.
 
-    Parameterized over the referenced base type,
-    which must be passive and for now must also be ground.
+    Parameterized over the referenced base type, with flips removed.
 
     Not a base type.
 
@@ -495,7 +397,7 @@ def RefImpl : FIRRTLImplType<"Ref",
   }];
 }
 
-def BaseTypeAliasImpl : FIRRTLImplType<"BaseTypeAlias", [FieldIDTypeInterface],
+def BaseTypeAliasImpl : FIRRTLImplType<"BaseTypeAlias", [DeclareTypeInterfaceMethods<FieldIDTypeInterface>],
                                         "::circt::firrtl::FIRRTLBaseType"> {
   let summary = "type alias for firrtl base types";
   let parameters =
@@ -517,21 +419,6 @@ def BaseTypeAliasImpl : FIRRTLImplType<"BaseTypeAlias", [FieldIDTypeInterface],
       // If a given `newInnerType` is identical to innerType, return `*this`
       // because we can reuse the type alias. Otherwise return `newInnerType`.
       FIRRTLBaseType getModifiedType(FIRRTLBaseType newInnerType);
-
-      /// Implement FieldIDTypeInterface.
-
-      /// Strip off a single layer of this type and return the sub-type and a
-      /// field ID targeting the same field, but rebased on the sub-type.
-      std::pair<circt::hw::FieldIDTypeInterface, uint64_t>
-      getSubTypeByFieldID(uint64_t fieldID);
-
-      /// Get the maximum field ID.
-      uint64_t getMaxFieldID();
-
-      /// Returns the effective field id when treating the index field as the root
-      /// of the type.  Essentially maps a fieldID to a fieldID after a subfield
-      /// op. Returns the new id and whether the id is in the given child.
-      std::pair<uint64_t, bool> rootChildFieldID(uint64_t fieldID, uint64_t index);
   }];
 
   let builders = [
@@ -544,39 +431,103 @@ def BaseTypeAliasImpl : FIRRTLImplType<"BaseTypeAlias", [FieldIDTypeInterface],
 // Non-Hardware Type Definitions
 //===----------------------------------------------------------------------===//
 
-def StringImpl : FIRRTLImplType<"String", [], "circt::firrtl::FIRRTLType"> {
+class PropImplType<string name,
+                   list<Trait> traits = [],
+                   string baseCppClass = "::circt::firrtl::FIRRTLType">
+  : FIRRTLImplType<name, traits, baseCppClass>;
+
+def ClassImpl : PropImplType<"Class", [
+  DeclareTypeInterfaceMethods<FieldIDTypeInterface>]> {
   let summary = [{
-    An unlimited length string type. Not representable in hardware.
+    An instance of a class.
+
+    Example:
+    ```mlir
+    !firrtl.class<@Module(in p0: !firrtl.uint<8>, out p1: !firrtl.uint<8>)>
+    ```
   }];
+  let parameters = (ins
+    "FlatSymbolRefAttr":$name,
+    ArrayRefParameter<"ClassElement">:$elements
+  );
+  let genStorageClass = false;
+  let genAccessors = false;
+  let builders = [
+    TypeBuilderWithInferredContext<(ins
+      "FlatSymbolRefAttr":$name,
+      "ArrayRef<ClassElement>":$elements
+    )>
+  ];
+  let extraClassDeclaration = [{
+    /// Helper to parse this type as a module interface.
+    static ParseResult parseInterface(
+      AsmParser &parser, ClassType &result);
+
+    StringRef getName() const;
+    FlatSymbolRefAttr getNameAttr() const;
+
+    ArrayRef<ClassElement> getElements() const;
+    size_t getNumElements() const { return getElements().size(); }
+    const ClassElement &getElement(IntegerAttr index) const;
+    const ClassElement &getElement(size_t index) const;
+    std::optional<uint64_t> getElementIndex(StringRef fieldName) const;
+
+    /// Helper to print this type as a module interface.
+    /// Example:
+    /// ```
+    /// @MyClass(in %port: !firrtl.uint<8>, out o: !firrtl.uint<8>)
+    /// ```
+    void printInterface(AsmPrinter &p) const;
+  }];
+}
+
+def AnyRefImpl : PropImplType<"AnyRef"> {
+  let summary = "A reference to an instance of any class.";
+  let description = [{
+    A reference of type AnyRef can be used in ports, property assignments, and
+    any other Property "plumbing" ops. But it is opaque, and references to
+    objects of AnyRef type cannot be "dereferenced". There is no information
+    about the referred to object's fields, so subfield access, etc. is illegal.
+  }];
+  let genStorageClass = true;
+}
+
+def StringImpl : PropImplType<"String"> {
+  let summary = "An unlimited length string type. Not representable in hardware.";
   let parameters = (ins);
   let genStorageClass = true;
 }
 
-def BigIntImpl : FIRRTLImplType<"BigInt", [], "circt::firrtl::FIRRTLType"> {
-  let summary = [{
-    An unlimited length signed integer type.  Not representable in hardware.
-  }];
+def IntegerImpl : PropImplType<"FInteger"> {
+  let summary = "An unlimited length signed integer type.  Not representable in hardware.";
   let parameters = (ins);
   let genStorageClass = true;
 }
 
-def ListImpl : FIRRTLImplType<"List", [], "circt::firrtl::FIRRTLType"> {
-  let summary = [{
-    A typed property list of any length.  Not representable in hardware.
-  }];
+def ListImpl : PropImplType<"List"> {
+  let summary = "A typed property list of any length.  Not representable in hardware.";
   let parameters = (ins TypeParameter<"circt::firrtl::PropertyType", "element type">:$elementType);
   let genStorageClass = true;
   let genAccessors = true;
 }
 
-def MapImpl : FIRRTLImplType<"Map", [], "circt::firrtl::FIRRTLType"> {
-  let summary = [{
-    A typed map of properties.  Not representable in hardware.
-  }];
-  let parameters = (ins TypeParameter<"circt::firrtl::PropertyType", "key type">:$keyType,
-                    TypeParameter<"circt::firrtl::PropertyType", "value type">:$valueType);
+def PathImpl : PropImplType<"Path"> {
+  let summary = "A path to a hardware entity.  Not representable in hardware.";
+  let parameters = (ins);
   let genStorageClass = true;
   let genAccessors = true;
+}
+
+def BoolImpl : PropImplType<"Bool"> {
+  let summary = "A boolean property.  Not representable in hardware.";
+  let parameters = (ins);
+  let genStorageClass = true;
+}
+
+def DoubleImpl : PropImplType<"Double"> {
+  let summary = "A double property.  Not representable in hardware.";
+  let parameters = (ins);
+  let genStorageClass = true;
 }
 
 #endif // CIRCT_DIALECT_FIRRTL_FIRRTLTYPESIMPL_TD

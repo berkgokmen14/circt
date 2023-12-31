@@ -28,3 +28,31 @@ target_link_libraries(circt-capi-om-test
   MLIRCAPIIR
   CIRCTCAPIOM
 )
+
+add_llvm_executable(circt-capi-firrtl-test
+  PARTIAL_SOURCES_INTENDED
+  firrtl.c
+)
+llvm_update_compile_flags(circt-capi-firrtl-test)
+
+target_link_libraries(circt-capi-firrtl-test
+  PRIVATE
+
+  MLIRCAPIIR
+  CIRCTCAPIFIRRTL
+  CIRCTCAPIExportFIRRTL
+)
+
+add_llvm_executable(circt-capi-firtool-test
+  PARTIAL_SOURCES_INTENDED
+  firtool.c
+)
+llvm_update_compile_flags(circt-capi-firtool-test)
+
+target_link_libraries(circt-capi-firtool-test
+  PRIVATE
+
+  MLIRCAPIIR
+  CIRCTCAPIFIRRTL
+  CIRCTCAPIFirtool
+)

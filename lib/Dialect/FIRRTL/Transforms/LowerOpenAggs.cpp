@@ -1,5 +1,4 @@
 //===- LowerOpenAggs.cpp - Lower Open Aggregate Types -----------*- C++ -*-===//
-
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -11,7 +10,7 @@
 // aggregate types with hardware aggregates, with non-hardware fields
 // expanded out as with LowerTypes.
 //
-// This pass is ref-specific for now.
+// This pass supports reference and property types.
 //
 //===----------------------------------------------------------------------===//
 
@@ -21,6 +20,7 @@
 #include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
 #include "circt/Dialect/FIRRTL/FIRRTLUtils.h"
 #include "circt/Dialect/FIRRTL/FIRRTLVisitors.h"
+#include "circt/Dialect/FIRRTL/FieldRefCache.h"
 #include "circt/Dialect/FIRRTL/Passes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
@@ -28,6 +28,7 @@
 #include "mlir/IR/Visitors.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FormatAdapters.h"
 #include "llvm/Support/FormatVariadic.h"
 
 #include <vector>
@@ -39,7 +40,7 @@ using namespace firrtl;
 
 namespace {
 
-/// Information on non-hw (ref) elements.
+/// Information on non-hw (ref/prop) elements.
 struct NonHWField {
   /// Type of the field, not a hardware type.
   FIRRTLType type;
@@ -51,7 +52,7 @@ struct NonHWField {
   SmallString<16> suffix;
 
   /// Print this structure to the specified stream.
-  void print(raw_ostream &os) const;
+  void print(raw_ostream &os, unsigned indent = 0) const;
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   /// Print this structure to llvm::errs().
@@ -59,21 +60,26 @@ struct NonHWField {
 #endif
 };
 
-/// Mapped port info
-struct PortMappingInfo {
-  /// Preserve this port, map use of old directly to new.
+/// Structure that describes how a given operation with a type (which may or may
+/// not contain non-hw typess) should be lowered to one or more operations with
+/// other types.
+struct MappingInfo {
+  /// Preserve this type.  Map any uses of old directly to new.
   bool identity;
 
-  // When not identity, the port will be split:
+  // When not identity, the type will be split:
 
   /// Type of the hardware-only portion.  May be null, indicating all non-hw.
   Type hwType;
+
   /// List of the individual non-hw fields to be split out.
   SmallVector<NonHWField, 0> fields;
 
-  /// List of fieldID's of interior nodes that map to nothing.
-  /// HW-only projection is empty, and not leaf.
+  /// List of fieldID's of interior nodes that map to nothing.  HW-only
+  /// projection is empty, and not leaf.
   SmallVector<uint64_t, 0> mapToNullInteriors;
+
+  hw::InnerSymAttr newSym = {};
 
   /// Determine number of types this argument maps to.
   size_t count(bool includeErased = false) const {
@@ -83,7 +89,7 @@ struct PortMappingInfo {
   }
 
   /// Print this structure to the specified stream.
-  void print(raw_ostream &os) const;
+  void print(raw_ostream &os, unsigned indent = 0) const;
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   /// Print this structure to llvm::errs().
@@ -91,47 +97,49 @@ struct PortMappingInfo {
 #endif
 };
 
-inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
-                                     const NonHWField &field) {
-  field.print(os);
-  return os;
-}
-
-inline llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
-                                     const PortMappingInfo &pmi) {
-  pmi.print(os);
-  return os;
-}
-
 } // namespace
 
-void NonHWField::print(llvm::raw_ostream &os) const {
-  os << llvm::formatv("non-HW(type={0}, fieldID={1}, isFlip={2}, suffix={3})",
-                      type, fieldID, isFlip, suffix);
+void NonHWField::print(llvm::raw_ostream &os, unsigned indent) const {
+  os << llvm::formatv("{0}- type: {2}\n"
+                      "{1}fieldID: {3}\n"
+                      "{1}isFlip: {4}\n"
+                      "{1}suffix: \"{5}\"\n",
+                      llvm::fmt_pad("", indent, 0),
+                      llvm::fmt_pad("", indent + 2, 0), type, fieldID, isFlip,
+                      suffix);
 }
-void PortMappingInfo::print(llvm::raw_ostream &os) const {
+void MappingInfo::print(llvm::raw_ostream &os, unsigned indent) const {
   if (identity) {
-    os << "(identity)";
+    os << "<identity>";
     return;
   }
 
-  os << "[[hw portion: ";
+  os.indent(indent) << "hardware: ";
   if (hwType)
     os << hwType;
   else
-    os << "(none)";
-  os << ", fields: <";
-  llvm::interleaveComma(fields, os);
-  os << ">, mappedToNull: <";
-  llvm::interleaveComma(mapToNullInteriors, os);
-  os << ">]]";
+    os << "<none>";
+  os << "\n";
+
+  os.indent(indent) << "non-hardware:\n";
+  for (auto &field : fields)
+    field.print(os, indent + 2);
+
+  os.indent(indent) << "mappedToNull:\n";
+  for (auto &null : mapToNullInteriors)
+    os.indent(indent + 2) << "- " << null << "\n";
+
+  os.indent(indent) << "newSym: ";
+  if (newSym)
+    os << newSym;
+  else
+    os << "<empty>";
 }
 
 template <typename Range>
-LogicalResult walkPortMappings(
+LogicalResult walkMappings(
     Range &&range, bool includeErased,
-    llvm::function_ref<LogicalResult(size_t, PortMappingInfo &, size_t)>
-        callback) {
+    llvm::function_ref<LogicalResult(size_t, MappingInfo &, size_t)> callback) {
   size_t count = 0;
   for (const auto &[index, pmi] : llvm::enumerate(range)) {
     if (failed(callback(index, pmi, count)))
@@ -158,6 +166,7 @@ public:
   using FIRRTLVisitor<Visitor, LogicalResult>::visitStmt;
 
   LogicalResult visitDecl(InstanceOp op);
+  LogicalResult visitDecl(WireOp op);
 
   LogicalResult visitExpr(OpenSubfieldOp op);
   LogicalResult visitExpr(OpenSubindexOp op);
@@ -169,17 +178,27 @@ public:
     if (!llvm::all_of(op->getOperandTypes(), notOpenAggType) ||
         !llvm::all_of(op->getResultTypes(), notOpenAggType))
       return op->emitOpError(
-          "unhandled use or producer of types containing references");
+          "unhandled use or producer of types containing non-hw types");
     return success();
   }
 
   LogicalResult visitInvalidOp(Operation *op) { return visitUnhandledOp(op); }
 
+  /// Whether any changes were made.
+  bool madeChanges() const { return changesMade; }
+
 private:
-  /// Convert a type to its HW-only projection.,
-  /// Gather non-hw elements encountered and their names / positions.
-  /// Returns a PortMappingInfo with its findings.
-  PortMappingInfo mapPortType(Type type);
+  /// Convert a type to its HW-only projection, adjusting symbols.  Gather
+  /// non-hw elements encountered and their names / positions.  Returns a
+  /// MappingInfo with its findings.
+  FailureOr<MappingInfo> mapType(Type type, Location errorLoc,
+                                 hw::InnerSymAttr sym = {});
+
+  /// Helper to record changes that may have been made.
+  void recordChanges(bool changed) {
+    if (changed)
+      changesMade = true;
+  }
 
   MLIRContext *context;
 
@@ -188,19 +207,31 @@ private:
   /// These values are available wherever the root is used.
   DenseMap<FieldRef, Value> nonHWValues;
 
-  /// Map from port to its hw-only aggregate equivalent.
+  /// Map from original to its hw-only aggregate equivalent.
   DenseMap<Value, Value> hwOnlyAggMap;
 
   /// List of operations to erase at the end.
   SmallVector<Operation *> opsToErase;
+
+  /// FieldRef cache.  Be careful to only use this for operations
+  /// in the original IR / not mutated.
+  FieldRefCache refs;
+
+  /// Whether IR was changed.
+  bool changesMade = false;
 };
 } // namespace
 
 LogicalResult Visitor::visit(FModuleLike mod) {
   auto ports = mod.getPorts();
 
-  SmallVector<PortMappingInfo, 16> portMappings(
-      llvm::map_range(ports, [&](auto &p) { return mapPortType(p.type); }));
+  SmallVector<MappingInfo, 16> portMappings;
+  for (auto &port : ports) {
+    auto pmi = mapType(port.type, port.loc, port.sym);
+    if (failed(pmi))
+      return failure();
+    portMappings.push_back(*pmi);
+  }
 
   /// Total number of types mapped to.
   /// Include erased ports.
@@ -215,14 +246,22 @@ LogicalResult Visitor::visit(FModuleLike mod) {
   BitVector portsToErase(countWithErased);
 
   /// Go through each port mapping, gathering information about all new ports.
-  LLVM_DEBUG(llvm::dbgs() << "Ports for "
-                          << cast<mlir::SymbolOpInterface>(*mod).getName()
-                          << ":\n");
-  auto result = walkPortMappings(
+  LLVM_DEBUG({
+    llvm::dbgs().indent(2) << "- name: "
+                           << cast<mlir::SymbolOpInterface>(*mod).getNameAttr()
+                           << "\n";
+    llvm::dbgs().indent(4) << "ports:\n";
+  });
+  auto result = walkMappings(
       portMappings, /*includeErased=*/true,
       [&](auto index, auto &pmi, auto newIndex) -> LogicalResult {
-        LLVM_DEBUG(llvm::dbgs() << "\t" << ports[index].name << " : "
-                                << ports[index].type << " => " << pmi << "\n");
+        LLVM_DEBUG({
+          llvm::dbgs().indent(6) << "- name: " << ports[index].name << "\n";
+          llvm::dbgs().indent(8) << "type: " << ports[index].type << "\n";
+          llvm::dbgs().indent(8) << "mapping:\n";
+          pmi.print(llvm::dbgs(), /*indent=*/10);
+          llvm::dbgs() << "\n";
+        });
         // Index for inserting new points next to this point.
         // (Immediately after current port's index).
         auto idxOfInsertPoint = index + 1;
@@ -239,22 +278,18 @@ LogicalResult Visitor::visit(FModuleLike mod) {
         if (pmi.hwType) {
           auto newPort = port;
           newPort.type = pmi.hwType;
+          newPort.sym = pmi.newSym;
           newPorts.emplace_back(idxOfInsertPoint, newPort);
 
-          if (port.sym && llvm::any_of(port.sym, [&](auto &prop) {
-                return prop.getFieldID() != 0;
-              }))
-            return mlir::emitError(port.loc)
-                   << "symbols on fields of open aggregates not handled yet";
+          assert(!port.sym ||
+                 (pmi.newSym && port.sym.size() == pmi.newSym.size()));
 
           // If want to run this pass later, need to fixup annotations.
           if (!port.annotations.empty())
             return mlir::emitError(port.loc)
                    << "annotations on open aggregates not handled yet";
         } else {
-          if (port.sym)
-            return mlir::emitError(port.loc)
-                   << "symbol found on aggregate with no HW";
+          assert(!port.sym && !pmi.newSym);
           if (!port.annotations.empty())
             return mlir::emitError(port.loc)
                    << "annotations found on aggregate with no HW";
@@ -277,6 +312,7 @@ LogicalResult Visitor::visit(FModuleLike mod) {
 
   // Insert the new ports!
   mod.insertPorts(newPorts);
+  recordChanges(!newPorts.empty());
 
   assert(mod->getNumRegions() == 1);
 
@@ -291,46 +327,49 @@ LogicalResult Visitor::visit(FModuleLike mod) {
   if (auto *block = getBodyBlock(mod)) {
     // Create mappings for split ports.
     auto result =
-        walkPortMappings(portMappings, /*includeErased=*/true,
-                         [&](auto index, PortMappingInfo &pmi, auto newIndex) {
-                           // Nothing to do for identity.
-                           if (pmi.identity)
-                             return success();
+        walkMappings(portMappings, /*includeErased=*/true,
+                     [&](auto index, MappingInfo &pmi, auto newIndex) {
+                       // Nothing to do for identity.
+                       if (pmi.identity)
+                         return success();
 
-                           // newIndex is index of this port after insertion.
-                           // This will be removed.
-                           assert(portsToErase.test(newIndex));
-                           auto oldPort = block->getArgument(newIndex);
-                           auto newPortIndex = newIndex;
+                       // newIndex is index of this port after insertion.
+                       // This will be removed.
+                       assert(portsToErase.test(newIndex));
+                       auto oldPort = block->getArgument(newIndex);
+                       auto newPortIndex = newIndex;
 
-                           // Create mappings for split ports.
-                           if (pmi.hwType)
-                             hwOnlyAggMap[oldPort] =
-                                 block->getArgument(++newPortIndex);
+                       // Create mappings for split ports.
+                       if (pmi.hwType)
+                         hwOnlyAggMap[oldPort] =
+                             block->getArgument(++newPortIndex);
 
-                           for (auto &field : pmi.fields) {
-                             auto ref = FieldRef(oldPort, field.fieldID);
-                             auto newVal = block->getArgument(++newPortIndex);
-                             nonHWValues[ref] = newVal;
-                           }
-                           for (auto fieldID : pmi.mapToNullInteriors) {
-                             auto ref = FieldRef(oldPort, fieldID);
-                             assert(!nonHWValues.count(ref));
-                             nonHWValues[ref] = {};
-                           }
+                       for (auto &field : pmi.fields) {
+                         auto ref = FieldRef(oldPort, field.fieldID);
+                         auto newVal = block->getArgument(++newPortIndex);
+                         nonHWValues[ref] = newVal;
+                       }
+                       for (auto fieldID : pmi.mapToNullInteriors) {
+                         auto ref = FieldRef(oldPort, fieldID);
+                         assert(!nonHWValues.count(ref));
+                         nonHWValues[ref] = {};
+                       }
 
-                           return success();
-                         });
+                       return success();
+                     });
     if (failed(result))
       return failure();
 
     // Walk the module.
+    LLVM_DEBUG(llvm::dbgs().indent(4) << "body:\n");
     if (block
             ->walk<mlir::WalkOrder::PreOrder>([&](Operation *op) -> WalkResult {
               return dispatchVisitor(op);
             })
             .wasInterrupted())
       return failure();
+
+    assert(opsToErase.empty() || madeChanges());
 
     // Cleanup dead operations.
     for (auto &op : llvm::reverse(opsToErase))
@@ -339,11 +378,17 @@ LogicalResult Visitor::visit(FModuleLike mod) {
 
   // Drop dead ports.
   mod.erasePorts(portsToErase);
+  recordChanges(portsToErase.any());
+
+  LLVM_DEBUG(refs.printStats(llvm::dbgs()));
 
   return success();
 }
 
 LogicalResult Visitor::visitExpr(OpenSubfieldOp op) {
+  // Changes will be made.
+  recordChanges(true);
+
   // We're indexing into an OpenBundle, which contains some non-hw elements and
   // may contain hw elements.
 
@@ -371,7 +416,7 @@ LogicalResult Visitor::visitExpr(OpenSubfieldOp op) {
   // Chase this to its original root.
   // If the FieldRef for this selection has a new home,
   // RAUW to that value and this op is dead.
-  auto resultRef = getFieldRefFromValue(op.getResult());
+  auto resultRef = refs.getFieldRefFromValue(op.getResult());
   auto nonHWForResult = nonHWValues.find(resultRef);
   if (nonHWForResult != nonHWValues.end()) {
     // If has nonHW portion, RAUW to it.
@@ -409,6 +454,8 @@ LogicalResult Visitor::visitExpr(OpenSubfieldOp op) {
 }
 
 LogicalResult Visitor::visitExpr(OpenSubindexOp op) {
+  // Changes will be made.
+  recordChanges(true);
 
   // In all cases, this operation will be dead and should be removed.
   opsToErase.push_back(op);
@@ -416,7 +463,7 @@ LogicalResult Visitor::visitExpr(OpenSubindexOp op) {
   // Chase this to its original root.
   // If the FieldRef for this selection has a new home,
   // RAUW to that value and this op is dead.
-  auto resultRef = getFieldRefFromValue(op.getResult());
+  auto resultRef = refs.getFieldRefFromValue(op.getResult());
   auto nonHWForResult = nonHWValues.find(resultRef);
   if (nonHWForResult != nonHWValues.end()) {
     // If has nonHW portion, RAUW to it.
@@ -448,8 +495,14 @@ LogicalResult Visitor::visitExpr(OpenSubindexOp op) {
 LogicalResult Visitor::visitDecl(InstanceOp op) {
   // Rewrite ports same strategy as for modules.
 
-  SmallVector<PortMappingInfo, 16> portMappings(llvm::map_range(
-      op.getResultTypes(), [&](auto type) { return mapPortType(type); }));
+  SmallVector<MappingInfo, 16> portMappings;
+
+  for (auto type : op.getResultTypes()) {
+    auto pmi = mapType(type, op.getLoc());
+    if (failed(pmi))
+      return failure();
+    portMappings.push_back(*pmi);
+  }
 
   /// Total number of types mapped to.
   size_t countWithErased = 0;
@@ -463,12 +516,23 @@ LogicalResult Visitor::visitDecl(InstanceOp op) {
   BitVector portsToErase(countWithErased);
 
   /// Go through each port mapping, gathering information about all new ports.
-  LLVM_DEBUG(llvm::dbgs() << "Ports for " << op << ":\n");
-  auto result = walkPortMappings(
+  LLVM_DEBUG({
+    llvm::dbgs().indent(6) << "- instance:\n";
+    llvm::dbgs().indent(10) << "name: " << op.getInstanceNameAttr() << "\n";
+    llvm::dbgs().indent(10) << "module: " << op.getModuleNameAttr() << "\n";
+    llvm::dbgs().indent(10) << "ports:\n";
+  });
+  auto result = walkMappings(
       portMappings, /*includeErased=*/true,
       [&](auto index, auto &pmi, auto newIndex) -> LogicalResult {
-        LLVM_DEBUG(llvm::dbgs() << "\t" << op.getPortName(index) << " : "
-                                << op.getType(index) << " => " << pmi << "\n");
+        LLVM_DEBUG({
+          llvm::dbgs().indent(12)
+              << "- name: " << op.getPortName(index) << "\n";
+          llvm::dbgs().indent(14) << "type: " << op.getType(index) << "\n";
+          llvm::dbgs().indent(14) << "mapping:\n";
+          pmi.print(llvm::dbgs(), /*indent=*/16);
+          llvm::dbgs() << "\n";
+        });
         // Index for inserting new points next to this point.
         // (Immediately after current port's index).
         auto idxOfInsertPoint = index + 1;
@@ -519,6 +583,9 @@ LogicalResult Visitor::visitDecl(InstanceOp op) {
   if (newPorts.empty())
     return success();
 
+  // Changes will be made.
+  recordChanges(true);
+
   // Create new instance op with desired ports.
 
   // TODO: add and erase ports without intermediate + various array attributes.
@@ -527,9 +594,9 @@ LogicalResult Visitor::visitDecl(InstanceOp op) {
   ImplicitLocOpBuilder builder(op.getLoc(), op);
   auto newInst = tempOp.erasePorts(builder, portsToErase);
 
-  auto mappingResult = walkPortMappings(
+  auto mappingResult = walkMappings(
       portMappings, /*includeErased=*/false,
-      [&](auto index, PortMappingInfo &pmi, auto newIndex) {
+      [&](auto index, MappingInfo &pmi, auto newIndex) {
         // Identity means index -> newIndex.
         auto oldResult = op.getResult(index);
         if (pmi.identity) {
@@ -566,35 +633,99 @@ LogicalResult Visitor::visitDecl(InstanceOp op) {
   return success();
 }
 
+LogicalResult Visitor::visitDecl(WireOp op) {
+  auto pmi = mapType(op.getResultTypes()[0], op.getLoc(), op.getInnerSymAttr());
+  if (failed(pmi))
+    return failure();
+  MappingInfo mappings = *pmi;
+
+  LLVM_DEBUG({
+    llvm::dbgs().indent(6) << "- wire:\n";
+    llvm::dbgs().indent(10) << "name: " << op.getNameAttr() << "\n";
+    llvm::dbgs().indent(10) << "type: " << op.getType(0) << "\n";
+    llvm::dbgs().indent(12) << "mapping:\n";
+    mappings.print(llvm::dbgs(), 14);
+    llvm::dbgs() << "\n";
+  });
+
+  if (mappings.identity)
+    return success();
+
+  // Changes will be made.
+  recordChanges(true);
+
+  ImplicitLocOpBuilder builder(op.getLoc(), op);
+
+  if (!op.getAnnotations().empty())
+    return mlir::emitError(op.getLoc())
+           << "annotations on open aggregates not handled yet";
+
+  // Create the new HW wire.
+  if (mappings.hwType)
+    hwOnlyAggMap[op.getResult()] =
+        builder
+            .create<WireOp>(mappings.hwType, op.getName(), op.getNameKind(),
+                            op.getAnnotations(), mappings.newSym,
+                            op.getForceable())
+            .getResult();
+
+  // Create the non-HW wires.  Non-HW wire names are always droppable.
+  for (auto &[type, fieldID, _, suffix] : mappings.fields)
+    nonHWValues[FieldRef(op.getResult(), fieldID)] =
+        builder
+            .create<WireOp>(type,
+                            builder.getStringAttr(Twine(op.getName()) + suffix),
+                            NameKindEnum::DroppableName)
+            .getResult();
+
+  for (auto fieldID : mappings.mapToNullInteriors)
+    nonHWValues[FieldRef(op.getResult(), fieldID)] = {};
+
+  opsToErase.push_back(op);
+
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // Type Conversion
 //===----------------------------------------------------------------------===//
 
-PortMappingInfo Visitor::mapPortType(Type type) {
-  PortMappingInfo pi{false, {}, {}, {}};
+FailureOr<MappingInfo> Visitor::mapType(Type type, Location errorLoc,
+                                        hw::InnerSymAttr sym) {
+  MappingInfo pi{false, {}, {}, {}};
   auto ftype = type_dyn_cast<FIRRTLType>(type);
-  // Ports that aren't open aggregates are left alone.
+  // Anything that isn't an open aggregates is left alone.
   if (!ftype || !isa<OpenBundleType, OpenVectorType>(ftype)) {
     pi.identity = true;
     return pi;
   }
 
+  SmallVector<hw::InnerSymPropertiesAttr> newProps;
+
   // NOLINTBEGIN(misc-no-recursion)
   auto recurse = [&](auto &&f, FIRRTLType type, const Twine &suffix = "",
-                     bool flip = false,
-                     uint64_t fieldID = 0) -> FIRRTLBaseType {
-    return TypeSwitch<FIRRTLType, FIRRTLBaseType>(type)
-        .Case<FIRRTLBaseType>([](auto base) { return base; })
-        .template Case<OpenBundleType>(
-            [&](OpenBundleType obTy) -> FIRRTLBaseType {
+                     bool flip = false, uint64_t fieldID = 0,
+                     uint64_t newFieldID = 0) -> FailureOr<FIRRTLBaseType> {
+    auto newType =
+        TypeSwitch<FIRRTLType, FailureOr<FIRRTLBaseType>>(type)
+            .Case<FIRRTLBaseType>([](auto base) { return base; })
+            .template Case<OpenBundleType>([&](OpenBundleType obTy)
+                                               -> FailureOr<FIRRTLBaseType> {
               SmallVector<BundleType::BundleElement> hwElements;
+              uint64_t id = 0;
               for (const auto &[index, element] :
-                   llvm::enumerate(obTy.getElements()))
-                if (auto base =
-                        f(f, element.type, suffix + "_" + element.name.strref(),
-                          flip ^ element.isFlip,
-                          fieldID + obTy.getFieldID(index)))
-                  hwElements.emplace_back(element.name, element.isFlip, base);
+                   llvm::enumerate(obTy.getElements())) {
+                auto base =
+                    f(f, element.type, suffix + "_" + element.name.strref(),
+                      flip ^ element.isFlip, fieldID + obTy.getFieldID(index),
+                      newFieldID + id + 1);
+                if (failed(base))
+                  return failure();
+                if (*base) {
+                  hwElements.emplace_back(element.name, element.isFlip, *base);
+                  id += hw::FieldIdImpl::getMaxFieldID(*base) + 1;
+                }
+              }
 
               if (hwElements.empty()) {
                 pi.mapToNullInteriors.push_back(fieldID);
@@ -603,18 +734,23 @@ PortMappingInfo Visitor::mapPortType(Type type) {
 
               return BundleType::get(context, hwElements, obTy.isConst());
             })
-        .template Case<OpenVectorType>(
-            [&](OpenVectorType ovTy) -> FIRRTLBaseType {
+            .template Case<OpenVectorType>([&](OpenVectorType ovTy)
+                                               -> FailureOr<FIRRTLBaseType> {
+              uint64_t id = 0;
               FIRRTLBaseType convert;
               // Walk for each index to extract each leaf separately, but expect
               // same hw-only type for all.
               for (auto idx : llvm::seq<size_t>(0U, ovTy.getNumElements())) {
                 auto hwElementType =
                     f(f, ovTy.getElementType(), suffix + "_" + Twine(idx), flip,
-                      fieldID + ovTy.getFieldID(idx));
-                assert((!convert || convert == hwElementType) &&
+                      fieldID + ovTy.getFieldID(idx), newFieldID + id + 1);
+                if (failed(hwElementType))
+                  return failure();
+                assert((!convert || convert == *hwElementType) &&
                        "expected same hw type for all elements");
-                convert = hwElementType;
+                convert = *hwElementType;
+                if (convert)
+                  id += hw::FieldIdImpl::getMaxFieldID(convert) + 1;
               }
 
               if (!convert) {
@@ -625,22 +761,59 @@ PortMappingInfo Visitor::mapPortType(Type type) {
               return FVectorType::get(convert, ovTy.getNumElements(),
                                       ovTy.isConst());
             })
-        .template Case<RefType>([&](auto ref) {
-          // Do this better, don't re-serialize so much?
-          auto f = NonHWField{ref, fieldID, flip, {}};
-          suffix.toVector(f.suffix);
-          pi.fields.emplace_back(std::move(f));
-          return FIRRTLBaseType{};
-        })
-        .Default([&](auto _) {
-          pi.mapToNullInteriors.push_back(fieldID);
-          return FIRRTLBaseType{};
-        });
+            .template Case<RefType>([&](RefType ref) {
+              auto f = NonHWField{ref, fieldID, flip, {}};
+              suffix.toVector(f.suffix);
+              pi.fields.emplace_back(std::move(f));
+              return FIRRTLBaseType{};
+            })
+            // This is identical to the RefType case above, but copied out
+            // to try to fix a bug when combining + auto w/MSVC.
+            .template Case<PropertyType>([&](PropertyType prop) {
+              auto f = NonHWField{prop, fieldID, flip, {}};
+              suffix.toVector(f.suffix);
+              pi.fields.emplace_back(std::move(f));
+              return FIRRTLBaseType{};
+            })
+            .Default([&](auto _) {
+              pi.mapToNullInteriors.push_back(fieldID);
+              return FIRRTLBaseType{};
+            });
+    if (failed(newType))
+      return failure();
+
+    // If there's a symbol on this, add it with adjusted fieldID.
+    if (sym)
+      if (auto symOnThis = sym.getSymIfExists(fieldID)) {
+        if (!*newType)
+          return mlir::emitError(errorLoc, "inner symbol ")
+                 << symOnThis << " mapped to non-HW type";
+        newProps.push_back(hw::InnerSymPropertiesAttr::get(
+            context, symOnThis, newFieldID,
+            StringAttr::get(context, "public")));
+      }
+    return newType;
   };
 
-  pi.hwType = recurse(recurse, ftype);
+  auto hwType = recurse(recurse, ftype);
+  if (failed(hwType))
+    return failure();
+  pi.hwType = *hwType;
+
   assert(pi.hwType != type);
   // NOLINTEND(misc-no-recursion)
+
+  if (sym) {
+    assert(sym.size() == newProps.size());
+
+    if (!pi.hwType && !newProps.empty())
+      return mlir::emitError(errorLoc, "inner symbol on non-HW type");
+
+    llvm::sort(newProps, [](auto &p, auto &q) {
+      return p.getFieldID() < q.getFieldID();
+    });
+    pi.newSym = hw::InnerSymAttr::get(context, newProps);
+  }
 
   return pi;
 }
@@ -658,18 +831,24 @@ struct LowerOpenAggsPass : public LowerOpenAggsBase<LowerOpenAggsPass> {
 
 // This is the main entrypoint for the lowering pass.
 void LowerOpenAggsPass::runOnOperation() {
-  LLVM_DEBUG(
-      llvm::dbgs() << "===- Running Lower Open Aggregates Pass "
-                      "------------------------------------------------===\n");
+  LLVM_DEBUG(llvm::dbgs() << "===- Running Lower Open Aggregates Pass "
+                             "-------------------------------------===\n");
   SmallVector<Operation *, 0> ops(getOperation().getOps<FModuleLike>());
 
+  LLVM_DEBUG(llvm::dbgs() << "Visiting modules:\n");
+  std::atomic<bool> madeChanges = false;
   auto result = failableParallelForEach(&getContext(), ops, [&](Operation *op) {
     Visitor visitor(&getContext());
-    return visitor.visit(cast<FModuleLike>(op));
+    auto result = visitor.visit(cast<FModuleLike>(op));
+    if (visitor.madeChanges())
+      madeChanges = true;
+    return result;
   });
 
   if (result.failed())
     signalPassFailure();
+  if (!madeChanges)
+    markAllAnalysesPreserved();
 }
 
 /// This is the pass constructor.

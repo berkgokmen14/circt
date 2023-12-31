@@ -13,8 +13,10 @@
 #ifndef CIRCT_DIALECT_HW_HWOPINTERFACES_H
 #define CIRCT_DIALECT_HW_HWOPINTERFACES_H
 
+#include "circt/Dialect/HW/HWInstanceImplementation.h"
 #include "circt/Dialect/HW/HWTypes.h"
 #include "circt/Dialect/HW/InnerSymbolTable.h"
+#include "circt/Support/InstanceGraphInterface.h"
 #include "circt/Support/LLVM.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
@@ -22,95 +24,9 @@
 namespace circt {
 namespace hw {
 
-/// This holds the name, type, direction of a module's ports
-struct PortInfo : public ModulePort {
-  /// This is the argument index or the result index depending on the direction.
-  /// "0" for an output means the first output, "0" for a in/inout means the
-  /// first argument.
-  size_t argNum = ~0U;
-
-  /// The optional symbol for this port.
-  InnerSymAttr sym = {};
-  LocationAttr loc = {};
-
-  StringRef getName() const { return name.getValue(); }
-  bool isInput() const { return dir == ModulePort::Direction::Input; }
-  bool isOutput() const { return dir == ModulePort::Direction::Output; }
-  bool isInOut() const { return dir == ModulePort::Direction::InOut; }
-
-  /// Return a unique numeric identifier for this port.
-  ssize_t getId() const { return isOutput() ? argNum : (-1 - argNum); };
-};
-
-/// This holds a decoded list of input/inout and output ports for a module or
-/// instance.
-struct ModulePortInfo {
-  explicit ModulePortInfo(ArrayRef<PortInfo> inputs, ArrayRef<PortInfo> outputs)
-      : inputs(inputs.begin(), inputs.end()),
-        outputs(outputs.begin(), outputs.end()) {}
-
-  explicit ModulePortInfo(ArrayRef<PortInfo> mergedPorts) {
-    inputs.reserve(mergedPorts.size());
-    outputs.reserve(mergedPorts.size());
-    for (auto port : mergedPorts) {
-      if (port.isOutput())
-        outputs.push_back(port);
-      else
-        inputs.push_back(port);
-    }
-  }
-
-  /// This contains a list of the input and inout ports.
-  SmallVector<PortInfo> inputs;
-  /// This is a list of the output ports.
-  SmallVector<PortInfo> outputs;
-};
-
-// This provides capability for looking up port indices based on port names.
-struct ModulePortLookupInfo {
-  FailureOr<unsigned>
-  lookupPortIndex(const llvm::DenseMap<StringAttr, unsigned> &portMap,
-                  StringAttr name) const {
-    auto it = portMap.find(name);
-    if (it == portMap.end())
-      return failure();
-    return it->second;
-  }
-
-public:
-  explicit ModulePortLookupInfo(MLIRContext *ctx,
-                                const ModulePortInfo &portInfo)
-      : ctx(ctx) {
-    for (auto &in : portInfo.inputs)
-      inputPortMap[in.name] = in.argNum;
-
-    for (auto &out : portInfo.outputs)
-      outputPortMap[out.name] = out.argNum;
-  }
-
-  // Return the index of the input port with the specified name.
-  FailureOr<unsigned> getInputPortIndex(StringAttr name) const {
-    return lookupPortIndex(inputPortMap, name);
-  }
-
-  // Return the index of the output port with the specified name.
-  FailureOr<unsigned> getOutputPortIndex(StringAttr name) const {
-    return lookupPortIndex(outputPortMap, name);
-  }
-
-  FailureOr<unsigned> getInputPortIndex(StringRef name) const {
-    return getInputPortIndex(StringAttr::get(ctx, name));
-  }
-
-  FailureOr<unsigned> getOutputPortIndex(StringRef name) const {
-    return getOutputPortIndex(StringAttr::get(ctx, name));
-  }
-
-private:
-  llvm::DenseMap<StringAttr, unsigned> inputPortMap;
-  llvm::DenseMap<StringAttr, unsigned> outputPortMap;
-  MLIRContext *ctx;
-};
+void populateHWModuleLikeTypeConversionPattern(StringRef moduleLikeOpName,
+                                               RewritePatternSet &patterns,
+                                               TypeConverter &converter);
 
 class InnerSymbolOpInterface;
 /// Verification hook for verifying InnerSym Attribute.
@@ -119,6 +35,17 @@ LogicalResult verifyInnerSymAttr(InnerSymbolOpInterface op);
 namespace detail {
 LogicalResult verifyInnerRefNamespace(Operation *op);
 } // namespace detail
+
+/// Classify operations that are InnerRefNamespace-like,
+/// until structure is in place to do this via Traits.
+/// Useful for getParentOfType<>, or scheduling passes.
+/// Prefer putting the trait on operations here or downstream.
+struct InnerRefNamespaceLike {
+  /// Return if this operation is explicitly an IRN or appears compatible.
+  static bool classof(mlir::Operation *op);
+  /// Return if this operation is explicitly an IRN or appears compatible.
+  static bool classof(const mlir::RegisteredOperationName *opInfo);
+};
 
 } // namespace hw
 } // namespace circt
@@ -159,7 +86,7 @@ public:
 
     // InnerSymbolTable's must be directly nested within an InnerRefNamespace.
     auto *parent = op->getParentOp();
-    if (!parent || !parent->hasTrait<InnerRefNamespace>())
+    if (!parent || !isa<circt::hw::InnerRefNamespaceLike>(parent))
       return op->emitError(
           "InnerSymbolTable must have InnerRefNamespace parent");
 

@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "circt/Conversion/CombToArith.h"
+#include "circt/Conversion/SeqToSV.h"
 #include "circt/Dialect/Arc/ArcDialect.h"
 #include "circt/Dialect/Arc/ArcInterfaces.h"
 #include "circt/Dialect/Arc/ArcOps.h"
@@ -19,6 +20,7 @@
 #include "circt/Dialect/Seq/SeqPasses.h"
 #include "circt/InitAllDialects.h"
 #include "circt/InitAllPasses.h"
+#include "circt/Support/Passes.h"
 #include "circt/Support/Version.h"
 #include "mlir/Bytecode/BytecodeReader.h"
 #include "mlir/Bytecode/BytecodeWriter.h"
@@ -87,6 +89,15 @@ static cl::opt<bool>
                        cl::desc("Make values with `sv.namehint` observable"),
                        cl::init(false), cl::cat(mainCategory));
 
+static cl::opt<bool> observeRegisters("observe-registers",
+                                      cl::desc("Make all registers observable"),
+                                      cl::init(false), cl::cat(mainCategory));
+
+static cl::opt<bool>
+    observeMemories("observe-memories",
+                    cl::desc("Make all memory contents observable"),
+                    cl::init(false), cl::cat(mainCategory));
+
 static cl::opt<std::string> stateFile("state-file", cl::desc("State file"),
                                       cl::value_desc("filename"), cl::init(""),
                                       cl::cat(mainCategory));
@@ -96,6 +107,16 @@ static cl::opt<bool> shouldInline("inline", cl::desc("Inline arcs"),
 
 static cl::opt<bool> shouldDedup("dedup", cl::desc("Deduplicate arcs"),
                                  cl::init(true), cl::cat(mainCategory));
+
+static cl::opt<bool> shouldDetectEnables(
+    "detect-enables",
+    cl::desc("Infer enable conditions for states to avoid computation"),
+    cl::init(true), cl::cat(mainCategory));
+
+static cl::opt<bool> shouldDetectResets(
+    "detect-resets",
+    cl::desc("Infer reset conditions for states to avoid computation"),
+    cl::init(false), cl::cat(mainCategory));
 
 static cl::opt<bool>
     shouldMakeLUTs("lookup-tables",
@@ -116,6 +137,11 @@ static cl::opt<bool>
                       cl::desc("Check that emitted diagnostics match "
                                "expected-* lines on the corresponding line"),
                       cl::init(false), cl::Hidden, cl::cat(mainCategory));
+
+static cl::opt<bool>
+    verbosePassExecutions("verbose-pass-executions",
+                          cl::desc("Log executions of toplevel module passes"),
+                          cl::init(false), cl::cat(mainCategory));
 
 static cl::opt<bool>
     splitInputFile("split-input-file",
@@ -171,23 +197,42 @@ static void populatePipeline(PassManager &pm) {
     return until >= runUntilBefore || until > runUntilAfter;
   };
 
+  if (verbosePassExecutions)
+    pm.addInstrumentation(
+        std::make_unique<VerbosePassInstrumentation<mlir::ModuleOp>>(
+            "arcilator"));
+
   // Pre-process the input such that it no longer contains any SV dialect ops
   // and external modules that are relevant to the arc transformation are
   // represented as intrinsic ops.
   if (untilReached(UntilPreprocessing))
     return;
-  pm.addPass(seq::createLowerFirMemPass());
-  pm.addPass(
-      arc::createAddTapsPass(observePorts, observeWires, observeNamedValues));
+  pm.addPass(createLowerFirMemPass());
+  {
+    arc::AddTapsOptions opts;
+    opts.tapPorts = observePorts;
+    opts.tapWires = observeWires;
+    opts.tapNamedValues = observeNamedValues;
+    pm.addPass(arc::createAddTapsPass(opts));
+  }
   pm.addPass(arc::createStripSVPass());
-  pm.addPass(arc::createInferMemoriesPass(observePorts));
+  {
+    arc::InferMemoriesOptions opts;
+    opts.tapPorts = observePorts;
+    opts.tapMemories = observeMemories;
+    pm.addPass(arc::createInferMemoriesPass(opts));
+  }
   pm.addPass(createCSEPass());
   pm.addPass(arc::createArcCanonicalizerPass());
 
   // Restructure the input from a `hw.module` hierarchy to a collection of arcs.
   if (untilReached(UntilArcConversion))
     return;
-  pm.addPass(createConvertToArcsPass());
+  {
+    ConvertToArcsOptions opts;
+    opts.tapRegisters = observeRegisters;
+    pm.addPass(createConvertToArcsPass(opts));
+  }
   if (shouldDedup)
     pm.addPass(arc::createDedupPass());
   pm.addPass(arc::createInlineModulesPass());
@@ -201,6 +246,12 @@ static void populatePipeline(PassManager &pm) {
   pm.addPass(arc::createSplitLoopsPass());
   if (shouldDedup)
     pm.addPass(arc::createDedupPass());
+  {
+    arc::InferStatePropertiesOptions opts;
+    opts.detectEnables = shouldDetectEnables;
+    opts.detectResets = shouldDetectResets;
+    pm.addPass(arc::createInferStateProperties(opts));
+  }
   pm.addPass(createCSEPass());
   pm.addPass(arc::createArcCanonicalizerPass());
   if (shouldMakeLUTs)
@@ -208,12 +259,6 @@ static void populatePipeline(PassManager &pm) {
   pm.addPass(createCSEPass());
   pm.addPass(arc::createArcCanonicalizerPass());
 
-  // TODO: the following is commented out because the backend does not support
-  // StateOp resets yet.
-  // pm.addPass(arc::createInferStatePropertiesPass());
-  // InferStateProperties does not remove all ops it bypasses and inserts a lot
-  // of constant ops that should be uniqued
-  // pm.addPass(createSimpleCanonicalizerPass());
   // Now some arguments may be unused because reset conditions are not passed as
   // inputs anymore pm.addPass(arc::createRemoveUnusedArcArgumentsPass());
   // Because we replace a lot of StateOp inputs with constants in the enable
@@ -247,23 +292,25 @@ static void populatePipeline(PassManager &pm) {
   }
 
   pm.addPass(arc::createGroupResetsAndEnablesPass());
+  pm.addPass(arc::createLegalizeStateUpdatePass());
   pm.addPass(createCSEPass());
   pm.addPass(arc::createArcCanonicalizerPass());
 
   // Allocate states.
   if (untilReached(UntilStateAlloc))
     return;
-  pm.addPass(arc::createLegalizeStateUpdatePass());
+  pm.addPass(arc::createLowerArcsToFuncsPass());
   pm.nest<arc::ModelOp>().addPass(arc::createAllocateStatePass());
   if (!stateFile.empty())
     pm.addPass(arc::createPrintStateInfoPass(stateFile));
+  pm.addPass(arc::createLowerClocksToFuncsPass()); // no CSE between state alloc
+                                                   // and clock func lowering
   pm.addPass(createCSEPass());
   pm.addPass(arc::createArcCanonicalizerPass());
 
   // Lower the arcs and update functions to LLVM.
   if (untilReached(UntilLLVMLowering))
     return;
-  pm.addPass(arc::createLowerClocksToFuncsPass());
   pm.addPass(createConvertCombToArithPass());
   pm.addPass(createLowerArcToLLVMPass());
   pm.addPass(createCSEPass());
@@ -383,10 +430,21 @@ static LogicalResult executeArcilator(MLIRContext &context) {
 
   // Register our dialects.
   DialectRegistry registry;
-  registry.insert<hw::HWDialect, comb::CombDialect, seq::SeqDialect,
-                  sv::SVDialect, arc::ArcDialect, mlir::arith::ArithDialect,
-                  mlir::scf::SCFDialect, mlir::func::FuncDialect,
-                  mlir::cf::ControlFlowDialect, mlir::LLVM::LLVMDialect>();
+  // clang-format off
+  registry.insert<
+    arc::ArcDialect,
+    comb::CombDialect,
+    hw::HWDialect,
+    mlir::LLVM::LLVMDialect,
+    mlir::arith::ArithDialect,
+    mlir::cf::ControlFlowDialect,
+    mlir::func::FuncDialect,
+    mlir::scf::SCFDialect,
+    om::OMDialect,
+    seq::SeqDialect,
+    sv::SVDialect
+  >();
+  // clang-format on
 
   arc::initAllExternalInterfaces(registry);
 

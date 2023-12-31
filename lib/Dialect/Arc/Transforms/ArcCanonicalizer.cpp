@@ -10,18 +10,26 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "PassDetails.h"
 #include "circt/Dialect/Arc/ArcOps.h"
+#include "circt/Dialect/Arc/ArcPasses.h"
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Support/Namespace.h"
 #include "circt/Support/SymCache.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "arc-canonicalizer"
+
+namespace circt {
+namespace arc {
+#define GEN_PASS_DEF_ARCCANONICALIZER
+#include "circt/Dialect/Arc/ArcPasses.h.inc"
+} // namespace arc
+} // namespace circt
 
 using namespace circt;
 using namespace arc;
@@ -389,9 +397,9 @@ LogicalResult RemoveUnusedArcArgumentsPattern::matchAndRewrite(
   // Collect the mutable callers in a first iteration. If there is a user that
   // does not implement the interface, we have to abort the rewrite and have to
   // make sure that we didn't change anything so far.
-  SmallVector<CallOpMutableInterface> mutableUsers;
+  SmallVector<mlir::CallOpInterface> mutableUsers;
   for (auto *user : symbolCache.getUsers(op)) {
-    auto callOpMutable = dyn_cast<CallOpMutableInterface>(user);
+    auto callOpMutable = dyn_cast<mlir::CallOpInterface>(user);
     if (!callOpMutable)
       return failure();
     mutableUsers.push_back(callOpMutable);
@@ -418,14 +426,14 @@ SinkArcInputsPattern::matchAndRewrite(DefineOp op,
   // modify the users.
   auto users = symbolCache.getUsers(op);
   if (llvm::any_of(
-          users, [](auto *user) { return !isa<CallOpMutableInterface>(user); }))
+          users, [](auto *user) { return !isa<mlir::CallOpInterface>(user); }))
     return failure();
 
   // Find all arguments that use constant operands only.
   SmallVector<Operation *> stateConsts(op.getNumArguments());
   bool first = true;
   for (auto *user : users) {
-    auto callOp = cast<CallOpMutableInterface>(user);
+    auto callOp = cast<mlir::CallOpInterface>(user);
     for (auto [constArg, input] :
          llvm::zip(stateConsts, callOp.getArgOperands())) {
       if (auto *constOp = input.getDefiningOp();
@@ -461,7 +469,7 @@ SinkArcInputsPattern::matchAndRewrite(DefineOp op,
 
   // Rewrite all arc uses to not pass in the constant anymore.
   for (auto *user : users) {
-    auto callOp = cast<CallOpMutableInterface>(user);
+    auto callOp = cast<mlir::CallOpInterface>(user);
     SmallPtrSet<Value, 4> maybeUnusedValues;
     SmallVector<Value> newInputs;
     for (auto [index, value] : llvm::enumerate(callOp.getArgOperands())) {
@@ -486,7 +494,7 @@ SinkArcInputsPattern::matchAndRewrite(DefineOp op,
 
 namespace {
 struct ArcCanonicalizerPass
-    : public ArcCanonicalizerBase<ArcCanonicalizerPass> {
+    : public arc::impl::ArcCanonicalizerBase<ArcCanonicalizerPass> {
   void runOnOperation() override;
 };
 } // namespace

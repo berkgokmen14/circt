@@ -114,7 +114,7 @@ getCiderSourceLocationMetadata(calyx::ComponentOp component,
 }
 
 bool matchConstantOp(Operation *op, APInt &value) {
-  return mlir::detail::constant_int_op_binder(&value).match(op);
+  return mlir::detail::constant_int_value_binder(&value).match(op);
 }
 
 bool singleLoadFromMemory(Value memoryReference) {
@@ -362,10 +362,10 @@ bool MemoryInterface::isDynamic() {
 }
 
 //===----------------------------------------------------------------------===//
-// LoopInterface
+// BasicLoopInterface
 //===----------------------------------------------------------------------===//
 
-LoopInterface::~LoopInterface() = default;
+BasicLoopInterface::~BasicLoopInterface() = default;
 
 //===----------------------------------------------------------------------===//
 // ComponentLoweringStateInterface
@@ -489,6 +489,15 @@ unsigned ComponentLoweringStateInterface::getFuncOpResultMapping(
          "No component return port index recorded for the requested function "
          "return index");
   return it->second;
+}
+
+InstanceOp ComponentLoweringStateInterface::getInstance(StringRef calleeName) {
+  return instanceMap[calleeName];
+}
+
+void ComponentLoweringStateInterface::addInstance(StringRef calleeName,
+                                                  InstanceOp instanceOp) {
+  instanceMap[calleeName] = instanceOp;
 }
 
 //===----------------------------------------------------------------------===//
@@ -736,16 +745,10 @@ void InlineCombGroups::recurseInlineCombGroups(
     // Needed to add memory interfaces as well
     if (src.isa<BlockArgument>() ||
         isa<calyx::RegisterOp, calyx::MemoryOp, calyx::SeqMemoryOp,
-            hw::ConstantOp, mlir::arith::ConstantOp, calyx::SeqMultLibOp,
-            calyx::SeqDivULibOp, calyx::SeqDivSLibOp, calyx::SeqRemSLibOp,
-            calyx::SeqRemULibOp, calyx::PipelinedMultLibOp, calyx::SeqRemULibOp,
-            mlir::scf::WhileOp, calyx::StallableMultLibOp>(
-            src.getDefiningOp()) ||
-        isa<LoadLoweringInterface, StoreLoweringInterface,
-            AllocLoweringInterface>(src.getDefiningOp()) ||
-        // TODO: amc::CalyxInstanceOp does not fulfill any of these interfaces.
-        // So the hack is to blacklist by dialect name
-        src.getDefiningOp()->getName().getDialectNamespace() == "amc")
+            hw::ConstantOp, mlir::arith::ConstantOp, calyx::MultPipeLibOp,
+            calyx::DivUPipeLibOp, calyx::DivSPipeLibOp, calyx::RemSPipeLibOp,
+            calyx::RemUPipeLibOp, mlir::scf::WhileOp, calyx::InstanceOp>(
+            src.getDefiningOp()))
       continue;
 
     auto evalGroupOpt = state.getEvaluatingGroup(src);
@@ -862,6 +865,64 @@ BuildReturnRegs::partiallyLowerFuncToComp(mlir::func::FuncOp funcOp,
         reg.getOut());
   }
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// BuildCallInstance
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+BuildCallInstance::partiallyLowerFuncToComp(mlir::func::FuncOp funcOp,
+                                            PatternRewriter &rewriter) const {
+  funcOp.walk([&](mlir::func::CallOp callOp) {
+    ComponentOp componentOp = getCallComponent(callOp);
+    SmallVector<Type, 8> resultTypes;
+    for (auto type : componentOp.getArgumentTypes())
+      resultTypes.push_back(type);
+    for (auto type : componentOp.getResultTypes())
+      resultTypes.push_back(type);
+    std::string instanceName = getInstanceName(callOp);
+
+    // Determines if an instance needs to be created. If the same function was
+    // called by CallOp before, it doesn't need to be created, if not, the
+    // instance is created.
+    if (!getState().getInstance(instanceName)) {
+      InstanceOp instanceOp =
+          createInstance(callOp.getLoc(), rewriter, getComponent(), resultTypes,
+                         instanceName, componentOp.getName());
+      getState().addInstance(instanceName, instanceOp);
+      hw::ConstantOp constantOp =
+          createConstant(callOp.getLoc(), rewriter, getComponent(), 1, 1);
+      OpBuilder::InsertionGuard g(rewriter);
+      rewriter.setInsertionPointToStart(
+          getComponent().getWiresOp().getBodyBlock());
+
+      // Creates the group that initializes the instance.
+      calyx::GroupOp groupOp = rewriter.create<calyx::GroupOp>(
+          callOp.getLoc(), "init_" + instanceName);
+      rewriter.setInsertionPointToStart(groupOp.getBodyBlock());
+      auto portInfos = instanceOp.getReferencedComponent().getPortInfo();
+      auto results = instanceOp.getResults();
+      for (const auto &[portInfo, result] : llvm::zip(portInfos, results)) {
+        if (portInfo.hasAttribute("go") || portInfo.hasAttribute("reset"))
+          rewriter.create<calyx::AssignOp>(callOp.getLoc(), result, constantOp);
+        else if (portInfo.hasAttribute("done"))
+          rewriter.create<calyx::GroupDoneOp>(callOp.getLoc(), result);
+      }
+    }
+    WalkResult::advance();
+  });
+  return success();
+}
+
+ComponentOp
+BuildCallInstance::getCallComponent(mlir::func::CallOp callOp) const {
+  std::string callee = "func_" + callOp.getCallee().str();
+  for (auto [funcOp, componentOp] : functionMapping) {
+    if (funcOp.getSymName() == callee)
+      return componentOp;
+  }
+  return nullptr;
 }
 
 } // namespace calyx

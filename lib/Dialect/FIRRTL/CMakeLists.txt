@@ -1,5 +1,7 @@
 set(CIRCT_FIRRTL_Sources
   CHIRRTLDialect.cpp
+  CHIRRTLTypes.cpp
+  FieldRefCache.cpp
   FIRRTLAnnotationHelper.cpp
   FIRRTLAnnotations.cpp
   FIRRTLAttributes.cpp
@@ -7,6 +9,8 @@ set(CIRCT_FIRRTL_Sources
   FIRRTLFieldSource.cpp
   FIRRTLFolds.cpp
   FIRRTLInstanceGraph.cpp
+  FIRRTLInstanceImplementation.cpp
+  FIRRTLIntrinsics.cpp
   FIRRTLOpInterfaces.cpp
   FIRRTLOps.cpp
   FIRRTLTypes.cpp

@@ -12,7 +12,7 @@
 // Check if printing with very short line length, removing info locators (@[...]), no line is longer than 5x line length.
 // RUN: circt-translate --export-firrtl %s --target-line-length=10 | sed -e 's/ @\[.*\]//' | FileCheck %s --implicit-check-not "{{^(.{50})}}" --check-prefix PRETTY
 
-// CHECK-LABEL: FIRRTL version 3.1.0
+// CHECK-LABEL: FIRRTL version 4.0.0
 // CHECK-LABEL: circuit Foo :
 // PRETTY-LABEL: circuit Foo :
 firrtl.circuit "Foo" {
@@ -35,6 +35,13 @@ firrtl.circuit "Foo" {
     // CHECK-NEXT: output b0 : UInt
     // CHECK-NEXT: output b1 : Probe<UInt<1>>
     // CHECK-NEXT: output b2 : RWProbe<UInt<1>>
+    // CHECK-NEXT: input anyref : AnyRef
+    // CHECK-NEXT: input string : String
+    // CHECK-NEXT: input integer : Integer
+    // CHECK-NEXT: input bool : Bool
+    // CHECK-NEXT: input double : Double
+    // CHECK-NEXT: input path : Path
+    // CHECK-NEXT: input list : List<List<Path>>
     in %a00: !firrtl.clock,
     in %a01: !firrtl.reset,
     in %a02: !firrtl.asyncreset,
@@ -48,7 +55,14 @@ firrtl.circuit "Foo" {
     in %a10: !firrtl.vector<uint, 42>,
     out %b0: !firrtl.uint,
     out %b1: !firrtl.probe<uint<1>>,
-    out %b2: !firrtl.rwprobe<uint<1>>
+    out %b2: !firrtl.rwprobe<uint<1>>,
+    in %anyref: !firrtl.anyref,
+    in %string: !firrtl.string,
+    in %integer: !firrtl.integer,
+    in %bool : !firrtl.bool,
+    in %double : !firrtl.double,
+    in %path : !firrtl.path,
+    in %list : !firrtl.list<list<path>>
   ) {}
 
   // CHECK-LABEL: module Simple :
@@ -633,46 +647,125 @@ firrtl.circuit "Foo" {
     firrtl.ref.define %_13, %_15_ref : !firrtl.rwprobe<uint<1>>
   }
 
+  // CHECK-LABEL: module Properties :
+  firrtl.module @Properties(out %string : !firrtl.string,
+                            out %integer : !firrtl.integer,
+                            out %bool : !firrtl.bool,
+                            out %double : !firrtl.double,
+                            out %path : !firrtl.path,
+                            out %list : !firrtl.list<list<string>>) {
+    // CHECK: propassign string, String("hello")
+    %0 = firrtl.string "hello"
+    firrtl.propassign %string, %0 : !firrtl.string
+
+    // CHECK: propassign integer, Integer(99)
+    %1 = firrtl.integer 99
+    firrtl.propassign %integer, %1 : !firrtl.integer
+
+    // CHECK: propassign bool, Bool(true)
+    %true = firrtl.bool true
+    firrtl.propassign %bool, %true : !firrtl.bool
+
+    // CHECK: propassign double, Double(0.3333{{[0-9]*}})
+    %d = firrtl.double 0.333333333333333333333333333333333333333
+    firrtl.propassign %double, %d : !firrtl.double
+
+    // CHECK: propassign path, path("OMDeleted")
+    %p = firrtl.unresolved_path "OMDeleted"
+    firrtl.propassign %path, %p : !firrtl.path
+
+    // CHECK:      propassign list,
+    // CHECK-NEXT:   List<List<String>>(List<String>(String("hello"), String("hello")),
+    // CHECK-NEXT:                      List<String>())
+    %strings = firrtl.list.create %0, %0 : !firrtl.list<string>
+    %empty = firrtl.list.create : !firrtl.list<string>
+    %strings_and_empty = firrtl.list.create %strings, %empty : !firrtl.list<list<string>>
+    firrtl.propassign %list, %strings_and_empty : !firrtl.list<list<string>>
+  }
+
   // Test optional group declaration and definition emission.
   //
-  // CHECK-LABEL: declgroup GroupA, bind :
-  // CHECK-NEXT:    declgroup GroupB, bind :
-  // CHECK-NEXT:      declgroup GroupC, bind :
-  // CHECK-NEXT:      declgroup GroupD, bind :
-  // CHECK-NEXT:        declgroup GroupE, bind :
-  // CHECK-NEXT:    declgroup GroupF, bind :
-  firrtl.declgroup @GroupA bind {
-    firrtl.declgroup @GroupB bind {
-      firrtl.declgroup @GroupC bind {
+  // CHECK-LABEL: layer GroupA, bind :
+  // CHECK-NEXT:    layer GroupB, bind :
+  // CHECK-NEXT:      layer GroupC, bind :
+  // CHECK-NEXT:      layer GroupD, bind :
+  // CHECK-NEXT:        layer GroupE, bind :
+  // CHECK-NEXT:    layer GroupF, bind :
+  firrtl.layer @GroupA bind {
+    firrtl.layer @GroupB bind {
+      firrtl.layer @GroupC bind {
       }
-      firrtl.declgroup @GroupD bind {
-        firrtl.declgroup @GroupE bind {
+      firrtl.layer @GroupD bind {
+        firrtl.layer @GroupE bind {
         }
       }
     }
-    firrtl.declgroup @GroupF bind {
+    firrtl.layer @GroupF bind {
     }
   }
   // CHECK:      module ModuleWithGroups :
-  // CHECK-NEXT:   group GroupA :
-  // CHECK-NEXT:     group GroupB :
-  // CHECK-NEXT:       group GroupC :
-  // CHECK-NEXT:       group GroupD :
-  // CHECK-NEXT:         group GroupE :
-  // CHECK-NEXT:     group GroupF :
+  // CHECK-NEXT:   layerblock GroupA :
+  // CHECK-NEXT:     layerblock GroupB :
+  // CHECK-NEXT:       layerblock GroupC :
+  // CHECK-NEXT:       layerblock GroupD :
+  // CHECK-NEXT:         layerblock GroupE :
+  // CHECK-NEXT:     layerblock GroupF :
   firrtl.module @ModuleWithGroups() {
-    firrtl.group @GroupA {
-      firrtl.group @GroupA::@GroupB {
-        firrtl.group @GroupA::@GroupB::@GroupC {
+    firrtl.layerblock @GroupA {
+      firrtl.layerblock @GroupA::@GroupB {
+        firrtl.layerblock @GroupA::@GroupB::@GroupC {
         }
-        firrtl.group @GroupA::@GroupB::@GroupD {
-          firrtl.group @GroupA::@GroupB::@GroupD::@GroupE {
+        firrtl.layerblock @GroupA::@GroupB::@GroupD {
+          firrtl.layerblock @GroupA::@GroupB::@GroupD::@GroupE {
           }
         }
       }
-      firrtl.group @GroupA::@GroupF {
+      firrtl.layerblock @GroupA::@GroupF {
       }
     }
   }
 
+  // CHECK: module RWProbe :
+  // CHECK-NEXT: input in : { a : UInt<1> }[2]
+  // CHECK-NEXT: output p : RWProbe<UInt<1>>
+  // CHECK-NEXT: output p2 : RWProbe<UInt>
+  // CHECK-EMPTY:
+  // CHECK-NEXT: define p = rwprobe(in[1].a)
+  // CHECK-NEXT: node q = read(p)
+  // CHECK-NEXT: define p2 = rwprobe(q)
+  firrtl.module private @RWProbe(in %in: !firrtl.vector<bundle<a: uint<1>>, 2> sym [<@sym,4,public>],
+                                 out %p: !firrtl.rwprobe<uint<1>>,
+                                 out %p2 : !firrtl.rwprobe<uint>) {
+    %0 = firrtl.ref.rwprobe <@RWProbe::@sym> : !firrtl.rwprobe<uint<1>>
+    firrtl.ref.define %p, %0 : !firrtl.rwprobe<uint<1>>
+
+    %read = firrtl.ref.resolve %p : !firrtl.rwprobe<uint<1>>
+    %q, %q_ref = firrtl.node interesting_name %read forceable : !firrtl.uint<1>
+    %refcast = firrtl.ref.cast %q_ref : (!firrtl.rwprobe<uint<1>>) -> !firrtl.rwprobe<uint>
+    firrtl.ref.define %p2, %refcast : !firrtl.rwprobe<uint>
+  }
+
+  // CHECK-LABEL: option Platform :
+  firrtl.option @Platform {
+    // CHECK-NEXT: FPGA
+    firrtl.option_case @FPGA
+    // CHECK-NEXT: ASIC
+    firrtl.option_case @ASIC
+  }
+
+  // CHECK-LABEL: extmodule DefaultTarget
+  firrtl.extmodule private @DefaultTarget()
+  // CHECK-LABEL: extmodule FPGATarget
+  firrtl.extmodule private @FPGATarget()
+  // CHECK-LABEL: extmodule ASICTarget
+  firrtl.extmodule private @ASICTarget()
+
+  // CHECK-LABEL: module InstChoice :
+  firrtl.module public @InstChoice() {
+    // CHECK: instchoice inst of DefaultTarget, Platform :
+    // CHECK-NEXT:    FPGA => FPGATarget
+    // CHECK-NEXT:    ASIC => ASICTarget
+    firrtl.instance_choice inst @DefaultTarget alternatives @Platform
+      { @FPGA -> @FPGATarget, @ASIC -> @ASICTarget } ()
+  }
 }

@@ -5,6 +5,8 @@ add_circt_library(CIRCTTransforms
   MapArithToComb.cpp
   UnrollForLoopSchedule.cpp
   HoistInterIterationArg.cpp
+  MaximizeSSA.cpp
+  InsertMergeBlocks.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${CIRCT_MAIN_INCLUDE_DIR}/circt/Transforms
@@ -22,4 +24,5 @@ add_circt_library(CIRCTTransforms
 
   DEPENDS
   CIRCTTransformsPassIncGen
+  MLIRArithDialect
 )

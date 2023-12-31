@@ -2,7 +2,7 @@
 // RUN: circt-opt -split-input-file -verify-diagnostics --pass-pipeline='builtin.module(any(map-arith-to-comb))' %s | FileCheck %s
 
 // CHECK-LABEL:   hw.module @foo(
-// CHECK-SAME:          %[[VAL_0:.*]]: i32, %[[VAL_1:.*]]: i32, %[[VAL_2:.*]]: i1) {
+// CHECK-SAME:          in %[[VAL_0:.*]] : i32, in %[[VAL_1:.*]] : i32, in %[[VAL_2:.*]] : i1) {
 // CHECK:           %[[VAL_3:.*]] = comb.add %[[VAL_0]], %[[VAL_1]] : i32
 // CHECK:           %[[VAL_4:.*]] = comb.sub %[[VAL_0]], %[[VAL_1]] : i32
 // CHECK:           %[[VAL_5:.*]] = comb.mul %[[VAL_0]], %[[VAL_1]] : i32
@@ -22,10 +22,12 @@
 // CHECK:           %[[VAL_19:.*]] = hw.constant 0 : i3
 // CHECK:           %[[VAL_20:.*]] = comb.concat %[[VAL_19]], %[[VAL_1]] : i3, i32
 // CHECK:           %[[VAL_21:.*]] = comb.extract %[[VAL_1]] from 0 : (i32) -> i16
+// CHECK:           %[[VAL_22:.*]] = comb.icmp slt %[[VAL_0]], %[[VAL_1]] : i32
+// CHECK:           %[[VAL_23:.*]] = hw.constant 0 : i32
 // CHECK:           hw.output
 // CHECK:         }
 
-hw.module @foo(%arg0 : i32, %arg1 : i32, %arg2 : i1) -> () {
+hw.module @foo(in %arg0 : i32, in %arg1 : i32, in %arg2 : i1) {
     %0 = arith.addi %arg0, %arg1 : i32
     %1 = arith.subi %arg0, %arg1 : i32
     %2 = arith.muli %arg0, %arg1 : i32
@@ -44,11 +46,12 @@ hw.module @foo(%arg0 : i32, %arg1 : i32, %arg2 : i1) -> () {
     %15 = arith.extui %arg1 : i32 to i35
     %16 = arith.trunci %arg1 : i32 to i16
     %17 = arith.cmpi slt, %arg0, %arg1 : i32
+    %c0_i32 = arith.constant 0 : i32
 }
 
 // -----
 
-hw.module @invalidVector(%arg0 : vector<4xi32>) -> () {
+hw.module @invalidVector(in %arg0 : vector<4xi32>) {
   // expected-error @+1 {{failed to legalize operation 'arith.extsi' that was explicitly marked illegal}}
     %0 = arith.extsi %arg0 : vector<4xi32> to vector<4xi33>
 }

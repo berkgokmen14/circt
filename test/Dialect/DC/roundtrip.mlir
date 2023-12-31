@@ -1,22 +1,28 @@
 // RUN: circt-opt %s | circt-opt | FileCheck %s
 
-// CHECK-LABEL:   hw.module @foo(
-// CHECK-SAME:                   %[[VAL_0:.*]]: !dc.token,
-// CHECK-SAME:                   %[[VAL_1:.*]]: !dc.value<i1>,
-// CHECK-SAME:                   %[[VAL_2:.*]]: i32) attributes {argNames = ["", "", ""]} {
-// CHECK:           %[[VAL_3:.*]] = dc.buffer[2] %[[VAL_0]] : !dc.token
-// CHECK:           %[[VAL_4:.*]] = dc.buffer[2] %[[VAL_1]] [1, 2] : !dc.value<i1>
-// CHECK:           %[[VAL_5:.*]]:2 = dc.fork [2] %[[VAL_0]]
-// CHECK:           %[[VAL_6:.*]] = dc.pack %[[VAL_0]]{{\[}}%[[VAL_2]]] : i32
-// CHECK:           %[[VAL_7:.*]] = dc.merge %[[VAL_3]], %[[VAL_0]]
-// CHECK:           %[[VAL_8:.*]], %[[VAL_9:.*]] = dc.unpack %[[VAL_1]] : !dc.value<i1>
-// CHECK:           hw.output
-// CHECK:         }
-hw.module @foo(%0 : !dc.token, %1 : !dc.value<i1>, %2 : i32) {
+// CHECK:       hw.module @foo(in %0 "" : !dc.token, in %1 "" : !dc.value<i1>, in %2 "" : i32) {
+// CHECK-NEXT:    %3 = dc.buffer[2] %0 : !dc.token
+// CHECK-NEXT:    %4 = dc.buffer[2] %1 [1, 2] : !dc.value<i1>
+// CHECK-NEXT:    %5:2 = dc.fork [2] %0 
+// CHECK-NEXT:    %6 = dc.pack %0, %2 : i32
+// CHECK-NEXT:    %7 = dc.merge %3, %0
+// CHECK-NEXT:    %token, %output = dc.unpack %1 : !dc.value<i1>
+// CHECK-NEXT:    %8 = dc.to_esi %0 : !dc.token
+// CHECK-NEXT:    %9 = dc.to_esi %1 : !dc.value<i1>
+// CHECK-NEXT:    %10 = dc.from_esi %8 : <i0>
+// CHECK-NEXT:    %11 = dc.from_esi %9 : <i1>
+// CHECK-NEXT:    hw.output
+// CHECK-NEXT:  }
+
+hw.module @foo(in %0 : !dc.token, in %1 : !dc.value<i1>, in %2 : i32) {
   %buffer = dc.buffer [2] %0 : !dc.token
   %bufferInit = dc.buffer [2] %1 [1, 2] : !dc.value<i1>
   %f1, %f2 = dc.fork [2] %0
-  %pack = dc.pack %0 [%2] : i32
+  %pack = dc.pack %0, %2 : i32
   %merge = dc.merge %buffer, %0
   %unpack_token, %unpack_value = dc.unpack %1 : !dc.value<i1>
+  %esi_token = dc.to_esi %0 : !dc.token
+  %esi_value = dc.to_esi %1 : !dc.value<i1>
+  %from_esi_token = dc.from_esi %esi_token : !esi.channel<i0>
+  %from_esi_value = dc.from_esi %esi_value : !esi.channel<i1>
 }

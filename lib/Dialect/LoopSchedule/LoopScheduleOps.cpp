@@ -16,12 +16,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/IR/FunctionImplementation.h"
-#include "mlir/IR/Value.h"
-#include "mlir/IR/Visitors.h"
-#include "mlir/Support/LogicalResult.h"
-#include "llvm/ADT/STLExtras.h"
-#include <iterator>
+#include "mlir/Interfaces/FunctionImplementation.h"
 
 using namespace mlir;
 using namespace circt;
@@ -232,15 +227,17 @@ LogicalResult LoopSchedulePipelineOp::verify() {
   }
 
   // Verify iter_args used in condition are produced by first stage
-  // auto firstStage = *stagesBlock.getOps<LoopSchedulePipelineStageOp>().begin();
-  // auto termIterArgs = getTerminatorIterArgs();
-  // for (auto arg : getConditionBlock()->getArguments()) {
+  // auto firstStage =
+  // *stagesBlock.getOps<LoopSchedulePipelineStageOp>().begin(); auto
+  // termIterArgs = getTerminatorIterArgs(); for (auto arg :
+  // getConditionBlock()->getArguments()) {
   //   auto numUses = std::distance(arg.getUses().begin(), arg.getUses().end());
   //   if (numUses == 0)
   //     continue;
   //   auto termIterArg = termIterArgs[arg.getArgNumber()];
   //   if (termIterArg.getDefiningOp() != firstStage.getOperation())
-  //     return emitOpError("Iter args used in condition block must be produced "
+  //     return emitOpError("Iter args used in condition block must be produced
+  //     "
   //                        "by first pipeline stage");
   // }
 
@@ -543,8 +540,7 @@ LogicalResult LoopScheduleStepOp::verify() {
     for (auto res : step.getResults()) {
       auto num = res.getResultNumber();
       auto &termOperand = term->getOpOperand(num);
-      if (!isa<memref::LoadOp>(
-              termOperand.get().getDefiningOp()))
+      if (!isa<memref::LoadOp>(termOperand.get().getDefiningOp()))
         continue;
 
       for (auto *user : res.getUsers()) {

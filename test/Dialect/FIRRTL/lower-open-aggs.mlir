@@ -142,3 +142,185 @@ firrtl.circuit "RefsOnlyAggFirstLevel" {
     firrtl.ref.define %0, %3 : !firrtl.probe<uint<1>>
   }
 }
+
+// -----
+
+// CHECK-LABEL: circuit "SymbolOnField"
+firrtl.circuit "SymbolOnField" {
+  // CHECK: @SymbolOnField
+  // CHECK-SAME: (out r: !firrtl.bundle<x: uint<1>> sym [<@sym,1,public>],
+  // CHECK-SAME:  out r_p: !firrtl.probe<uint<1>>)
+  firrtl.extmodule @SymbolOnField(out r : !firrtl.openbundle<p: probe<uint<1>>, x: uint<1>> sym [<@sym,2,public>])
+}
+
+// -----
+
+// CHECK-LABEL: circuit "ManySymbols"
+firrtl.circuit "ManySymbols" {
+   // Innner-syms on everything not a probe.
+   // (mixed.x[0].p and mixed.x[1].p are pulled out)
+  // CHECK: extmodule @ManySymbols(
+  // CHECK-SAME: <@mixed,0,public>,
+  // CHECK-SAME: <@a,1,public>,
+  // CHECK-SAME: <@xvec,2,public>,
+  // CHECK-SAME: <@x0,3,public>,
+  // CHECK-SAME: <@x0_data,4,public>,
+  // CHECK-SAME: <@x1,5,public>,
+  // CHECK-SAME: <@x1_data,6,public>,
+  // CHECK-SAME: <@b,7,public>
+  firrtl.extmodule @ManySymbols(
+    out mixed: !firrtl.openbundle<a: uint<1>,
+                                   x flip: openvector<openbundle<p flip: probe<bundle<a: uint<1>,
+                                                                                      b: vector<uint<1>, 2>>>,
+                                                                 data flip: uint<1>
+                                                      >, 2>,
+                                   b: vector<uint<1>, 2>>
+        sym [<@mixed,0,public>,
+               <@a,1,public>,
+               <@xvec,2,public>,
+                 <@x0,3,public>, <@x0_data,5,public>,
+                 <@x1,6,public>, <@x1_data,8,public>,
+               <@b,9,public>])
+
+  // Similar but with a refs-only agg between HW elements.
+  // Same HW-only contents as above.
+  // CHECK: extmodule @ManySymbols2(
+  // CHECK-SAME: <@mixed,0,public>,
+  // CHECK-SAME: <@a,1,public>,
+  // CHECK-SAME: <@xvec,2,public>,
+  // CHECK-SAME: <@x0,3,public>,
+  // CHECK-SAME: <@x0_data,4,public>,
+  // CHECK-SAME: <@x1,5,public>,
+  // CHECK-SAME: <@x1_data,6,public>,
+  // CHECK-SAME: <@b,7,public>
+  firrtl.extmodule @ManySymbols2(
+    out mixed: !firrtl.openbundle<a: uint<1>,
+                                   x flip: openvector<openbundle<refsonly : openbundle<p flip: probe<bundle<a: uint<1>,
+                                                                                                            b: vector<uint<1>, 2>>>>,
+                                                                 data flip: uint<1>
+                                                      >, 2>,
+                                   b: vector<uint<1>, 2>>
+        sym [<@mixed,0,public>,
+               <@a,1,public>,
+               <@xvec,2,public>,
+                 <@x0,3,public>, <@x0_data,6,public>,
+                 <@x1,7,public>, <@x1_data,10,public>,
+               <@b,11,public>])
+}
+
+// -----
+
+// CHECK-LABEL: circuit "BundleOfProps"
+firrtl.circuit "BundleOfProps" {
+  // CHECK: module @BundleOfProps
+  // CHECK-SAME: in %x: !firrtl.bundle<b: uint<5>>,
+  // CHECK-SAME: in %x_a: !firrtl.string,
+  // CHECK-SAME: out %y: !firrtl.bundle<a: uint<5>>,
+  // CHECK-SAME: out %y_b_c_l: !firrtl.list<string>)
+  firrtl.module @BundleOfProps(in %x: !firrtl.openbundle<a: string, b: uint<5>>,
+                               out %y: !firrtl.openbundle<a: uint<5>,
+                                                          b flip: openbundle<c flip: openbundle<l: list<string>>>>) {
+    %x_a = firrtl.opensubfield %x[a] : !firrtl.openbundle<a: string, b: uint<5>>
+    %x_b = firrtl.opensubfield %x[b] : !firrtl.openbundle<a: string, b: uint<5>>
+
+    %y_a = firrtl.opensubfield %y[a] : !firrtl.openbundle<a: uint<5>, b flip: openbundle<c flip: openbundle<l: list<string>>>>
+    %y_b = firrtl.opensubfield %y[b] : !firrtl.openbundle<a: uint<5>, b flip: openbundle<c flip: openbundle<l: list<string>>>>
+    %y_b_c = firrtl.opensubfield %y_b[c] : !firrtl.openbundle<c flip: openbundle<l: list<string>>>
+    %y_b_c_l = firrtl.opensubfield %y_b_c[l] : !firrtl.openbundle<l: list<string>>
+    %str = firrtl.string "test"
+    %list = firrtl.list.create %x_a, %str : !firrtl.list<string>
+    firrtl.propassign %y_b_c_l, %list : !firrtl.list<string>
+    firrtl.strictconnect %y_a, %x_b : !firrtl.uint<5>
+  }
+}
+
+
+// -----
+
+// CHECK-LABEL: circuit "WireProperties"
+firrtl.circuit "WireProperties" {
+  // CHECK-LABEL: module{{.*}} @WireProperties
+  firrtl.module @WireProperties() {
+    %0 = firrtl.string "hello world"
+
+    // CHECK:      %b_c = firrtl.wire : !firrtl.string
+    // CHECK-NEXT: firrtl.propassign %b_c, %0
+    %b = firrtl.wire : !firrtl.openbundle<c: string>
+    %b_c = firrtl.opensubfield %b[c] : !firrtl.openbundle<c: string>
+    firrtl.propassign %b_c, %0 : !firrtl.string
+
+    // CHECK-NEXT: %d_0 = firrtl.wire : !firrtl.string
+    // CHECK-NEXT: firrtl.propassign %d_0, %b_c
+    %d = firrtl.wire : !firrtl.openvector<string, 1>
+    %d_0 = firrtl.opensubindex %d[0] : !firrtl.openvector<string, 1>
+    firrtl.propassign %d_0, %b_c : !firrtl.string
+  }
+}
+
+// -----
+
+// CHECK-LABEL: circuit "WirePropertyFlip"
+firrtl.circuit "WirePropertyFlip" {
+  // CHECK-LABEL: module{{.*}} @WirePropertyFlip
+  firrtl.module @WirePropertyFlip(out %a: !firrtl.integer) {
+    %0 = firrtl.integer 1
+
+    // CHECK:      %b_c = firrtl.wire : !firrtl.integer
+    // CHECK-NEXT: firrtl.propassign %b_c, %0
+    // CHECK-NEXT: firrtl.propassign %a, %b_c
+    %b = firrtl.wire : !firrtl.openbundle<c flip: integer>
+    %b_c = firrtl.opensubfield %b[c] : !firrtl.openbundle<c flip: integer>
+    firrtl.propassign %b_c, %0 : !firrtl.integer
+    firrtl.propassign %a, %b_c : !firrtl.integer
+  }
+}
+
+// -----
+
+// CHECK-LABEL: circuit "WireProbes"
+firrtl.circuit "WireProbes" {
+  // CHECK-LABEL: module{{.*}} @WireProbes
+  firrtl.module @WireProbes() {
+    // CHECK:      %b_c = firrtl.wire : !firrtl.probe<uint<1>>
+    // CHECK-NEXT: %b_d = firrtl.wire : !firrtl.rwprobe<uint<2>>
+    %b = firrtl.wire : !firrtl.openbundle<c: probe<uint<1>>, d: rwprobe<uint<2>>>
+    %b_c = firrtl.opensubfield %b[c] : !firrtl.openbundle<c: probe<uint<1>>, d: rwprobe<uint<2>>>
+    %b_d = firrtl.opensubfield %b[d] : !firrtl.openbundle<c: probe<uint<1>>, d: rwprobe<uint<2>>>
+
+    %x = firrtl.wire : !firrtl.uint<1>
+    %0 = firrtl.ref.send %x : !firrtl.uint<1>
+    // CHECK:      firrtl.ref.define %b_c, %0 : !firrtl.probe<uint<1>>
+    firrtl.ref.define %b_c, %0 : !firrtl.probe<uint<1>>
+
+    %y, %y_ref = firrtl.wire forceable : !firrtl.uint<2>, !firrtl.rwprobe<uint<2>>
+    // CHECK:      firrtl.ref.define %b_d, %y_ref : !firrtl.rwprobe<uint<2>>
+    firrtl.ref.define %b_d, %y_ref : !firrtl.rwprobe<uint<2>>
+  }
+}
+
+// -----
+
+// CHECK-LABEL: circuit "WireSymbols"
+firrtl.circuit "WireSymbols" {
+  // CHECK-LABEL: module{{.*}} @WireSymbols
+  firrtl.module @WireSymbols() {
+    // CHECk-NEXT: %a = firrtl.wire sym [<@sym_a_c, 1, public>] : !firrtl.bundle<c: uint<1>>
+    // CHECk-NEXT: %a_b = firrtl.wire : !firrtl.string
+    %a = firrtl.wire sym [<@sym_a_c, 2, public>] : !firrtl.openbundle<b: string, c: uint<1>>
+  }
+}
+
+// -----
+
+// Check that created wires for non-hw have droppable names.
+// Ensure name for hw-only portion preserves namekind.
+
+// CHECK-LABEL: circuit "NonHWWiresHaveDroppableNames"
+firrtl.circuit "NonHWWiresHaveDroppableNames" {
+  // CHECK-LABEL: module @NonHWWiresHaveDroppableNames
+  firrtl.module @NonHWWiresHaveDroppableNames() {
+    // CHECK:      %w = firrtl.wire interesting_name : !firrtl.bundle<a: uint<1>>
+    // CHECK-NEXT: %w_b = firrtl.wire : !firrtl.probe<uint<1>>
+    %w = firrtl.wire interesting_name : !firrtl.openbundle<a: uint<1>, b: probe<uint<1>>>
+  }
+}

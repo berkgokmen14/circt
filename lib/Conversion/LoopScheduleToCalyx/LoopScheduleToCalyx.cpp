@@ -79,8 +79,8 @@ public:
     return getOperation().getConditionValue();
   }
 
-  std::optional<uint64_t> getBound() override {
-    return getOperation().getBound();
+  std::optional<int64_t> getBound() override {
+    return getOperation().getTripCount();
   }
 
   bool isPipelined() { return getOperation().isPipelined(); }

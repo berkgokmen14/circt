@@ -158,6 +158,14 @@ struct LoweringOptions {
 
   /// If true, do not emit a version comment at the top of each verilog file.
   bool omitVersionComment = false;
+
+  /// If true, then unique names that collide with keywords case insensitively.
+  /// This is used to avoid stricter lint warnings which, e.g., treat "REG" as a
+  /// Verilog keyword.
+  bool caseInsensitiveKeywords = false;
+
+  /// If true, then update the the mlir to include output verilog locations.
+  bool emitVerilogLocations = false;
 };
 } // namespace circt
 

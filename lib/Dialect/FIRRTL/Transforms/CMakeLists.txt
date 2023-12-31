@@ -8,39 +8,50 @@ add_circt_dialect_library(CIRCTFIRRTLTransforms
   DropName.cpp
   EmitOMIR.cpp
   ExpandWhens.cpp
-  ExtractClasses.cpp
   ExtractInstances.cpp
-  FlattenMemory.cpp
   FinalizeIR.cpp
+  FlattenMemory.cpp
   GrandCentral.cpp
+  HoistPassthrough.cpp
   IMConstProp.cpp
   IMDeadCodeElim.cpp
-  InferResets.cpp
   InferReadWrite.cpp
+  InferResets.cpp
   InferWidths.cpp
   InjectDUTHierarchy.cpp
   InnerSymbolDCE.cpp
   LegacyWiring.cpp
+  Lint.cpp
+  LayerMerge.cpp
+  LayerSink.cpp
   LowerAnnotations.cpp
   LowerCHIRRTL.cpp
+  LowerClasses.cpp
   LowerIntrinsics.cpp
+  LowerLayers.cpp
   LowerMatches.cpp
   LowerMemory.cpp
   LowerOpenAggs.cpp
+  LowerSignatures.cpp
   LowerTypes.cpp
   LowerXMR.cpp
-  MergeConnections.cpp
+  MaterializeDebugInfo.cpp
   MemToRegOfVec.cpp
+  MergeConnections.cpp
   ModuleInliner.cpp
+  PassiveWires.cpp
   PrefixModules.cpp
   PrintFIRRTLFieldSource.cpp
   PrintInstanceGraph.cpp
   PrintNLATable.cpp
+  ProbeDCE.cpp
   RandomizeRegisterInit.cpp
   RegisterOptimizer.cpp
-  ResolveTraces.cpp
   RemoveUnusedPorts.cpp
+  ResolvePaths.cpp
+  ResolveTraces.cpp
   SFCCompat.cpp
+  SpecializeOption.cpp
   VBToBV.cpp
   Vectorization.cpp
   WireDFT.cpp
@@ -53,6 +64,7 @@ add_circt_dialect_library(CIRCTFIRRTLTransforms
 
   LINK_LIBS PUBLIC
   CIRCTFIRRTL
+  CIRCTDebug
   CIRCTHW
   CIRCTOM
   CIRCTSV

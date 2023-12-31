@@ -7,16 +7,23 @@
 #include "mlir/Dialect/Affine/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/AffineExpr.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/IntegerSet.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include <cassert>
-#include <cstdint>
 
 using namespace mlir;
 using namespace mlir::func;
 using namespace mlir::affine;
 
+/*
+Pass coalesces loops with the following characteristics:
+- There is a for loop with no iter args which includes one nested for loop with
+one iter arg. The inner for loop doesn't have any for loops.
+- Both loops have a step size of 1
+- Both loops have constant bounds
+*/
 namespace {
 struct HoistInterIterationArg
     : public circt::HoistInterIterationArgBase<HoistInterIterationArg> {
@@ -24,8 +31,10 @@ struct HoistInterIterationArg
       HoistInterIterationArg>::HoistInterIterationArgBase;
 
   void runOnOperation() override {
-    llvm::errs() << "Printing step 0\n";
+
+    // Initialize builder and rewriter
     OpBuilder builder(getOperation().getBody());
+    IRRewriter rewriter(builder);
 
     // Apply this pass for every for loop in the FuncOp
     for (auto forOp :
@@ -44,108 +53,107 @@ struct HoistInterIterationArg
 
             // Assert outer for loop and inner for loop have step size of 1
             assert(forOp.getStep() == 1 && childForOp.getStep() == 1);
-            // Assert outer for loop has no iter operands and the inner one has
-            // at least one to hoist
-            assert(forOp.getNumIterOperands() == 0 &&
-                   childForOp.getNumIterOperands() >= 1);
 
+            // Assert outer for loop has no iter operands and the inner loop has
+            // only one iter operand to hoist
+            assert(forOp.getNumIterOperands() == 0 &&
+                   childForOp.getNumIterOperands() == 1);
+
+            // Extract the upper bounds of the forOp and childForOp
             auto forBound = forOp.getConstantUpperBound();
             auto childForBound = childForOp.getConstantUpperBound();
             // Calculate new upper bound
             auto newForBound = forBound * childForBound;
 
-            // Create coalesced for loop with nerForBound and
-            // child iter operands
+            // Create coalesced for loop with new upper bound and copy child
+            // iter operands
             builder.setInsertionPoint(forOp);
             auto newForOp =
                 builder.create<AffineForOp>(forOp.getLoc(), 0, newForBound, 1,
                                             childForOp.getIterOperands());
 
             builder.setInsertionPointToStart(&newForOp.getLoopBody().front());
-            // Create a set for division by 16
+
+            // Create a set that does dim % child for bound
             auto resetSet =
                 IntegerSet::get(1, 0,
                                 {builder.getAffineDimExpr(0) %
                                  builder.getAffineConstantExpr(childForBound)},
                                 {true});
 
-            auto iterArgTypes = childForOp.getIterOperands().getTypes();
-            // Now create the affineif
+            // Create AffineIf where the if region represents the reset region,
+            // and the then region represents the child loop region.
+            // Additionally, output of the AffineIf is the gated iter arg
             auto affineIf = builder.create<AffineIfOp>(
-                childForOp->getLoc(), iterArgTypes, resetSet,
-                newForOp.getIterOperands(), true);
-
-            auto &elseRegion = affineIf.getElseRegion();
+                newForOp->getLoc(), builder.getI32Type(), resetSet,
+                newForOp.getInductionVar(), true);
             auto &ifRegion = affineIf.getThenRegion();
+            auto &elseRegion = affineIf.getElseRegion();
 
-            IRRewriter rewriter(builder);
+            // Replace childForOp induction variable with newForOp induction
+            // variable.
+            childForOp.getBody()->getArgument(0).replaceAllUsesWith(
+                newForOp.getBody()->getArgument(0));
+            // Replace childForOp iter argument with gatedIterArg.
+            childForOp.getBody()->getArgument(1).replaceAllUsesWith(
+                affineIf->getResult(0));
 
-            // Iterate over child block arguments
-            for (size_t i = 0; i < childForOp.getBody()->getArguments().size();
-                 i++) {
-              // Replace child arguments with the same order of new for op args
-              childForOp.getBody()->getArgument(i).replaceAllUsesWith(
-                  newForOp.getBody()->getArgument(i));
-            }
-            // Erase all child arguments since they are now unused
+            // Erase all child block arguments since they are now unused
             childForOp.getBody()->eraseArguments(
                 0, childForOp.getBody()->getArguments().size());
 
-            // ASK: Replace all instances of the child for loop with the new for
-            // loop
-            childForOp->replaceAllUsesWith(affineIf);
+            // Replace uses of the child for loop with the iter operand of the
+            // coalesced for loop
+            childForOp->getResult(0).replaceAllUsesWith(
+                newForOp.getBody()->getArgument(1));
 
             // Move child for loop body to else section
-            rewriter.mergeBlocks(childForOp.getBody(), &(elseRegion.front()));
+            rewriter.mergeBlocks(childForOp.getBody(), newForOp.getBody());
 
-            // Replace all uses of the for op induction var with new for op
-            // induction var
+            // Replace all uses of the for op induction var with new for
+            // op induction var
             forOp.getInductionVar().replaceAllUsesWith(
                 newForOp.getInductionVar());
 
-            // Erase for op block arguments for merging
+            // Erase for op block arguments for merging and forOp terminator if
+            // present
             forOp.getBody()->eraseArgument(0);
+            auto *forOpTerminator = forOp.getBody()->getTerminator();
+            if (forOpTerminator)
+              forOpTerminator->erase();
+
+            // If an operation inside forOp is used in the childForOp, then move
+            // that operation to outside the reset affineIf operation
+            llvm::SmallVector<Operation *> forBodyOps;
+            for (auto &op : forOp.getLoopBody().getOps()) {
+              forBodyOps.push_back(&op);
+            }
+            for (auto *op : forBodyOps) {
+              if (op->isUsedOutsideOfBlock(forOp.getBody())) {
+                op->moveBefore(affineIf);
+              }
+            }
 
             // Move for loop body to if section
             rewriter.mergeBlocks(forOp.getBody(), &(ifRegion.front()));
 
-            // Create value range that includes 0
+            // Create yield reset for AffineIf
             mlir::ValueRange yieldOperands(childForOp.getIterOperands());
-
-            rewriter.replaceOpWithNewOp<AffineYieldOp>(
-                ifRegion.front().getTerminator(), yieldOperands);
+            builder.setInsertionPointToEnd(&ifRegion.front());
+            builder.create<AffineYieldOp>(newForOp.getLoc(), yieldOperands);
+            // Create yield iter arg for AffineIf
+            builder.setInsertionPointToEnd(&elseRegion.front());
+            builder.create<AffineYieldOp>(newForOp.getLoc(),
+                                          newForOp.getRegionIterArgs());
 
             // Erase the old forOp and childForOp
             forOp.erase();
             childForOp.erase();
 
-            newForOp->getParentOp()->dump();
+            // Assert verification success
             assert(newForOp.verify().succeeded());
-            llvm::errs() << "Done dumping\n";
           }
         }
-        // Now it's safe to call getNumOperands
-
-        // auto forOpBody = forOp.getBody();
-        // auto childForOpBody = childForOp.getBody();
-        // auto forBound =
-        //     (forOp.getUpperBound().getMap().getConstantResults().front());
-        // auto upper = forBound * forBound;
-
-        // auto newForOp =
-        //     builder.create<AffineForOp>(getOperation().getLoc(), 0, upper,
-        //     1);
-
-        // auto &childForOpBlock = childForOp.getBody()->front();
-        // auto newForOpBlock = newForOp.getBody();
-
-        // OpBuilder::InsertionGuard guard(builder);
-        // builder.setInsertionPointToStart(newForOpBlock);
-        // builder.clone(childForOpBody->getOperations().front());
-
-        // newForOp->dump();
-        // llvm::errs() << "Done dumping\n";
-        // exit(1);
       }
     }
   }
@@ -157,28 +165,3 @@ std::unique_ptr<mlir::Pass> createHoistInterIterationArgPass() {
   return std::make_unique<HoistInterIterationArg>();
 }
 } // namespace circt
-
-/*
--2) Gather Perfect Loop Nests()
-Collect all the loop nest then filter in next steps
--1) Innermost must return
-0) Root for cannot have a yield. Make sure this is true
-Make sure none of the loops don't have a result except for the innermost which
-must have a result
-1) Reconstruct loop nest immedately after
-Use OPBuilder
-2) Move inner body
-region (can move entire body). can do it with remapping. Remapping (IRMap)
-3) Insert Switch to replace old yield
-4) Delete old nest
-
-LLVM::ERRS() << "PRINTING STEP 1"
-You can use fop->dump()
-exit(1)
-
-
-Add tablegen stuff in include/circt/transforms/passes.td
-
-
-Might get false dependency
-*/

@@ -18,6 +18,38 @@ class CalyxPrimitive<string mnemonic, list<Trait> traits = []> :
     let skipDefaultBuilders = 1;
 }
 
+/// The n-bit, undef op which only provides the out signal
+def UndefLibOp: CalyxPrimitive<"undefined", []> {
+  let summary = "An undefined signal";
+  let description = [{
+    The "calyx.undef" op defines an undefined signal. An undefined signal can be
+    replaced with any value representable in n-bits.
+    ```mlir
+      // A 32-bit undefined value
+      %undef.out = calyx.undef @undef : i32
+    ```
+  }];
+  let arguments = (ins SymbolNameAttr:$sym_name);
+  let builders = [
+    OpBuilder<(ins "StringRef":$sym_name, "::mlir::TypeRange":$resultTypes), [{
+      $_state.addAttribute(mlir::SymbolTable::getSymbolAttrName(), $_builder.getStringAttr(sym_name));
+      $_state.addTypes(resultTypes);
+    }]>
+  ];
+  let results = (outs AnyType:$out);
+  let extraClassDefinition = [{
+    bool $cppClass::isCombinational() { return false; }
+    SmallVector<StringRef> $cppClass::portNames() { return {"out"}; }
+    SmallVector<Direction> $cppClass::portDirections() { return {Output}; }
+    void $cppClass::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
+      getCellAsmResultNames(setNameFn, *this, this->portNames());
+    }
+    SmallVector<DictionaryAttr> $cppClass::portAttributes() {
+      return {DictionaryAttr::get(getContext())};
+    }
+  }];
+}
+
 /// Trait used to mark certain operations in the Calyx dialect as combinational.
 def Combinational : NativeOpTrait<"Combinational"> {
   let cppNamespace = "::circt::calyx";
@@ -123,7 +155,7 @@ def MemoryOp : CalyxPrimitive<"memory", []> {
 def SeqMemoryOp : CalyxPrimitive<"seq_mem", []> {
   let summary = "Defines a memory with sequential read";
   let description = [{
-    The "calyx.seq_mem" op defines a memory with sequential reads. Memories can 
+    The "calyx.seq_mem" op defines a memory with sequential reads. Memories can
     have any number of dimensions, as specified by the length of the `$sizes` and
     `$addrSizes` arrays. The `$addrSizes` specify the bitwidth of each dimension's
     address, and should be wide enough to address the range of the corresponding
@@ -267,17 +299,33 @@ def AndLibOp  : CombinationalArithBinaryLibraryOp<"and"> {}
 def OrLibOp   : CombinationalArithBinaryLibraryOp<"or"> {}
 def XorLibOp  : CombinationalArithBinaryLibraryOp<"xor"> {}
 
+def MuxLibOp : CalyxLibraryOp<"mux", [
+  Combinational, SameTypeConstraint<"tru", "fal">, SameTypeConstraint<"tru", "out">
+  ]> {
+  let results = (outs I1:$cond, AnyType:$tru, AnyType:$fal, AnyType:$out);
+  let extraClassDefinition = [{
+    SmallVector<StringRef> $cppClass::portNames() {
+      return {"cond", "tru", "fal", "out"};
+    }
+    SmallVector<Direction> $cppClass::portDirections() {
+      return {Input, Input, Input, Output};
+    }
+    void $cppClass::getAsmResultNames(OpAsmSetValueNameFn setNameFn) {
+      getCellAsmResultNames(setNameFn, *this, this->portNames());
+    }
+    bool $cppClass::isCombinational() { return true; }
+    SmallVector<DictionaryAttr> $cppClass::portAttributes() {
+      return {DictionaryAttr::get(getContext()), DictionaryAttr::get(getContext()),
+              DictionaryAttr::get(getContext()), DictionaryAttr::get(getContext())};
+    }
+  }];
+}
+
 class SequentialArithBinaryLibraryOp<string mnemonic> : ArithBinaryLibraryOp<mnemonic # "_pipe", [
     SameTypeConstraint<"left", "out">
   ]> {
   let results = (outs I1:$clk, I1:$reset, I1:$go, AnyType:$left, AnyType:$right, AnyType:$out, I1:$done);
 }
-
-def SeqMultLibOp : SequentialArithBinaryLibraryOp<"mult"> {}
-def SeqDivSLibOp : SequentialArithBinaryLibraryOp<"divs"> {}
-def SeqDivULibOp : SequentialArithBinaryLibraryOp<"divu"> {}
-def SeqRemULibOp : SequentialArithBinaryLibraryOp<"remu"> {}
-def SeqRemSLibOp : SequentialArithBinaryLibraryOp<"rems"> {}
 
 class ArithBinaryPipeLibraryOp<string mnemonic> : CalyxPrimitive<"pipelined_" # mnemonic, [
     SameTypeConstraint<"left", "out">
@@ -311,6 +359,12 @@ class ArithBinaryPipeLibraryOp<string mnemonic> : CalyxPrimitive<"pipelined_" # 
   ];
   let results = (outs I1:$clk, I1:$reset, AnyType:$left, AnyType:$right, AnyType:$out);
 }
+
+def SeqMultLibOp : SequentialArithBinaryLibraryOp<"mult"> {}
+def SeqDivSLibOp : SequentialArithBinaryLibraryOp<"divs"> {}
+def SeqDivULibOp : SequentialArithBinaryLibraryOp<"divu"> {}
+def SeqRemULibOp : SequentialArithBinaryLibraryOp<"remu"> {}
+def SeqRemSLibOp : SequentialArithBinaryLibraryOp<"rems"> {}
 
 def PipelinedMultLibOp : ArithBinaryPipeLibraryOp<"mult"> {}
 
@@ -354,4 +408,4 @@ def WireLibOp : UnaryLibraryOp<"wire", [SameTypeConstraint<"in", "out">]> {
   ];
 }
 
-def ExtSILibOp  : UnaryLibraryOp<"extsi"> {}
+def ExtSILibOp  : UnaryLibraryOp<"signext"> {}

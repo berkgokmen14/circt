@@ -212,7 +212,7 @@ although there may be further restrictions in the annotation.
 This annotation attaches SV attributes to a specified target. A reference
 target must be a wire, node, reg, or module. This annotation doesn't prevent
 optimizations so it's necessary to add dontTouch annotation if users want to
-preseve the target.
+preserve the target.
 
 Example:
 ```json
@@ -287,10 +287,10 @@ Example:
 
 ### [BlackBoxResourceFileNameAnno](https://javadoc.io/doc/edu.berkeley.cs/firrtl_2.13/latest/firrtl/transforms/BlackBoxResourceFileNameAnno.html)
 
-| Property         | Type   | Description                              |
-| ----------       | ------ | -------------                            |
-| class            | string | `firrtl.transforms.BlackBoxFileNameAnno` |
-| resourceFileName | string | Output filename                          |
+| Property         | Type   | Description                                      |
+| ----------       | ------ | -------------                                    |
+| class            | string | `firrtl.transforms.BlackBoxResourceFileNameAnno` |
+| resourceFileName | string | Output filename                                  |
 
 Specifies the output file name for the list of black box source files that
 is generated as a collateral of the pass.
@@ -424,7 +424,7 @@ Example:
 This annotation attaches a comment to a specified target. A reference
 target must be a wire, node, reg, or module. This annotation doesn't prevent
 optimizations so it's necessary to add dontTouch annotation if users want to
-preseve the target.
+preserve the target.
 
 Example:
 ```json
@@ -631,6 +631,27 @@ Example:
 }
 ```
 
+### DedupGroupAnnotation
+
+| Property   | Type   | Description                                |
+| ---------- | ------ | -------------                              |
+| class      | string | `firrtl.transforms.DedupGroupAnnotation`   |
+| target     | string | Module target                              |
+| group      | string | The dedup group that the module belongs to |
+
+This annotation assigns the targeted module to a dedup group. Modules that
+belong to a dedup group may only be deduplicated with modules that are part of
+the same group.
+
+Example:
+```json
+{
+  "class":"firrtl.transforms.DedupGroupAnnotation",
+  "target": "~Top|A",
+  "group": "foo"
+}
+```
+
 ### NestedPrefixModulesAnnotation
 
 | Property   | Type   | Description                                              |
@@ -714,7 +735,6 @@ The `value` field can be a JSON array or dictionary (corresponding to the `OMArr
 - `OMBigDecimal:<value>`
 - `OMFrozenTarget:<omir>`
 - `OMDeleted`
-- `OMConstant:<literal>`
 - `OMReferenceTarget:<target>`
 - `OMMemberReferenceTarget:<target>`
 - `OMMemberInstanceTarget:<target>`
@@ -736,7 +756,6 @@ Example:
         {"info": "", "name": "d", "value": "OMString:hello"},
         {"info": "", "name": "f", "value": "OMBigDecimal:10.5"},
         {"info": "", "name": "g", "value": "OMDeleted:"},
-        {"info": "", "name": "h", "value": "OMConstant:UInt<2>(\"h1\")"},
         {"info": "", "name": "i", "value": 42},
         {"info": "", "name": "j", "value": true},
         {"info": "", "name": "k", "value": 3.14}
@@ -788,7 +807,7 @@ containing the names of all modules annotated with the
 Example:
 ```json
 {
-  "class": "sifive.enterprise.firrtl.RetimeModuleAnnotation",
+  "class": "sifive.enterprise.firrtl.RetimeModulesAnnotation",
   "filename": "retime_modules.json"
 }
 ```
@@ -874,10 +893,10 @@ Example:
 
 ### SitestTestHarnessBlackBoxAnnotation
 
-| Property   | Type   | Description                                                     |
-| ---------- | ------ | -------------                                                   |
-| class      | string | `sifive.enterprise.firrtl.SittestTestHarnessBlackBoxAnnotation` |
-| filename   | string | The file to write to                                            |
+| Property   | Type   | Description                                                    |
+| ---------- | ------ | -------------                                                  |
+| class      | string | `sifive.enterprise.firrtl.SitestTestHarnessBlackBoxAnnotation` |
+| filename   | string | The file to write to                                           |
 
 This annotation triggers the creation of a file containing a JSON array of the
 names of all external modules in the test harness which are not imported or

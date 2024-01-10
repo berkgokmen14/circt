@@ -32,11 +32,13 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/ImplicitLocOpBuilder.h"
+#include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Visitors.h"
 #include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
 #include "llvm/ADT/STLExtras.h"
@@ -116,7 +118,6 @@ AffineToLoopSchedule::getModuloProblem(affine::AffineForOp forOp) {
       if (!forOp->isAncestor(memoryDep.source))
         continue;
 
-      // memoryDep.source->dump();
       // Insert a dependence into the problem.
       Problem::Dependence dep(memoryDep.source, op);
       auto depInserted = problem.insertDependence(dep);
@@ -176,7 +177,8 @@ AffineToLoopSchedule::getSharedOperatorsProblem(affine::AffineForOp forOp) {
   SharedOperatorsProblem problem = SharedOperatorsProblem::get(forOp);
 
   // Insert memory dependences into the problem.
-  forOp.getLoopBody().walk([&](Operation *op) {
+  assert(forOp.getLoopRegions().size() == 1);
+  forOp.getLoopRegions().front()->walk([&](Operation *op) {
     if (op->getParentOfType<LoopInterface>() != nullptr)
       return;
 
@@ -208,7 +210,6 @@ AffineToLoopSchedule::getSharedOperatorsProblem(affine::AffineForOp forOp) {
         continue;
 
       assert(memoryDep.source != nullptr);
-      // memoryDep.source->getParentOp()->dump();
       if (!forOp->isAncestor(memoryDep.source))
         continue;
 
@@ -263,8 +264,9 @@ AffineToLoopSchedule::getSharedOperatorsProblem(affine::AffineForOp forOp) {
 
   // Set the anchor for scheduling. Insert dependences from all stores to the
   // terminator to ensure the problem schedules them before the terminator.
-  auto *anchor = forOp.getLoopBody().back().getTerminator();
-  forOp.getLoopBody().walk([&](Operation *op) {
+  assert(forOp.getLoopRegions().size() == 1);
+  auto *anchor = forOp.getLoopRegions().front()->back().getTerminator();
+  forOp.getLoopRegions().front()->walk([&](Operation *op) {
     if (op->getParentOfType<LoopScheduleSequentialOp>() != nullptr ||
         op->getParentOfType<LoopSchedulePipelineOp>() != nullptr)
       return;
@@ -484,19 +486,21 @@ void AffineToLoopSchedule::runOnOperation() {
   //   }
   // }
 
+  // getOperation()->getParentOfType<ModuleOp>().dump();
+
   // getOperation().walk([&](Operation *op) {
   //   ArrayRef<MemoryDependence> dependences =
   //       dependenceAnalysis->getDependences(op);
   //   if (dependences.empty())
   //     return;
   //   op->dump();
-  //   llvm::errs() << "===============================\n";
   //   for (auto &memoryDep : dependences) {
   //     if (!hasDependence(memoryDep.dependenceType))
   //       continue;
   //     llvm::errs() << "deps: ";
   //     memoryDep.source->dump();
   //   }
+  //   llvm::errs() << "===============================\n\n";
   // });
 
   // After dependence analysis, materialize affine structures.
@@ -534,15 +538,17 @@ void AffineToLoopSchedule::runOnOperation() {
   for (auto loop : seqLoops) {
     // getOperation().dump();
     // loop.dump();
+    assert(loop.getLoopRegions().size() == 1);
     auto problem = getSharedOperatorsProblem(loop);
 
     // Populate the target operator types.
-    if (failed(populateOperatorTypes(loop.getOperation(), loop.getLoopBody(),
-                                     problem)))
+    if (failed(populateOperatorTypes(loop.getOperation(),
+                                     *loop.getLoopRegions().front(), problem)))
       return signalPassFailure();
 
     // Solve the scheduling problem computed by the analysis.
-    if (failed(solveSharedOperatorsProblem(loop.getLoopBody(), problem)))
+    if (failed(solveSharedOperatorsProblem(*loop.getLoopRegions().front(),
+                                           problem)))
       return signalPassFailure();
 
     // Convert the IR.
@@ -712,6 +718,91 @@ private:
   MemoryDependenceAnalysis &dependenceAnalysis;
 };
 
+template <typename OpTy>
+struct FoldSign : OpConversionPattern<OpTy> {
+  using OpConversionPattern<OpTy>::OpConversionPattern;
+
+  static std::optional<IntegerType> operandIsExtended(Value operand) {
+    auto *definingOp = operand.getDefiningOp();
+    if (!definingOp)
+      return std::nullopt;
+
+    if (!isa<IntegerType>(operand.getType()))
+      return std::nullopt;
+
+    if (auto extOp = dyn_cast<arith::ExtSIOp>(*definingOp))
+      return cast<IntegerType>(extOp->getOperand(0).getType());
+    if (auto extOp = dyn_cast<arith::ExtUIOp>(*definingOp))
+      return cast<IntegerType>(extOp->getOperand(0).getType());
+
+    return std::nullopt;
+  }
+
+  static std::optional<IntegerType>
+  valIsTruncated(TypedValue<IntegerType> val) {
+    if (!val.hasOneUse())
+      return std::nullopt;
+    auto *op = *val.getUsers().begin();
+    if (auto trunc = dyn_cast<arith::TruncIOp>(*op))
+      if (auto truncType = dyn_cast<IntegerType>(trunc.getType()))
+        return truncType;
+
+    return std::nullopt;
+  }
+
+  static bool opIsLegal(OpTy op) {
+    if (op->getNumResults() != 1)
+      return true;
+    if (op->getNumOperands() <= 0)
+      return true;
+    if (!isa<IntegerType>(op->getResultTypes().front()))
+      return true;
+
+    auto outType =
+        valIsTruncated(cast<TypedValue<IntegerType>>(op->getResult(0)));
+    if (!outType.has_value())
+      return true;
+
+    auto operandType = operandIsExtended(op->getOperand(0));
+    if (!operandType.has_value() || operandType != outType)
+      return true;
+
+    // Extension and trunc should be opt away
+    SmallVector<Value> operands;
+    for (auto operand : op->getOperands()) {
+      auto oW = operandIsExtended(operand);
+      if (oW != operandType)
+        return true;
+    }
+    return false;
+  }
+
+  LogicalResult
+  matchAndRewrite(OpTy op, typename OpTy::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    if (opIsLegal(op))
+      return failure();
+
+    auto outType =
+        valIsTruncated(cast<TypedValue<IntegerType>>(op->getResult(0)));
+
+    // Extension and trunc should be opt away
+    SmallVector<Value> operands;
+    for (auto operand : op->getOperands())
+      operands.push_back(operand.getDefiningOp()->getOperand(0));
+
+    SmallVector<Type> resultTypes = {*outType};
+    auto newOp = rewriter.create<OpTy>(op.getLoc(), resultTypes, operands);
+    auto trunc = *op->getUsers().begin();
+    trunc->getResult(0).replaceAllUsesWith(newOp->getResult(0));
+    trunc->erase();
+    rewriter.eraseOp(op);
+
+    return success();
+  }
+};
+
 struct MulStrengthReduction : OpConversionPattern<MulIOp> {
   using OpConversionPattern<MulIOp>::OpConversionPattern;
 
@@ -729,10 +820,11 @@ struct MulStrengthReduction : OpConversionPattern<MulIOp> {
         auto shift = rewriter.create<arith::ConstantOp>(op.getLoc(), attr);
         rewriter.replaceOpWithNewOp<arith::ShLIOp>(op, op.getLhs(),
                                                    shift.getResult());
+        return success();
       }
     }
 
-    return success();
+    return failure();
   }
 };
 
@@ -753,10 +845,11 @@ struct RemUIStrengthReduction : OpConversionPattern<RemUIOp> {
         auto shift = rewriter.create<arith::ConstantOp>(op.getLoc(), attr);
         rewriter.replaceOpWithNewOp<arith::AndIOp>(op, op.getLhs(),
                                                    shift.getResult());
+        return success();
       }
     }
 
-    return success();
+    return failure();
   }
 };
 
@@ -789,10 +882,11 @@ struct DivSIStrengthReduction : OpConversionPattern<DivSIOp> {
         auto shift = rewriter.create<arith::ConstantOp>(op.getLoc(), attr);
         rewriter.replaceOpWithNewOp<arith::ShRUIOp>(op, op.getLhs(),
                                                     shift.getResult());
+        return success();
       }
     }
 
-    return success();
+    return failure();
   }
 };
 
@@ -843,10 +937,12 @@ static bool mulLegalityCallback(Operation *op) {
     auto *rhsDef = mulOp.getRhs().getDefiningOp();
 
     if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
-      if (cast<IntegerAttr>(constOp.getValue()).getValue().exactLogBase2()) {
+      if (cast<IntegerAttr>(constOp.getValue()).getValue().exactLogBase2() !=
+          -1) {
         return false;
       }
     }
+    return FoldSign<arith::MulIOp>::opIsLegal(mulOp);
   }
   return true;
 }
@@ -856,7 +952,8 @@ static bool DivSIOpLegalityCallback(Operation *op) {
     auto *rhsDef = mulOp.getRhs().getDefiningOp();
 
     if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
-      if (cast<IntegerAttr>(constOp.getValue()).getValue().exactLogBase2()) {
+      if (cast<IntegerAttr>(constOp.getValue()).getValue().exactLogBase2() !=
+          -1) {
         return false;
       }
     }
@@ -869,7 +966,8 @@ static bool remUILegalityCallback(Operation *op) {
     auto *rhsDef = remOp.getRhs().getDefiningOp();
 
     if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
-      if (cast<IntegerAttr>(constOp.getValue()).getValue().exactLogBase2()) {
+      if (cast<IntegerAttr>(constOp.getValue()).getValue().exactLogBase2() !=
+          -1) {
         return false;
       }
     }
@@ -883,7 +981,7 @@ static bool remSILegalityCallback(Operation *op) {
 
     if (auto constOp = dyn_cast<arith::ConstantOp>(rhsDef)) {
       auto rhsValue = cast<IntegerAttr>(constOp.getValue());
-      if (rhsValue.getValue().exactLogBase2()) {
+      if (rhsValue.getValue().exactLogBase2() != -1) {
         if (rhsValue.getInt() >= 0)
           return false;
       }
@@ -927,11 +1025,16 @@ LogicalResult AffineToLoopSchedule::lowerAffineStructures() {
   patterns.clear();
   populateAffineToStdConversionPatterns(patterns);
   target.addIllegalOp<AffineApplyOp>();
+  patterns.add<FoldSign<arith::AddIOp>>(context);
+  patterns.add<FoldSign<arith::SubIOp>>(context);
+  patterns.add<FoldSign<arith::MulIOp>>(context);
   patterns.add<MulStrengthReduction>(context);
   patterns.add<DivSIStrengthReduction>(context);
   patterns.add<RemUIStrengthReduction>(context);
   patterns.add<RemSIStrengthReduction>(context);
 
+  target.addDynamicallyLegalOp<AddIOp>(FoldSign<AddIOp>::opIsLegal);
+  target.addDynamicallyLegalOp<SubIOp>(FoldSign<SubIOp>::opIsLegal);
   target.addDynamicallyLegalOp<MulIOp>(mulLegalityCallback);
   target.addDynamicallyLegalOp<DivSIOp>(DivSIOpLegalityCallback);
   target.addDynamicallyLegalOp<RemUIOp>(remUILegalityCallback);
@@ -982,14 +1085,15 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
     }
 
     return TypeSwitch<Operation *, WalkResult>(op)
-        .Case<IfOp, AffineYieldOp, arith::ConstantOp, CmpIOp, IndexCastOp,
+        .Case<IfOp, AffineYieldOp, arith::ConstantOp, arith::ExtSIOp,
+              arith::ExtUIOp, arith::TruncIOp, CmpIOp, IndexCastOp,
               memref::AllocaOp, memref::AllocOp, loopschedule::AllocInterface,
               YieldOp, func::ReturnOp>([&](Operation *combOp) {
           // Some known combinational ops.
           problem.setLinkedOperatorType(combOp, combOpr);
           return WalkResult::advance();
         })
-        .Case<AddIOp, CmpIOp, ShLIOp, AndIOp, ShRSIOp, ShRUIOp>(
+        .Case<AddIOp, SubIOp, CmpIOp, ShLIOp, AndIOp, ShRSIOp, ShRUIOp>(
             [&](Operation *seqOp) {
               // These ops need to be sequential for now because we do not
               // have enough information to chain them together yet.
@@ -1009,7 +1113,8 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
               Problem::OperatorType memOpr = problem.getOrInsertOperatorType(
                   "mem_" + std::to_string(hash_value(memRef)));
               problem.setLatency(memOpr, 1);
-              problem.setLimit(memOpr, 2);
+              // External memories are 1 RW port
+              problem.setLimit(memOpr, 1);
               problem.addExtraLimitingType(loopOp, memOpr);
             } else if (isa<LoadInterface>(op)) {
               auto loadOp = cast<loopschedule::LoadInterface>(*op);
@@ -1035,7 +1140,7 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
           });
           return WalkResult::advance();
         })
-        .Case<memref::StoreOp>([&](Operation *memOp) {
+        .Case<memref::StoreOp, AffineStoreOp>([&](Operation *memOp) {
           // Some known sequential ops. In certain cases, reads may be
           // combinational in Calyx, but taking advantage of that is left as
           // a future enhancement.
@@ -1049,7 +1154,7 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
           problem.setLinkedOperatorType(memOp, memOpr);
           return WalkResult::advance();
         })
-        .Case<memref::LoadOp>([&](Operation *memOp) {
+        .Case<memref::LoadOp, AffineLoadOp>([&](Operation *memOp) {
           // Some known sequential ops. In certain cases, reads may be
           // combinational in Calyx, but taking advantage of that is left as
           // a future enhancement.
@@ -1086,6 +1191,19 @@ AffineToLoopSchedule::populateOperatorTypes(Operation *op, Region &loopBody,
           if (limitOpt.has_value())
             problem.setLimit(portOpr, limitOpt.value());
           problem.setLinkedOperatorType(op, portOpr);
+
+          return WalkResult::advance();
+        })
+        .Case<loopschedule::SchedulableInterface>([&](Operation *op) {
+          auto schedOp = cast<SchedulableInterface>(op);
+          auto latency = schedOp.getOpLatency();
+          auto limitOpt = schedOp.getOpLimit();
+          Problem::OperatorType opr =
+              problem.getOrInsertOperatorType(schedOp.getUniqueId());
+          problem.setLatency(opr, latency);
+          if (limitOpt.has_value())
+            problem.setLimit(opr, limitOpt.value());
+          problem.setLinkedOperatorType(op, opr);
 
           return WalkResult::advance();
         })
@@ -1221,7 +1339,7 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
   // Create Values for the loop's lower and upper bounds.
   Value lowerBound = lowerAffineLowerBound(loop, builder);
   Value upperBound = lowerAffineUpperBound(loop, builder);
-  int64_t stepValue = loop.getStep();
+  int64_t stepValue = loop.getStep().getSExtValue();
   auto step = builder.create<arith::ConstantOp>(
       IntegerAttr::get(builder.getIndexType(), stepValue));
 
@@ -1235,7 +1353,7 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
 
   SmallVector<Value> iterArgs;
   iterArgs.push_back(lowerBound);
-  iterArgs.append(loop.getIterOperands().begin(), loop.getIterOperands().end());
+  iterArgs.append(loop.getInits().begin(), loop.getInits().end());
 
   // If possible, attach a constant trip count attribute. This could be
   // generalized to support non-constant trip counts by supporting an AffineMap.
@@ -1353,7 +1471,8 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
   }
 
   // loop.dump();
-  for (auto it : enumerate(loop.getLoopBody().getArguments())) {
+  assert(loop.getLoopRegions().size() == 1);
+  for (auto it : enumerate(loop.getLoopRegions().front()->getArguments())) {
     auto iterArg = it.value();
     if (iterArg.getUsers().empty())
       continue;
@@ -1361,7 +1480,7 @@ AffineToLoopSchedule::createLoopSchedulePipeline(AffineForOp &loop,
     unsigned startPipeTime = 0;
     if (it.index() > 0) {
       // Handle extra iter args
-      auto *term = loop.getLoopBody().back().getTerminator();
+      auto *term = loop.getLoopRegions().front()->back().getTerminator();
       auto &termOperand = term->getOpOperand(it.index() - 1);
       auto *definingOp = termOperand.get().getDefiningOp();
       assert(definingOp != nullptr);
@@ -1622,7 +1741,7 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
   // Create Values for the loop's lower and upper bounds.
   Value lowerBound = lowerAffineLowerBound(loop, builder);
   Value upperBound = lowerAffineUpperBound(loop, builder);
-  int64_t stepValue = loop.getStep();
+  int64_t stepValue = loop.getStep().getSExtValue();
   auto incr = builder.create<arith::ConstantOp>(
       IntegerAttr::get(builder.getIndexType(), stepValue));
 
@@ -1636,7 +1755,7 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
 
   SmallVector<Value> iterArgs;
   iterArgs.push_back(lowerBound);
-  iterArgs.append(loop.getIterOperands().begin(), loop.getIterOperands().end());
+  iterArgs.append(loop.getInits().begin(), loop.getInits().end());
 
   // If possible, attach a constant trip count attribute. This could be
   // generalized to support non-constant trip counts by supporting an AffineMap.
@@ -1717,10 +1836,44 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
       endTime = *startTime;
   }
 
+  auto hasLaterUse = [&](Operation *op, uint32_t resTime) {
+    for (uint32_t i = resTime + 1; i < endTime; ++i) {
+      if (startGroups.contains(i)) {
+        auto startGroup = startGroups[i];
+        for (auto *operation : startGroup) {
+          for (auto &operand : operation->getOpOperands()) {
+            if (operand.get().getDefiningOp() == op)
+              return true;
+          }
+        }
+      }
+    }
+    return false;
+  };
+
+  // Must re-register return values of memories if they are used later
+  for (auto *op : problem.getOperations()) {
+    if (isa<LoadOp, AffineLoadOp>(op)) {
+      auto startTime = problem.getStartTime(op);
+      auto resTime = *startTime + 1;
+      if (hasLaterUse(op, resTime) && !startGroups.contains(resTime)) {
+        startGroups[resTime] = SmallVector<Operation *>();
+      }
+    }
+    if (auto load = dyn_cast<LoadInterface>(op)) {
+      auto startTime = problem.getStartTime(op);
+      auto latency = load.getLatency().has_value() ? *load.getLatency() : 1;
+      auto resTime = *startTime + latency;
+      if (hasLaterUse(op, resTime) && !startGroups.contains(resTime)) {
+        startGroups[resTime] = SmallVector<Operation *>();
+      }
+    }
+  }
+
   Block &scheduleBlock = sequential.getScheduleBlock();
 
-  // llvm::errs() << "here\n";
-  if (!loop.getLoopBody().getArgument(0).getUsers().empty()) {
+  assert(loop.getLoopRegions().size() == 1);
+  if (!loop.getLoopRegions().front()->getArgument(0).getUsers().empty()) {
     // llvm::errs() << "Add extra start group\n";
     auto containsLoop = false;
     for (auto *op : startGroups[endTime]) {
@@ -1740,7 +1893,7 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
   // initially populated with the iter args.
   valueMap.clear();
   for (size_t i = 0; i < iterArgs.size(); ++i)
-    valueMap.map(loop.getLoopBody().getArgument(i),
+    valueMap.map(loop.getLoopRegions().front()->getArgument(i),
                  sequential.getScheduleBlock().getArgument(i));
 
   // Create the stages.
@@ -1751,6 +1904,8 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
   for (const auto &group : startGroups)
     startTimes.push_back(group.first);
   llvm::sort(startTimes);
+
+  DenseMap<uint32_t, SmallVector<Value>> reregisterValues;
 
   LoopScheduleStepOp lastStep;
   DominanceInfo dom(getOperation());
@@ -1769,7 +1924,8 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
     DenseSet<Operation *> opsWithReturns;
     for (auto *op : group) {
       for (auto *user : op->getUsers()) {
-        auto *userOrAncestor = loop.getLoopBody().findAncestorOpInRegion(*user);
+        auto *userOrAncestor =
+            loop.getLoopRegions().front()->findAncestorOpInRegion(*user);
         auto startTimeOpt = problem.getStartTime(userOrAncestor);
         if ((startTimeOpt.has_value() && *startTimeOpt > startTime) ||
             isLoopTerminator(user)) {
@@ -1780,6 +1936,10 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
           }
         }
       }
+    }
+
+    for (auto val : reregisterValues[startTime]) {
+      stepTypes.push_back(val.getType());
     }
 
     if (i.index() == startTimes.size() - 1) {
@@ -1816,6 +1976,14 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
       }
     }
 
+    // Reregister values
+    for (auto val : reregisterValues[startTime]) {
+      unsigned resultIndex = stepTerminator->getNumOperands();
+      stepTerminator->insertOperands(resultIndex, valueMap.lookup(val));
+      auto newValue = step->getResult(resultIndex);
+      valueMap.map(val, newValue);
+    }
+
     // Add the step results to the value map for the original op.
     for (auto tuple : movedOps) {
       Operation *op = std::get<0>(tuple);
@@ -1825,6 +1993,21 @@ LogicalResult AffineToLoopSchedule::createLoopScheduleSequential(
         auto newValue = step->getResult(resultIndex + i);
         auto oldValue = op->getResult(i);
         valueMap.map(oldValue, newValue);
+      }
+    }
+
+    // Add values that need to be reregistered in the future
+    for (auto *op : group) {
+      if (auto load = dyn_cast<LoadOp>(op)) {
+        if (hasLaterUse(op, startTime + 1)) {
+          reregisterValues[startTime + 1].push_back(load.getResult());
+        }
+      } else if (auto load = dyn_cast<LoadInterface>(op)) {
+        auto latency = load.getLatency().has_value() ? *load.getLatency() : 1;
+        if (hasLaterUse(op, startTime + latency)) {
+          auto resTime = startTime + latency;
+          reregisterValues[resTime].push_back(load.getResult());
+        }
       }
     }
 
@@ -1954,6 +2137,10 @@ AffineToLoopSchedule::createFuncLoopSchedule(FuncOp &funcOp,
     if (isa<AffineYieldOp, YieldOp, func::ReturnOp, memref::AllocaOp,
             arith::ConstantOp, memref::AllocOp, AllocInterface>(op))
       continue;
+    if (auto schedOp = dyn_cast<SchedulableInterface>(op)) {
+      if (schedOp.isInitOp())
+        continue;
+    }
     auto startTime = problem.getStartTime(op);
     startGroups[*startTime].push_back(op);
   }
@@ -2045,8 +2232,6 @@ AffineToLoopSchedule::createFuncLoopSchedule(FuncOp &funcOp,
     }
   }
 
-  // getOperation().dump();
-
   // Update return with correct values
   auto *returnOp = funcOp.getBody().back().getTerminator();
   int numOperands = returnOp->getNumOperands();
@@ -2074,6 +2259,10 @@ AffineToLoopSchedule::createFuncLoopSchedule(FuncOp &funcOp,
         isa<func::ReturnOp, memref::AllocaOp, arith::ConstantOp,
             memref::AllocOp, AllocInterface>(op))
       return;
+    if (auto schedOp = dyn_cast<SchedulableInterface>(op)) {
+      if (schedOp.isInitOp())
+        return;
+    }
     op->dropAllUses();
     op->dropAllDefinedValueUses();
     op->dropAllReferences();

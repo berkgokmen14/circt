@@ -49,14 +49,11 @@ if( CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR )
 # Options and settings
 #-------------------------------------------------------------------------------
 
-  option(LLVM_INCLUDE_TOOLS "Generate build targets for the LLVM tools." ON)
-  option(LLVM_BUILD_TOOLS "Build the LLVM tools. If OFF, just generate build targets." ON)
-
-if (MSVC)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHs-c- /GR-")
-else ()
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -fno-rtti")
-endif ()
+  if (MSVC)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHs-c- /GR-")
+  else ()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -fno-rtti")
+  endif ()
 
 #-------------------------------------------------------------------------------
 # MLIR/LLVM Configuration
@@ -84,12 +81,16 @@ endif ()
   # Handle unittests when building out-of-tree against an installed version of
   # LLVM/MLIR (not a build tree). Adapted from `llvm/flang/CMakeLists.txt`.
   set(CIRCT_GTEST_AVAILABLE 0)
-  set(UNITTEST_DIR ${LLVM_THIRD_PARTY_DIR}/unittest)
-  if (NOT EXISTS ${UNITTEST_DIR}/googletest/include/gtest/gtest.h)
-    set(UNITTEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/llvm/third-party/unittest)
-  endif()
-  if (EXISTS ${UNITTEST_DIR}/googletest/include/gtest/gtest.h)
-    if (NOT TARGET llvm_gtest)
+  if (TARGET llvm_gtest)
+    # Installed gtest, via LLVM_INSTALL_GTEST.  Preferred.
+    message(STATUS "LLVM GTest found, enabling unittests")
+    set(CIRCT_GTEST_AVAILABLE 1)
+  else()
+    set(UNITTEST_DIR ${LLVM_THIRD_PARTY_DIR}/unittest)
+    if (NOT EXISTS ${UNITTEST_DIR}/googletest/include/gtest/gtest.h)
+      set(UNITTEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/llvm/third-party/unittest)
+    endif()
+    if (EXISTS ${UNITTEST_DIR}/googletest/include/gtest/gtest.h)
       find_package(Threads)
       add_llvm_library(llvm_gtest
         ${UNITTEST_DIR}/googletest/src/gtest-all.cc
@@ -112,12 +113,12 @@ endif ()
         LINK_COMPONENTS Support # llvm::cl
         BUILDTREE_ONLY
       )
+      set(CIRCT_GTEST_AVAILABLE 1)
+    else()
+      message(WARNING "Skipping unittests since LLVM install does not include \
+        gtest headers and libraries")
+      set(CIRCT_GTEST_AVAILABLE 0)
     endif()
-    set(CIRCT_GTEST_AVAILABLE 1)
-  else()
-    message(WARNING "Skipping unittests since LLVM install does not include \
-      gtest headers and libraries")
-    set(CIRCT_GTEST_AVAILABLE 0)
   endif()
 
 else()
@@ -168,6 +169,12 @@ set(CIRCT_LIBRARY_DIR ${CMAKE_BINARY_DIR}/lib)
 set(CIRCT_TOOLS_DIR ${CMAKE_BINARY_DIR}/bin)
 set(CIRCT_UTILS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/utils)
 set(CIRCT_PYTHON_PACKAGES_DIR ${CIRCT_BINARY_DIR}/python_packages)
+
+
+option(CIRCT_INCLUDE_TOOLS "Generate build targets for the CIRCT tools." ON)
+option(CIRCT_BUILD_TOOLS "Build the CIRCT tools. If OFF, just generate build targets." ON)
+set(CIRCT_TOOLS_INSTALL_DIR "${CMAKE_INSTALL_BINDIR}" CACHE PATH
+    "Path for binary subdirectory (defaults to '${CMAKE_INSTALL_BINDIR}')")
 
 list(APPEND CMAKE_MODULE_PATH "${MLIR_MAIN_SRC_DIR}/cmake/modules")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules")
@@ -405,43 +412,6 @@ else()
 endif()
 
 #-------------------------------------------------------------------------------
-# capnp Configuration
-#-------------------------------------------------------------------------------
-
-# If capnp hasn't been explicitly disabled, find it.
-option(CAPNP_DISABLE "Disable Cap'nProto (needed for cosimulation).")
-if (CAPNP_DISABLE)
-  message (STATUS "Disabling Cap'nProto.")
-else()
-  if(DEFINED CAPNP_PATH)
-    set(ENV{PKG_CONFIG_PATH}
-      "${CAPNP_PATH}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
-    find_package(CapnProto CONFIG PATHS ${CAPNP_PATH})
-  else()
-    set(ENV{PKG_CONFIG_PATH}
-      "${CMAKE_CURRENT_SOURCE_DIR}/ext/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
-    find_package(CapnProto CONFIG PATHS "${CMAKE_CURRENT_SOURCE_DIR}/ext")
-  endif()
-
-  if(CapnProto_FOUND)
-    message(STATUS "Found Cap'nProto at ${CapnProto_DIR}.")
-    set(CMAKE_INSTALL_RPATH ${capnp_LIBDIR})
-    set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
-
-    # Some of our CMake code which is only used in Capnp builds uses newer CMake
-    # features. Since most compilations are not capnp builds, only require the
-    # new version for those builds.
-    if(CMAKE_VERSION VERSION_LESS "3.23.0")
-      message(SEND_ERROR
-          "Building CIRCT with Cap'nProto features enabled uses CMake features "
-          "that require at least version 3.23. Recommend upgrading to 3.23+ "
-          "for full support. Detected current version: ${CMAKE_VERSION}. If you "
-          "do not need ESI cosim features, you can use the CAPNP_DISABLE option.")
-    endif()
-  endif()
-endif()
-
-#-------------------------------------------------------------------------------
 # OR-Tools Configuration
 #-------------------------------------------------------------------------------
 
@@ -559,7 +529,9 @@ endif()
 
 add_subdirectory(include/circt)
 add_subdirectory(lib)
-add_subdirectory(tools)
+if(CIRCT_INCLUDE_TOOLS)
+  add_subdirectory(tools)
+endif()
 if (CIRCT_GTEST_AVAILABLE)
   add_subdirectory(unittests)
 endif()

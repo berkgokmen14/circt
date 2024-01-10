@@ -2,8 +2,11 @@ set(LLVM_LINK_COMPONENTS
   Support
 )
 
-add_llvm_tool(firtool
+add_circt_tool(firtool
   firtool.cpp
+
+  DEPENDS
+  SUPPORT_PLUGINS
 )
 llvm_update_compile_flags(firtool)
 target_link_libraries(firtool PRIVATE
@@ -11,10 +14,12 @@ target_link_libraries(firtool PRIVATE
   CIRCTImportFIRFile
   CIRCTFIRRTLTransforms
   CIRCTHWTransforms
+  CIRCTOMTransforms
   CIRCTSeq
   CIRCTSVTransforms
   CIRCTTransforms
   CIRCTFirtool
+  CIRCTTargetDebugInfo
 
   MLIRBytecodeReader
   MLIRBytecodeWriter
@@ -25,3 +30,5 @@ target_link_libraries(firtool PRIVATE
   MLIRFuncDialect
   MLIRTransforms
 )
+
+export_executable_symbols_for_plugins(firtool)

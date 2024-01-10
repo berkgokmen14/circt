@@ -72,6 +72,17 @@ PortConversionBuilder::build(hw::PortInfo port) {
   return {std::make_unique<UntouchedPortConversion>(converter, port)};
 }
 
+PortConverterImpl::PortConverterImpl(igraph::InstanceGraphNode *moduleNode)
+    : moduleNode(moduleNode), b(moduleNode->getModule()->getContext()) {
+  mod = dyn_cast<hw::HWMutableModuleLike>(*moduleNode->getModule());
+  assert(mod && "PortConverter only works on HWMutableModuleLike");
+
+  if (mod->getNumRegions() == 1 && mod->getRegion(0).hasOneBlock()) {
+    body = &mod->getRegion(0).front();
+    terminator = body->getTerminator();
+  }
+}
+
 Value PortConverterImpl::createNewInput(PortInfo origPort, const Twine &suffix,
                                         Type type, PortInfo &newPort) {
   newPort = PortInfo{
@@ -98,11 +109,14 @@ void PortConverterImpl::createNewOutput(PortInfo origPort, const Twine &suffix,
 
   if (!body)
     return;
-  newOutputValues.push_back(output);
+
+  OpBuilder::InsertionGuard g(b);
+  b.setInsertionPointToStart(body);
+  terminator->insertOperands(terminator->getNumOperands(), output);
 }
 
 LogicalResult PortConverterImpl::run() {
-  ModulePortInfo ports = mod.getPorts();
+  ModulePortInfo ports(mod.getPortList());
 
   bool foundLoweredPorts = false;
 
@@ -125,10 +139,7 @@ LogicalResult PortConverterImpl::run() {
   };
 
   // Dispatch the port conversion builder on the I/O of the module.
-  for (PortInfo port : ports.inputs)
-    if (failed(createPortLowering(port)))
-      return failure();
-  for (PortInfo port : ports.outputs)
+  for (PortInfo port : ports)
     if (failed(createPortLowering(port)))
       return failure();
 
@@ -148,30 +159,30 @@ LogicalResult PortConverterImpl::run() {
     lowering->lowerPort();
 
   // Set up vectors to erase _all_ the ports. It's easier to rebuild everything
-  // (including the non-ESI ports) than reason about interleaving the newly
-  // lowered ESI ports with the non-ESI ports. Also, the 'modifyPorts' method
-  // ends up rebuilding the port lists anyway, so this isn't nearly as expensive
-  // as it may seem.
-  SmallVector<unsigned> inputsToErase(mod.getNumInputs());
+  // than reason about interleaving the newly lowered ports with the non lowered
+  // ports. Also, the 'modifyPorts' method ends up rebuilding the port lists
+  // anyway, so this isn't nearly as expensive as it may seem.
+  SmallVector<unsigned> inputsToErase(mod.getNumInputPorts());
   std::iota(inputsToErase.begin(), inputsToErase.end(), 0);
-  SmallVector<unsigned> outputsToErase(mod.getNumOutputs());
+  SmallVector<unsigned> outputsToErase(mod.getNumOutputPorts());
   std::iota(outputsToErase.begin(), outputsToErase.end(), 0);
 
   mod.modifyPorts(newInputs, newOutputs, inputsToErase, outputsToErase);
 
   if (body) {
-    // We should only erase the original arguments. New ones were appended with
-    // the `createInput` method call.
+    // We should only erase the original arguments. New ones were appended
+    // with the `createInput` method call.
     body->eraseArguments([&ports](BlockArgument arg) {
-      return arg.getArgNumber() < ports.inputs.size();
+      return arg.getArgNumber() < ports.sizeInputs();
     });
-    // Set the new operands, overwriting the old ones.
-    body->getTerminator()->setOperands(newOutputValues);
+
+    // And erase the first ports.sizeOutputs operands from the terminator.
+    terminator->eraseOperands(0, ports.sizeOutputs());
   }
 
   // Rewrite instances pointing to this module.
   for (auto *instance : moduleNode->uses()) {
-    hw::HWInstanceLike instanceLike = instance->getInstance();
+    auto instanceLike = instance->getInstance<hw::HWInstanceLike>();
     if (!instanceLike)
       continue;
     hw::InstanceOp hwInstance = dyn_cast_or_null<hw::InstanceOp>(*instanceLike);
@@ -187,23 +198,22 @@ LogicalResult PortConverterImpl::run() {
   // Memory optimization -- we don't need these anymore.
   newInputs.clear();
   newOutputs.clear();
-  newOutputValues.clear();
   return success();
 }
 
 void PortConverterImpl::updateInstance(hw::InstanceOp inst) {
   ImplicitLocOpBuilder b(inst.getLoc(), inst);
   BackedgeBuilder beb(b, inst.getLoc());
-  ModulePortInfo ports = mod.getPorts();
+  ModulePortInfo ports(mod.getPortList());
 
   // Create backedges for the future instance results so the signal mappers can
   // use the future results as values.
   SmallVector<Backedge> newResults;
-  for (PortInfo outputPort : ports.outputs)
+  for (PortInfo outputPort : ports.getOutputs())
     newResults.push_back(beb.get(outputPort.type));
 
   // Map the operands.
-  SmallVector<Value> newOperands(ports.inputs.size(), {});
+  SmallVector<Value> newOperands(ports.sizeInputs(), {});
   for (size_t oldOpIdx = 0, e = inst.getNumOperands(); oldOpIdx < e; ++oldOpIdx)
     loweredInputs[oldOpIdx]->mapInputSignals(
         b, inst, inst->getOperand(oldOpIdx), newOperands, newResults);

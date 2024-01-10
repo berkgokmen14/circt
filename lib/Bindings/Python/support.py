@@ -86,7 +86,7 @@ def type_to_pytype(t) -> ir.Type:
   if t.__class__ != ir.Type:
     return t
 
-  from .dialects import esi, hw
+  from .dialects import esi, hw, seq
   try:
     return ir.IntegerType(t)
   except ValueError:
@@ -112,7 +112,15 @@ def type_to_pytype(t) -> ir.Type:
   except ValueError:
     pass
   try:
+    return seq.ClockType(t)
+  except ValueError:
+    pass
+  try:
     return esi.ChannelType(t)
+  except ValueError:
+    pass
+  try:
+    return esi.BundleType(t)
   except ValueError:
     pass
 
@@ -141,6 +149,10 @@ def attribute_to_var(attr):
     pass
   try:
     return ir.IntegerAttr(attr).value
+  except ValueError:
+    pass
+  try:
+    return ir.StringAttr(hw.InnerSymAttr(attr).symName).value
   except ValueError:
     pass
   try:
@@ -176,6 +188,18 @@ def attribute_to_var(attr):
     pass
   try:
     return list(map(attribute_to_var, om.ListAttr(attr)))
+  except ValueError:
+    pass
+  try:
+    return {name: attribute_to_var(value) for name, value in om.MapAttr(attr)}
+  except ValueError:
+    pass
+  try:
+    return attribute_to_var(om.OMIntegerAttr(attr).integer)
+  except ValueError:
+    pass
+  try:
+    return om.PathAttr(attr).value
   except ValueError:
     pass
 

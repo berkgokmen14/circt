@@ -79,7 +79,7 @@ public:
     return getOperation().getConditionValue();
   }
 
-  std::optional<uint64_t> getBound() override {
+  std::optional<int64_t> getBound() override {
     return getOperation().getBound();
   }
 
@@ -306,8 +306,8 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
                              calyx::AllocLoweringInterface,
                              /// standard arithmetic
                              AddIOp, SubIOp, CmpIOp, ShLIOp, ShRUIOp, ShRSIOp,
-                             AndIOp, XOrIOp, OrIOp, ExtUIOp, TruncIOp, MulIOp,
-                             DivUIOp, RemUIOp, RemSIOp, IndexCastOp,
+                             AndIOp, XOrIOp, OrIOp, ExtUIOp, ExtSIOp, TruncIOp,
+                             MulIOp, DivUIOp, RemUIOp, RemSIOp, IndexCastOp,
                              /// loop schedule
                              LoopInterface, LoopScheduleTerminatorOp>(
                   [&](auto op) { return buildOp(rewriter, op).succeeded(); })
@@ -317,7 +317,9 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
                     return true;
                   })
               .Default([&](auto op) {
-                op->emitError() << "Unhandled operation during BuildOpGroups()";
+                op->dump();
+                op->emitError()
+                    << "Unhandled operation during BuildOpGroups() test " << op;
                 return false;
               });
 
@@ -350,6 +352,7 @@ private:
   LogicalResult buildOp(PatternRewriter &rewriter, CmpIOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, TruncIOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, ExtUIOp op) const;
+  LogicalResult buildOp(PatternRewriter &rewriter, ExtSIOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, ReturnOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, IndexCastOp op) const;
   LogicalResult buildOp(PatternRewriter &rewriter, memref::AllocOp op) const;
@@ -1088,6 +1091,12 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
 }
 
 LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                                     ExtSIOp op) const {
+  return buildLibraryOp<calyx::CombGroupOp, calyx::ExtSILibOp>(
+      rewriter, op, {op.getOperand().getType()}, {op.getType()});
+}
+
+LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      IndexCastOp op) const {
   Type sourceType = calyx::convIndexType(rewriter, op.getOperand().getType());
   Type targetType = calyx::convIndexType(rewriter, op.getResult().getType());
@@ -1411,10 +1420,14 @@ class BuildIntermediateRegs : public calyx::FuncOpPartialLoweringPattern {
 
         if (!isa<LoopSchedulePipelineOp>(phase->getParentOp()) &&
             isa<PhaseInterface>(value.getDefiningOp())) {
-          auto reg = regMap[value];
-          getState<ComponentLoweringState>().addPhaseReg(phase, reg, i);
-          regMap[phaseResult] = reg;
-          continue;
+          // It won't be in the regMap if the value was loaded from memory and
+          // not re-registered yet
+          if (regMap.contains(value)) {
+            auto reg = regMap[value];
+            getState<ComponentLoweringState>().addPhaseReg(phase, reg, i);
+            regMap[phaseResult] = reg;
+            continue;
+          }
         }
 
         // If value is produced by a sequential op just pass it
@@ -1726,6 +1739,29 @@ class BuildPhaseGroups : public calyx::FuncOpPartialLoweringPattern {
                                            getComponent(), bitwidth, 1);
           rewriter.create<calyx::AssignOp>(stage.getLoc(),
                                            counterAdd.getRight(), one);
+
+          // II counter init group
+          std::string groupName =
+              getState<ComponentLoweringState>().getUniqueName(
+                  "ii_" + std::to_string(pipeline.getII()) + "_counter_init");
+          auto iiGroup = calyx::createStaticGroup(rewriter, getComponent(),
+                                                  phase.getLoc(), groupName, 1);
+          getState<ComponentLoweringState>().addLoopInitGroup(
+              LoopWrapper(pipeline), iiGroup);
+          {
+            PatternRewriter::InsertionGuard insertGuard(rewriter);
+            rewriter.setInsertionPointToEnd(iiGroup.getBodyBlock());
+
+            // Set II counter to zero before loop runs
+            auto zero = calyx::createConstant(stage.getLoc(), rewriter,
+                                              getComponent(), bitwidth, 0);
+            auto oneI1 = calyx::createConstant(stage.getLoc(), rewriter,
+                                               getComponent(), 1, 1);
+            rewriter.create<calyx::AssignOp>(stage.getLoc(), counterReg.getIn(),
+                                             zero);
+            rewriter.create<calyx::AssignOp>(stage.getLoc(),
+                                             counterReg.getWriteEn(), oneI1);
+          }
 
           // Check if counter = II - 1
           auto counterEq =
@@ -2335,9 +2371,9 @@ public:
     target.addIllegalDialect<FuncDialect>();
     target.addIllegalDialect<ArithDialect>();
     target.addLegalOp<AddIOp, SubIOp, CmpIOp, ShLIOp, ShRUIOp, ShRSIOp, AndIOp,
-                      XOrIOp, OrIOp, ExtUIOp, TruncIOp, CondBranchOp, BranchOp,
-                      MulIOp, DivUIOp, DivSIOp, RemUIOp, RemSIOp, DivSIOp,
-                      ReturnOp, arith::ConstantOp, IndexCastOp, FuncOp,
+                      XOrIOp, OrIOp, ExtUIOp, ExtSIOp, TruncIOp, CondBranchOp,
+                      BranchOp, MulIOp, DivUIOp, DivSIOp, RemUIOp, RemSIOp,
+                      DivSIOp, ReturnOp, arith::ConstantOp, IndexCastOp, FuncOp,
                       ExtSIOp>();
 
     RewritePatternSet legalizePatterns(&getContext());

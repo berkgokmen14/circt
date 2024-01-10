@@ -81,4 +81,57 @@ def OMListAttr : AttrDef<OMDialect, "List", [TypedAttrInterface]> {
   }];
 }
 
+def MapAttr : AttrDef<OMDialect, "Map", [TypedAttrInterface]> {
+  let summary = "An attribute that represents a string map";
+
+  let mnemonic = "map";
+
+  let parameters = (ins
+    "mlir::Type": $valueType,
+    "mlir::DictionaryAttr":$elements
+  );
+
+  // TODO: Use custom assembly format to infer a type from elements.
+  let assemblyFormat = [{
+    `<` $valueType `,` $elements `>`
+  }];
+
+  let genVerifyDecl = 1;
+
+  let extraClassDeclaration = [{
+    mlir::Type getType();
+  }];
+}
+
+def OMPathAttr : AttrDef<OMDialect, "Path"> {
+  let summary = "An attribute that represents an instance path";
+
+  let mnemonic = "path";
+
+  let parameters = (ins ArrayRefParameter<"::circt::om::PathElement">:$path);
+
+  let genVerifyDecl = 1;
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    auto begin() const { return getPath().begin(); }
+    auto end() const { return getPath().end(); }
+  }];
+}
+
+def OMIntegerAttr : AttrDef<OMDialect, "Integer", [TypedAttrInterface]> {
+  let summary = "An attribute that represents an arbitrary integer";
+
+  let mnemonic = "integer";
+
+  let parameters = (ins "mlir::IntegerAttr":$value);
+
+  let assemblyFormat = " `<` $value `>` ";
+
+  let extraClassDeclaration = [{
+    mlir::Type getType();
+  }];
+}
+
 #endif // CIRCT_DIALECT_OM_OMATTRIBUTES_TD

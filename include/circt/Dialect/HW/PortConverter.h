@@ -55,21 +55,11 @@ public:
                        Value output, hw::PortInfo &newPort);
 
 protected:
-  PortConverterImpl(hw::InstanceGraphNode *moduleNode)
-      : moduleNode(moduleNode) {
-    mod = dyn_cast<hw::HWMutableModuleLike>(*moduleNode->getModule());
-    assert(mod && "PortConverter only works on HWMutableModuleLike");
-
-    if (mod->getNumRegions() == 1 && mod->getRegion(0).hasOneBlock())
-      body = &mod->getRegion(0).front();
-  }
+  PortConverterImpl(igraph::InstanceGraphNode *moduleNode);
 
   std::unique_ptr<PortConversionBuilder> ssb;
 
 private:
-  /// Materializes/commits all of the recorded port changes to the module.
-  void materializeChanges();
-
   /// Updates an instance of the module. This is called after the module has
   /// been updated. It will update the instance to match the new port
   void updateInstance(hw::InstanceOp);
@@ -78,8 +68,9 @@ private:
   // non-null.
   Block *body = nullptr;
 
-  hw::InstanceGraphNode *moduleNode;
+  igraph::InstanceGraphNode *moduleNode;
   hw::HWMutableModuleLike mod;
+  OpBuilder b;
 
   // Keep around a reference to the specific port conversion classes to
   // facilitate updating the instance ops. Indexed by the original port
@@ -93,7 +84,11 @@ private:
   // this around for later use.
   SmallVector<std::pair<unsigned, hw::PortInfo>, 0> newInputs;
   SmallVector<std::pair<unsigned, hw::PortInfo>, 0> newOutputs;
-  SmallVector<Value, 0> newOutputValues;
+
+  // Maintain a handle to the terminator of the body, if any. This will get
+  // continuously updated during port conversion whenever a new output is added
+  // to the module.
+  Operation *terminator = nullptr;
 };
 
 /// Base class for the port conversion of a particular port. Abstracts the
@@ -173,9 +168,11 @@ public:
 template <typename PortConversionBuilderImpl>
 class PortConverter : public PortConverterImpl {
 public:
-  PortConverter(hw::InstanceGraph &graph, hw::HWMutableModuleLike mod)
+  template <typename... Args>
+  PortConverter(hw::InstanceGraph &graph, hw::HWMutableModuleLike mod,
+                Args &&...args)
       : PortConverterImpl(graph.lookup(cast<hw::HWModuleLike>(*mod))) {
-    ssb = std::make_unique<PortConversionBuilderImpl>(*this);
+    ssb = std::make_unique<PortConversionBuilderImpl>(*this, args...);
   }
 };
 

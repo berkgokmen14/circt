@@ -17,8 +17,13 @@ namespace mlir {
 class Pass;
 } // namespace mlir
 
+#include "circt/Dialect/Arc/ArcPassesEnums.h.inc"
+
 namespace circt {
 namespace arc {
+
+#define GEN_PASS_DECL
+#include "circt/Dialect/Arc/ArcPasses.h.inc"
 
 std::unique_ptr<mlir::Pass>
 createAddTapsPass(std::optional<bool> tapPorts = {},
@@ -36,9 +41,12 @@ std::unique_ptr<mlir::Pass> createInlineModulesPass();
 std::unique_ptr<mlir::Pass> createIsolateClocksPass();
 std::unique_ptr<mlir::Pass> createLatencyRetimingPass();
 std::unique_ptr<mlir::Pass> createLegalizeStateUpdatePass();
+std::unique_ptr<mlir::Pass> createLowerArcsToFuncsPass();
 std::unique_ptr<mlir::Pass> createLowerClocksToFuncsPass();
 std::unique_ptr<mlir::Pass> createLowerLUTPass();
 std::unique_ptr<mlir::Pass> createLowerStatePass();
+std::unique_ptr<mlir::Pass> createLowerVectorizationsPass(
+    LowerVectorizationsModeEnum mode = LowerVectorizationsModeEnum::Full);
 std::unique_ptr<mlir::Pass> createMakeTablesPass();
 std::unique_ptr<mlir::Pass> createMuxToControlFlowPass();
 std::unique_ptr<mlir::Pass>

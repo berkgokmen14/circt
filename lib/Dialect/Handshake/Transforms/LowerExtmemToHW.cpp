@@ -157,12 +157,14 @@ LogicalResult HandshakeLowerExtmemToHWPass::wrapESI(
   llvm::transform(argReplacements, std::back_inserter(argReplacementsIdxs),
                   [](auto &pair) { return pair.first; });
   for (auto i : llvm::reverse(argReplacementsIdxs))
-    wrapperModPortInfo.inputs.erase(wrapperModPortInfo.inputs.begin() + i);
+    wrapperModPortInfo.eraseInput(i);
   auto wrapperMod = b.create<hw::HWModuleOp>(
       loc, StringAttr::get(ctx, func.getName() + "_esi_wrapper"),
       wrapperModPortInfo);
-  Value clk = wrapperMod.getArgument(wrapperMod.getNumArguments() - 2);
-  Value rst = wrapperMod.getArgument(wrapperMod.getNumArguments() - 1);
+  Value clk = wrapperMod.getBodyBlock()->getArgument(
+      wrapperMod.getBodyBlock()->getNumArguments() - 2);
+  Value rst = wrapperMod.getBodyBlock()->getArgument(
+      wrapperMod.getBodyBlock()->getNumArguments() - 1);
   SmallVector<Value> clkRes = {clk, rst};
 
   b.setInsertionPointToStart(wrapperMod.getBodyBlock());
@@ -171,12 +173,12 @@ LogicalResult HandshakeLowerExtmemToHWPass::wrapESI(
   // Create backedges for the results of the external module. These will be
   // replaced by the service instance requests if associated with a memory.
   llvm::SmallVector<Backedge> backedges;
-  for (auto resType : extMod.getResultTypes())
+  for (auto resType : extMod.getOutputTypes())
     backedges.push_back(bb.get(resType));
 
   // Maintain which index we're currently at in the lowered handshake module's
   // return.
-  unsigned resIdx = origPorts.outputs.size();
+  unsigned resIdx = origPorts.sizeOutputs();
 
   // Maintain the arguments which each memory will add to the inner module
   // instance.
@@ -187,7 +189,7 @@ LogicalResult HandshakeLowerExtmemToHWPass::wrapESI(
     b.setInsertionPoint(wrapperMod);
     // Create a memory service declaration for each memref argument that was
     // served.
-    auto origPortInfo = origPorts.inputs[i];
+    auto origPortInfo = origPorts.atInput(i);
     auto memrefShape = memType.memRefType.getShape();
     auto dataType = memType.memRefType.getElementType();
     assert(memrefShape.size() == 1 && "Only 1D memrefs are supported");
@@ -195,6 +197,8 @@ LogicalResult HandshakeLowerExtmemToHWPass::wrapESI(
     auto memServiceDecl = b.create<esi::RandomAccessMemoryDeclOp>(
         loc, origPortInfo.name, TypeAttr::get(dataType),
         b.getI64IntegerAttr(memrefSize));
+    esi::ServicePortInfo writePortInfo = memServiceDecl.writePortInfo();
+    esi::ServicePortInfo readPortInfo = memServiceDecl.readPortInfo();
 
     SmallVector<Value> instanceArgsFromThisMem;
 
@@ -203,24 +207,28 @@ LogicalResult HandshakeLowerExtmemToHWPass::wrapESI(
     b.setInsertionPointToStart(wrapperMod.getBodyBlock());
 
     // Load ports:
-    auto loadServicePort = hw::InnerRefAttr::get(memServiceDecl.getNameAttr(),
-                                                 b.getStringAttr("read"));
     for (unsigned i = 0; i < memType.loadPorts; ++i) {
-      auto loadReq = b.create<esi::RequestInOutChannelOp>(
-          loc, handshake::esiWrapper(dataType), loadServicePort,
-          backedges[resIdx], b.getArrayAttr({}));
-      instanceArgsFromThisMem.push_back(loadReq);
+      auto reqPack = b.create<esi::PackBundleOp>(loc, readPortInfo.type,
+                                                 (Value)backedges[resIdx]);
+      b.create<esi::RequestToServerConnectionOp>(
+          loc, readPortInfo.port, reqPack.getBundle(),
+          esi::AppIDAttr::get(ctx, b.getStringAttr("load"), {}));
+      instanceArgsFromThisMem.push_back(
+          reqPack.getFromChannels()
+              [esi::RandomAccessMemoryDeclOp::RespDirChannelIdx]);
       ++resIdx;
     }
 
     // Store ports:
-    auto storeServicePort = hw::InnerRefAttr::get(memServiceDecl.getNameAttr(),
-                                                  b.getStringAttr("write"));
     for (unsigned i = 0; i < memType.storePorts; ++i) {
-      auto storeReq = b.create<esi::RequestInOutChannelOp>(
-          loc, handshake::esiWrapper(b.getIntegerType(0)), storeServicePort,
-          backedges[resIdx], b.getArrayAttr({}));
-      instanceArgsFromThisMem.push_back(storeReq);
+      auto reqPack = b.create<esi::PackBundleOp>(loc, writePortInfo.type,
+                                                 (Value)backedges[resIdx]);
+      b.create<esi::RequestToServerConnectionOp>(
+          loc, writePortInfo.port, reqPack.getBundle(),
+          esi::AppIDAttr::get(ctx, b.getStringAttr("store"), {}));
+      instanceArgsFromThisMem.push_back(
+          reqPack.getFromChannels()
+              [esi::RandomAccessMemoryDeclOp::RespDirChannelIdx]);
       ++resIdx;
     }
 
@@ -248,14 +256,17 @@ LogicalResult HandshakeLowerExtmemToHWPass::wrapESI(
       // Add the argument from the wrapper mod. This is maintained by its own
       // counter (memref arguments are removed, so if there was an argument at
       // this point, it needs to come from the wrapper module).
-      instanceArgs.push_back(wrapperMod.getArgument(wrapperArgIdx++));
+      instanceArgs.push_back(
+          wrapperMod.getBodyBlock()->getArgument(wrapperArgIdx++));
     }
   }
 
   // Add any missing arguments from the wrapper module (this will be clock and
   // reset)
-  for (; wrapperArgIdx < wrapperMod.getNumArguments(); ++wrapperArgIdx)
-    instanceArgs.push_back(wrapperMod.getArgument(wrapperArgIdx));
+  for (; wrapperArgIdx < wrapperMod.getBodyBlock()->getNumArguments();
+       ++wrapperArgIdx)
+    instanceArgs.push_back(
+        wrapperMod.getBodyBlock()->getArgument(wrapperArgIdx));
 
   // Instantiate the inner module.
   auto instance =
@@ -270,8 +281,9 @@ LogicalResult HandshakeLowerExtmemToHWPass::wrapESI(
   auto outputOp =
       cast<hw::OutputOp>(wrapperMod.getBodyBlock()->getTerminator());
   b.setInsertionPoint(outputOp);
-  b.create<hw::OutputOp>(outputOp.getLoc(), instance.getResults().take_front(
-                                                wrapperMod.getNumResults()));
+  b.create<hw::OutputOp>(
+      outputOp.getLoc(),
+      instance.getResults().take_front(wrapperMod.getNumOutputPorts()));
   outputOp.erase();
 
   return success();

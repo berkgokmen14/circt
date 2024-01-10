@@ -1,4 +1,4 @@
-//===-- CombOps.td - Entry point for CombOps bindings ------*- tablegen -*-===//
+//===- CombOps.td - Entry point for Comb bindings ----------*- tablegen -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -9,7 +9,6 @@
 #ifndef BINDINGS_PYTHON_COMB_OPS
 #define BINDINGS_PYTHON_COMB_OPS
 
-include "mlir/Bindings/Python/Attributes.td"
 include "circt/Dialect/Comb/Comb.td"
 
 #endif

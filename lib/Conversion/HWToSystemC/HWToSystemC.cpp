@@ -45,12 +45,11 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
     if (!module.getParameters().empty())
       return emitError(module->getLoc(), "module parameters not supported yet");
 
-    if (llvm::any_of(module.getAllPorts(),
-                     [](auto port) { return port.isInOut(); }))
+    auto ports = module.getPortList();
+    if (llvm::any_of(ports, [](auto &port) { return port.isInOut(); }))
       return emitError(module->getLoc(), "inout arguments not supported yet");
 
     // Create the SystemC module.
-    SmallVector<PortInfo> ports = module.getAllPorts();
     for (size_t i = 0; i < ports.size(); ++i)
       ports[i].type = typeConverter->convertType(ports[i].type);
 
@@ -59,16 +58,7 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
     auto *outputOp = module.getBodyBlock()->getTerminator();
     scModule.setVisibility(module.getVisibility());
 
-    SmallVector<Attribute> portAttrs;
-    if (auto argAttrs = module.getAllArgAttrs())
-      portAttrs.append(argAttrs.begin(), argAttrs.end());
-    else
-      portAttrs.append(module.getNumInputs(), Attribute());
-    if (auto resultAttrs = module.getAllResultAttrs())
-      portAttrs.append(resultAttrs.begin(), resultAttrs.end());
-    else
-      portAttrs.append(module.getNumOutputs(), Attribute());
-
+    auto portAttrs = module.getAllPortAttrs();
     scModule.setAllArgAttrs(portAttrs);
 
     // Create a systemc.func operation inside the module after the ctor.
@@ -101,13 +91,14 @@ struct ConvertHWModule : public OpConversionPattern<HWModuleOp> {
     // Move the block arguments of the systemc.func (that we got from the
     // hw.module) to the systemc.module
     rewriter.setInsertionPointToStart(scFunc.getBodyBlock());
+    auto portsLocal = module.getPortList();
     for (size_t i = 0, e = scFunc.getRegion().getNumArguments(); i < e; ++i) {
       auto inputRead =
           rewriter
               .create<SignalReadOp>(scFunc.getLoc(), scModule.getArgument(i))
               .getResult();
       auto converted = typeConverter->materializeSourceConversion(
-          rewriter, scModule.getLoc(), module.getAllPorts()[i].type, inputRead);
+          rewriter, scModule.getLoc(), portsLocal[i].type, inputRead);
       scFuncBody.getArgument(0).replaceAllUsesWith(converted);
       scFuncBody.eraseArgument(0);
     }

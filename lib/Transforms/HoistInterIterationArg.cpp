@@ -68,11 +68,11 @@ struct HoistInterIterationArg
             // Create coalesced for loop with new upper bound and copy child
             // iter operands
             builder.setInsertionPoint(forOp);
-            auto newForOp =
-                builder.create<AffineForOp>(forOp.getLoc(), 0, newForBound, 1,
-                                            childForOp.getIterOperands());
+            auto newForOp = builder.create<AffineForOp>(
+                forOp.getLoc(), 0, newForBound, 1, childForOp.getInits());
 
-            builder.setInsertionPointToStart(&newForOp.getLoopBody().front());
+            builder.setInsertionPointToStart(
+                &newForOp.getLoopRegions().front()->front());
 
             // Create a set that does dim % child for bound
             auto resetSet =
@@ -125,10 +125,13 @@ struct HoistInterIterationArg
             // If an operation inside forOp is used in the childForOp, then move
             // that operation to outside the reset affineIf operation
             llvm::SmallVector<Operation *> forBodyOps;
-            for (auto &op : forOp.getLoopBody().getOps()) {
-              forBodyOps.push_back(&op);
+            for (auto *region : forOp.getLoopRegions()) {
+              for (auto &op : region->getOps()) {
+                forBodyOps.push_back(&op);
+              }
             }
             for (auto *op : forBodyOps) {
+              op->dump();
               if (op->isUsedOutsideOfBlock(forOp.getBody())) {
                 op->moveBefore(affineIf);
               }
@@ -138,7 +141,7 @@ struct HoistInterIterationArg
             rewriter.mergeBlocks(forOp.getBody(), &(ifRegion.front()));
 
             // Create yield reset for AffineIf
-            mlir::ValueRange yieldOperands(childForOp.getIterOperands());
+            mlir::ValueRange yieldOperands(childForOp.getInits());
             builder.setInsertionPointToEnd(&ifRegion.front());
             builder.create<AffineYieldOp>(newForOp.getLoc(), yieldOperands);
             // Create yield iter arg for AffineIf
